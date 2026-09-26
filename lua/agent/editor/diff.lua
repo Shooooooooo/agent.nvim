@@ -530,8 +530,9 @@ local function build_layout(d)
   local rel = vim.fn.fnamemodify(d.abs, ':~:.')
   local label = d.title or rel
   vim.wo[d.orig_win].winbar = winbar_escape(' original: ' .. rel .. (d.existed and '' or ' (new file)'))
-  vim.wo[d.prop_win].winbar = winbar_escape(' proposed' .. (d.editable and '' or ' (read-only)') .. ': ' .. label)
-    .. '%=' .. winbar_escape(table.concat(hints, '  ') .. ' ')
+  -- In a narrow window the label is truncated (%<), not the accept/reject hints.
+  vim.wo[d.prop_win].winbar = winbar_escape(' proposed' .. (d.editable and '' or ' (read-only)') .. ': ')
+    .. '%<' .. winbar_escape(label) .. ' %=' .. winbar_escape(table.concat(hints, '  ') .. ' ')
 
   if d.focus then
     local m = d.prev_mode:sub(1, 1)

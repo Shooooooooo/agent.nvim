@@ -9,6 +9,11 @@
 //   GET /v1/models, POST /v1/messages/count_tokens, HEAD/GET anything else -> harmless answers
 //
 // plan.json: { "trigger": "PLEASE_EDIT", "steps": [{ "tool": "<regex>", "input": {...} }, ...], "final": "Done." }
+// Optional pacing keys (used by demo/plan.json; the e2e plans leave them out and get instant answers):
+//   step.text          a text block streamed before the step's tool call
+//   step.delay_ms      wait before answering that step (default: plan.delay_ms, else 0)
+//   plan.final_delay_ms  wait before the final answer (default: plan.delay_ms, else 0)
+//   plan.chunk_ms      stream text in word-sized chunks, this many ms apart (default 0: one chunk)
 // A request is part of the scripted turn when some user text contains the trigger. The next step is
 // the number of tool results in the conversation that answer OUR earlier tool calls (ids with an
 // e2e prefix), so synthetic tool results an agent adds itself (e.g. Claude reading an @-mentioned
@@ -22,6 +27,9 @@ const [planFile, logFile] = process.argv.slice(2);
 const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
 const log = (entry) => fs.appendFileSync(logFile, JSON.stringify({ t: new Date().toISOString(), ...entry }) + '\n');
 let counter = 0;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const delayOf = (v) => (typeof v === 'number' ? v : typeof plan.delay_ms === 'number' ? plan.delay_ms : 0);
 
 const textOf = (content) => {
   if (typeof content === 'string') return content;
@@ -62,39 +70,49 @@ function decide(api, body) {
   const names = toolNames(api, body);
   const p = progress(api, body);
   if (!p.triggered || names.length === 0) return { text: 'OK', why: 'side request' };
-  if (p.step >= plan.steps.length) return { text: plan.final || 'Done.', step: p.step, results: p.results };
+  if (p.step >= plan.steps.length) {
+    return { text: plan.final || 'Done.', step: p.step, results: p.results, delay: delayOf(plan.final_delay_ms) };
+  }
   const want = plan.steps[p.step];
   const re = new RegExp(want.tool);
   const name = names.find((n) => re.test(n));
   if (!name) {
     return { text: 'OK', why: `missing tool ${want.tool}`, step: p.step, tools: names };
   }
-  return { tool: { name, input: want.input }, step: p.step, results: p.results };
+  return { tool: { name, input: want.input }, text: want.text, step: p.step, results: p.results, delay: delayOf(want.delay_ms) };
 }
 
-function anthropic(body, res, d) {
+// Text deltas: the whole text at once, or word-sized chunks when plan.chunk_ms is set.
+const chunksOf = (text) => (plan.chunk_ms > 0 ? text.match(/\S+\s*|\s+/g) || [text] : [text]);
+
+async function anthropic(body, res, d) {
   const id = 'msg_e2e_' + counter;
   const model = body.model || 'claude-fake';
   const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
-  const block = d.tool
-    ? { type: 'tool_use', id: 'toolu_e2e_' + counter, name: d.tool.name, input: d.tool.input }
-    : { type: 'text', text: d.text };
+  const blocks = [];
+  if (d.text) blocks.push({ type: 'text', text: d.text });
+  if (d.tool) blocks.push({ type: 'tool_use', id: 'toolu_e2e_' + counter, name: d.tool.name, input: d.tool.input });
   const stop = d.tool ? 'tool_use' : 'end_turn';
   if (!body.stream) {
     res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify({ id, type: 'message', role: 'assistant', model, content: [block], stop_reason: stop, stop_sequence: null, usage }));
+    return res.end(JSON.stringify({ id, type: 'message', role: 'assistant', model, content: blocks, stop_reason: stop, stop_sequence: null, usage }));
   }
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   const ev = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   ev('message_start', { type: 'message_start', message: { id, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { ...usage, output_tokens: 1 } } });
-  if (d.tool) {
-    ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} } });
-    ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(d.tool.input) } });
-  } else {
-    ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-    ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: d.text } });
+  for (const [index, block] of blocks.entries()) {
+    if (block.type === 'tool_use') {
+      ev('content_block_start', { type: 'content_block_start', index, content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} } });
+      ev('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } });
+    } else {
+      ev('content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+      for (const [i, chunk] of chunksOf(block.text).entries()) {
+        if (i > 0) await sleep(plan.chunk_ms);
+        ev('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: chunk } });
+      }
+    }
+    ev('content_block_stop', { type: 'content_block_stop', index });
   }
-  ev('content_block_stop', { type: 'content_block_stop', index: 0 });
   ev('message_delta', { type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 5 } });
   ev('message_stop', { type: 'message_stop' });
   res.end();
@@ -110,12 +128,12 @@ function openai(body, res, d) {
   const finish = d.tool ? 'tool_calls' : 'stop';
   if (!body.stream) {
     res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify({ id, object: 'chat.completion', created: 1, model, choices: [{ index: 0, message: { role: 'assistant', content: d.tool ? null : d.text, tool_calls: toolCalls }, finish_reason: finish }], usage }));
+    return res.end(JSON.stringify({ id, object: 'chat.completion', created: 1, model, choices: [{ index: 0, message: { role: 'assistant', content: d.text ?? null, tool_calls: toolCalls }, finish_reason: finish }], usage }));
   }
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   const chunk = (delta, finishReason, extra) =>
     res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 1, model, choices: [{ index: 0, delta, finish_reason: finishReason }], ...extra })}\n\n`);
-  chunk(d.tool ? { role: 'assistant', content: null, tool_calls: toolCalls } : { role: 'assistant', content: d.text }, null);
+  chunk(d.tool ? { role: 'assistant', content: d.text ?? null, tool_calls: toolCalls } : { role: 'assistant', content: d.text }, null);
   chunk({}, finish, { usage });
   res.end('data: [DONE]\n\n');
 }
@@ -148,8 +166,10 @@ const server = http.createServer((req, res) => {
     const d = decide(api, body);
     log({ kind: 'REQ', api, url, model: body.model, stream: !!body.stream, nmsgs: (body.messages || []).length,
       ntools: toolNames(api, body).length, step: d.step, results: d.results, why: d.why, tools: d.tools });
-    log({ kind: 'RESP', api, step: d.step, tool: d.tool, text: d.text });
-    return api === 'openai' ? openai(body, res, d) : anthropic(body, res, d);
+    log({ kind: 'RESP', api, step: d.step, tool: d.tool, text: d.text, delay: d.delay || undefined });
+    const answer = () => (api === 'openai' ? openai(body, res, d) : anthropic(body, res, d));
+    if (d.delay > 0) setTimeout(answer, d.delay);
+    else answer();
   });
 });
 

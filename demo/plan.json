@@ -1,0 +1,35 @@
+{
+  "_comment": "Scripted model turn for demo/record.sh, served by tests/e2e/fake_model.mjs. @WORKSPACE@ is replaced with the demo workspace path.",
+  "trigger": "table.concat",
+  "delay_ms": 1200,
+  "chunk_ms": 45,
+  "steps": [
+    {
+      "tool": "^mcp__nvim__notify$",
+      "delay_ms": 2200,
+      "text": "I'll rewrite `greet` with `table.concat` and return \"Hello!\" for an empty list.",
+      "input": {
+        "message": "Rewriting M.greet(). Review the diff when it opens.",
+        "level": "info"
+      }
+    },
+    {
+      "tool": "^Read$",
+      "delay_ms": 2000,
+      "input": {
+        "file_path": "@WORKSPACE@/greet.lua"
+      }
+    },
+    {
+      "tool": "^Edit$",
+      "delay_ms": 2000,
+      "input": {
+        "file_path": "@WORKSPACE@/greet.lua",
+        "old_string": "function M.greet(names)\n  local msg = \"Hello, \"\n  for i = 1, #names do\n    msg = msg .. names[i]\n    if i < #names then\n      msg = msg .. \", \"\n    end\n  end\n  return msg .. \"!\"\nend",
+        "new_string": "function M.greet(names)\n  if #names == 0 then\n    return \"Hello!\"\n  end\n  local s = table.concat(names, \", \")\n  return \"Hello, \" .. s .. \"!\"\nend"
+      }
+    }
+  ],
+  "final": "Done. `greet` now joins the names with `table.concat`, and `greet({})` returns \"Hello!\" instead of \"Hello, !\".",
+  "final_delay_ms": 1200
+}

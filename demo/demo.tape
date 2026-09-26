@@ -1,0 +1,121 @@
+# agent.nvim README demo. Do not run this tape directly: run demo/record.sh (or `make demo`),
+# which builds the isolated environment, exports DEMO_RC and encodes the frames written here.
+#
+# Story: open Neovim on a small Lua module, start Claude Code with :Agent claude, select a
+# function and @-mention it with :AgentSend, ask for a change, watch the $NVIM controller's
+# notification, review the proposed edit in a Neovim diff and accept it with :w, then run the
+# new code. The model turn is scripted in demo/plan.json.
+
+# VHS 0.12.0 cannot encode videos (see record.sh), so it only writes the frames.
+Output frames/
+
+Require nvim
+Require claude
+
+Set Shell "bash"
+Set FontFamily "JetBrainsMono Nerd Font"
+Set FontSize 17
+# record.sh centers the frames on a 1400x800 background when it encodes them.
+Set Width 1364
+Set Height 764
+Set Padding 0
+Set Theme "Catppuccin Mocha"
+Set Framerate 25
+Set TypingSpeed 60ms
+Set CursorBlink false
+
+# Hidden setup: the isolated `nvim` function, the prompt and the working directory, then Neovim
+# on the sample project, so that the first frame (all that viewers with autoplay off see)
+# already shows the code.
+Hide
+Type@1ms 'source "$DEMO_RC"; clear'
+Enter
+Wait+Screen@10s /greeter/
+Type@1ms "nvim greet.lua"
+Enter
+Wait+Screen@20s /M\.greet/
+Sleep 500ms
+Show
+
+# 1. Neovim on the sample project.
+Sleep 2.5s
+
+# 2. Claude Code in a split on the right, connected to Neovim. The split and the terminal open
+# under Hide: VHS would otherwise catch Neovim's screen clear half way (one blank frame).
+Type ":Agent claude"
+Sleep 700ms
+Hide
+Enter
+Wait+Screen@60s /Claude Code/
+Show
+Wait+Screen@60s /In greet\.lua/
+Sleep 3s
+
+# 3. Select the function in the editor and @-mention it.
+Ctrl+\
+Ctrl+N
+Ctrl+W
+Type "h"
+Sleep 600ms
+Type "4G"
+Sleep 400ms
+Type "V"
+Down@170ms 9
+Wait+Screen@10s /10 lines selected/
+Sleep 1.5s
+Type ":AgentSend"
+Sleep 700ms
+Enter
+Wait+Screen@20s /@greet\.lua#L4-13/
+Sleep 2s
+
+# 4. Ask for the change in Claude's prompt. (Hidden: the window switch would show Neovim's
+# normal-mode cursor inside Claude's prompt for a frame.)
+Hide
+Ctrl+W
+Type "l"
+Type "i"
+Sleep 200ms
+Show
+Sleep 600ms
+Type "use table.concat and handle an empty list"
+Sleep 800ms
+Enter
+
+# 5. The model notifies through the $NVIM controller, then proposes an edit: a diff tab opens.
+Wait+Screen@60s /Review the diff/
+Wait+Screen@60s /proposed/
+Sleep 5.5s
+
+# 6. Accept the proposal with :w. Claude writes the file and the buffer reloads. The switch back
+# is hidden until both have settled: in between, Claude redraws its whole screen (and for a
+# frame still shows its permission dialog) while the editor still shows the old code.
+Type ":w"
+Sleep 700ms
+Hide
+Enter
+Wait+Screen@60s /Added \d+ lines?/
+Wait+Screen@10s /(?m)^\s*12 return M/
+Show
+Wait+Screen@60s /instead of/
+Sleep 3s
+
+# 7. The result: back in the editor, the new greet() handles the empty list.
+Ctrl+\
+Ctrl+N
+Ctrl+W
+Type "h"
+Sleep 700ms
+Type ':=require("greet").greet({})'
+Sleep 700ms
+Enter
+Wait+Screen@10s /(?m)^"Hello!"/
+Sleep 4s
+
+# Hidden teardown.
+Hide
+Ctrl+\
+Ctrl+N
+Type ":qa!"
+Enter
+Wait@20s /greeter/

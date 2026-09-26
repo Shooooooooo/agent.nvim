@@ -117,7 +117,8 @@ runs, if setup() has not been called yet.
    those lines. |:AgentAdd| mentions the whole current file.
 4. Ask the agent to change a file. When it asks for permission, a diff tab
    opens in Neovim. Accept with `:w` (or <leader>aa), reject with <leader>ad
-   or by closing the tab. See |agent-diff|.
+   or by closing the tab. See |agent-diff|. Claude Code starts in auto mode,
+   which applies most edits without asking; see |agent-claude|.
 5. Run |:Agent| again to hide the terminal. The agent keeps running.
 
 Gemini needs a one-time setup first: run `/ide enable` once inside Gemini, and
@@ -286,8 +287,10 @@ the agent is started.
     args           Extra CLI arguments, after `cmd` and `agents.<name>.args`.
     cwd            Working directory of the agent (default: Neovim's cwd).
     env            Extra environment; a false value unsets the variable.
-    mcp            Register the $NVIM controller for this launch.
-    auto_approve   Pre-approve the controller's tools for this launch.
+    mcp            Register the $NVIM controller for this launch (default:
+                   `nvim_mcp.enabled` and `agents.<name>.mcp`).
+    auto_approve   Pre-approve the controller's tools for this launch
+                   (default: `agents.<name>.auto_approve`).
     silent         Do not notify errors (they are still returned).
 >lua
     require('agent').open('claude', { args = { '--model', 'opus' } })
@@ -444,7 +447,8 @@ providers.claude.lock_dir (~/.claude/ide)
     Lock directory. Claude also finds a lock in $CLAUDE_CONFIG_DIR/ide, but
     OpenCode only reads ~/.claude/ide.
 providers.claude.notify_delay_ms (600)
-    Delay between a Claude Code connection and the first notification.
+    Delay between a Claude Code connection and the first notification
+    (Claude registers its handlers late).
 providers.claude.mention_timeout_ms (10000)
     How long a mention waits for a client that is still connecting.
 providers.copilot.lock_dir ($COPILOT_HOME/ide, else ~/.copilot/ide)
@@ -563,8 +567,17 @@ Limitations and caveats ~
   `agents.claude.mcp = false`.
 - Claude will not open a diff for a file that has unsaved changes in Neovim.
   Save (or discard) them first, or answer in the terminal.
-- Diffs appear only when Claude asks for permission (not in auto-accept
-  modes) and while Claude's diffTool setting is "auto", its default.
+- Diffs appear only when Claude asks for permission (not in its auto or
+  auto-accept modes) and while Claude's diffTool setting is "auto", its
+  default. Claude Code 2.1.283 starts in auto mode, which applies most edits
+  without asking, so no diff opens. To review edits in Neovim, start it in
+  manual mode ("default" also works, and is the name in older releases),
+  change your default mode with /config in Claude, or cycle the modes with
+  Shift+Tab: >lua
+    require('agent').setup({
+      agents = { claude = { args = { '--permission-mode', 'manual' } } },
+    })
+<
 - CLAUDE_CODE_AUTO_CONNECT_IDE=false in your environment stops Claude from
   connecting. The plugin warns about it; run /ide in Claude.
 - Claude retries a dropped connection 5 times. After that, run /ide.
@@ -602,7 +615,8 @@ Limitations ~
 - Lock files: OpenCode does not check whether a lock's process is alive, so
   a stale lock can make it dial a dead port. agent.nvim removes its own stale
   locks when the server starts. OpenCode retries forever (with a backoff up
-  to 10 seconds) and reads the locks again on every attempt.
+  to 10 seconds) and reads the locks again on every attempt, so it finds a
+  restarted server.
 
 ------------------------------------------------------------------------------
 GitHub Copilot CLI                                             *agent-copilot*
@@ -668,10 +682,10 @@ How it connects ~
 Neovim serves MCP over HTTP on 127.0.0.1:<port>/mcp and checks the
 Authorization: Bearer token and the Host and Origin headers. It writes the
 discovery file $TMPDIR/gemini/ide/gemini-ide-server-<nvim pid>-<port>.json
-(mode 0600) with ideInfo "Neovim" and a workspacePath that contains every
-Gemini launch directory. Gemini is launched with GEMINI_CLI_IDE_PID,
-GEMINI_CLI_IDE_SERVER_PORT, GEMINI_CLI_IDE_AUTH_TOKEN and
-GEMINI_CLI_IDE_WORKSPACE_PATH (the launch directory) set. These override
+(mode 0600) with ideInfo { name = "neovim", displayName = "Neovim" } and a
+workspacePath that contains every Gemini launch directory. Gemini is launched
+with GEMINI_CLI_IDE_PID, GEMINI_CLI_IDE_SERVER_PORT, GEMINI_CLI_IDE_AUTH_TOKEN
+and GEMINI_CLI_IDE_WORKSPACE_PATH (the launch directory) set. These override
 values inherited from a VS Code terminal. When the Gemini IDE server is
 disabled or not running, inherited GEMINI_CLI_IDE_* variables are set to ""
 for the job (Gemini treats that as unset), unless `agents.<name>.env` sets
@@ -692,16 +706,17 @@ One-time setup ~
    runs `gemini extensions link <dir> --consent` in a terminal, with
    `agents.gemini.env` applied (so a GEMINI_CLI_HOME set there is the Gemini
    home it links into and checks). The manifest is rewritten before every
-   launch. Undo it with
-   `gemini extensions uninstall agent-nvim`. The extension also loads in
-   Gemini sessions outside Neovim; there it exposes no tools.
+   launch. Undo it with `gemini extensions uninstall agent-nvim`. The
+   extension also loads in Gemini sessions outside Neovim; there it exposes
+   no tools.
 
 What works ~
 - Context: Gemini receives the recently focused files (up to 10), with the
   cursor and selected text of the active one.
 - @-mentions: Gemini's protocol has none, so the reference is typed into the
   prompt as "@file (lines 3-5)". Gemini's @ includes the whole file; the
-  range is plain text for the model. Special characters are escaped.
+  range is plain text for the model. Spaces and special characters in the
+  path are escaped.
 - Diffs: when Gemini asks to confirm write_file or replace, a diff opens in
   Neovim. Accept there and Gemini writes the proposal, with your edits.
   Reject (or close the diff) and the tool call is cancelled. Answering in
@@ -823,8 +838,20 @@ Agents you start yourself ~
 The controller finds Neovim through $NVIM, which Neovim sets in every
 |:terminal|. To use it with an agent you start by hand in a Neovim terminal,
 register it once in that agent's own config. |:AgentMcpConfig| prints a
-config fragment ({"mcpServers": {"nvim": {...}}} for most agents), and says
-where it goes:
+config fragment ({"mcpServers": {"nvim": {...}}} for most agents), for
+example for Claude: >json
+    {
+      "mcpServers": {
+        "nvim": {
+          "type": "stdio",
+          "command": "/opt/homebrew/bin/nvim",
+          "args": ["--headless", "-u", "NONE", "-i", "NONE", "-n", "-l",
+                   "/path/to/agent.nvim/lua/agent/nvim_mcp/main.lua"]
+        }
+      }
+    }
+<
+It then says where the fragment goes:
 - Claude Code: merge it into .mcp.json. For Claude it also prints a
   ready-to-paste `claude mcp add-json nvim '<server object>'` command:
   add-json takes only the inner server object (mcpServers.nvim), not the
@@ -840,7 +867,8 @@ of an agent you start yourself, set `auto_start = true` (or start the agent
 once with the plugin). Then:
 - Claude: run /ide.
 - OpenCode connects on its own when started inside one of the lock's
-  folders; Copilot when started in exactly one of them.
+  folders; Copilot when started in exactly one of them (Neovim's cwd, or a
+  folder an agent was launched in).
 - Gemini connects at startup once IDE mode is enabled. Set
   `providers.gemini.export_env = true` so it picks this Neovim
   deterministically.
@@ -983,7 +1011,7 @@ Claude does not connect ~
     Check CLAUDE_CODE_AUTO_CONNECT_IDE (the health check warns), then run
     /ide in Claude. With `providers.claude.lock_dir` set, check that the
     directory is one Claude scans.
-Claude exits right away, mentioning an enterprise MCP config ~
+Claude exits at once (enterprise MCP config or disableSideloadFlags) ~
     A managed policy forbids --mcp-config (see |agent-claude|). Set
     `agents.claude.mcp = false`.
 OpenCode does not connect ~
@@ -1029,10 +1057,12 @@ A mention went nowhere ~
 The Claude IDE protocol implementation follows coder/claudecode.nvim
 (https://github.com/coder/claudecode.nvim), whose Lua server and PROTOCOL.md
 were the reference, checked against Claude Code 2.1.283. The Copilot /ide
-server follows the Copilot CLI integration in microsoft/vscode and the IDE
-bridge of copilot-language-server. The Gemini server follows Gemini CLI's
-IDE client and its VS Code companion in google-gemini/gemini-cli. OpenCode's
-behaviour comes from its TUI source.
+server follows the Copilot CLI integration in microsoft/vscode
+(https://github.com/microsoft/vscode) and the IDE bridge of
+copilot-language-server. The Gemini server follows Gemini CLI's IDE client
+and its VS Code companion in google-gemini/gemini-cli
+(https://github.com/google-gemini/gemini-cli). OpenCode's behaviour comes
+from its TUI source.
 
 docs/PROTOCOLS.md in the repository is the contributor reference: the
 discovery, transport, auth, tools, notifications and verified quirks of each
@@ -1048,7 +1078,8 @@ From the repository root: >sh
     make test-node       # protocol tests with the MCP SDK (node, npm)
 <
 `NVIM_BIN=...` picks the Neovim binary for ./tests/run.sh. `make test-node`
-installs the test dependencies into tests/node/node_modules.
+installs the test dependencies into tests/node/node_modules and runs
+`node --test` there.
 
 The live end-to-end test runs the real agent CLIs and is not part of
 `make test`: >sh
@@ -1068,6 +1099,29 @@ accepts in the Neovim diff. Everything is isolated:
   --fake-responses-non-strict.
 - The workspaces are temp directories.
 The header of tests/e2e/run.sh documents the variables for pointing it at
-other CLI builds and for keeping the logs.
+other CLI builds (E2E_CLAUDE_BIN, E2E_COPILOT_BIN, E2E_GEMINI_JS,
+E2E_OPENCODE_BIN) and for keeping the logs (E2E_KEEP=1).
+
+                                                                  *agent-demo*
+The demo ~
+`make demo` (demo/record.sh) re-records the README demo,
+demo/agent-nvim-demo.gif and demo/agent-nvim-demo.mp4, with VHS
+(https://github.com/charmbracelet/vhs), which types demo/demo.tape into a
+real Neovim running the real Claude Code 2.1.283 TUI. Only the model is fake:
+its replies come from the same local endpoint as the end-to-end test
+(tests/e2e/fake_model.mjs) playing demo/plan.json, so the recording is
+reproducible, and the model name in Claude's header is only its default.
+HOME, the XDG directories and CLAUDE_CONFIG_DIR point to a temp directory, so
+your Claude account and config are never used.
+
+The demo config, demo/init.lua, starts Claude with
+`--permission-mode manual` so that it asks before editing, sets
+`auto_approve = true` for the $NVIM controller, and adds the colours, the
+statusline and the notification popup.
+
+It needs vhs, ttyd, ffmpeg, nvim, node, claude and the JetBrainsMono Nerd
+Font. `DEMO_OUT=<dir>` writes the files elsewhere. Every run differs slightly
+(the clock, the spinner words), so commit new files only when the demo itself
+changed. The header of demo/record.sh has the details.
 
  vim:tw=78:ts=8:sw=4:sts=4:et:ft=help:norl:

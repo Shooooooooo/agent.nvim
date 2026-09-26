@@ -201,26 +201,13 @@ K.claude = {
       { tool = '^Read$', input = { file_path = ws .. '/a.txt' } },
       { tool = '^Edit$', input = { file_path = ws .. '/a.txt', old_string = 'world', new_string = 'neovim' } },
     })
-    local key = 'sk-ant-api03-' .. ('x'):rep(80) .. '-e2eAAA'
+    -- Onboarding done, the workspace trusted, the dummy key approved (shared with demo/record.sh).
+    local seed = dofile(repo .. '/tests/e2e/claude_seed.lua')
     local cfgdir = root .. '/claude-config'
-    writef(cfgdir .. '/.claude.json', vim.json.encode({
-      hasCompletedOnboarding = true,
-      theme = 'dark',
-      numStartups = 5,
-      autoUpdates = false,
-      customApiKeyResponses = { approved = { key:sub(-20) }, rejected = {} },
-      projects = { [ws] = { hasTrustDialogAccepted = true, hasCompletedProjectOnboarding = true } },
-    }))
+    seed.write(cfgdir, { ws })
     return {
-      agents = { claude = { cmd = { bin, '--permission-mode', 'default' }, auto_approve = true, env = {
-        CLAUDE_CONFIG_DIR = cfgdir,
-        ANTHROPIC_BASE_URL = 'http://127.0.0.1:' .. port,
-        ANTHROPIC_API_KEY = key,
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1',
-        DISABLE_TELEMETRY = '1',
-        DISABLE_AUTOUPDATER = '1',
-        DISABLE_ERROR_REPORTING = '1',
-      } } },
+      agents = { claude = { cmd = { bin, '--permission-mode', 'default' }, auto_approve = true,
+        env = seed.env(cfgdir, 'http://127.0.0.1:' .. port) } },
     }
   end,
   connected = function()

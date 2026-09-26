@@ -1,4 +1,4 @@
-.PHONY: test test-lua test-node test-e2e
+.PHONY: test test-lua test-node test-e2e demo
 
 test: test-lua test-node
 
@@ -11,3 +11,7 @@ test-node:
 # Live end-to-end run against the installed agent CLIs (not part of `make test`); see tests/e2e/run.sh.
 test-e2e:
 	./tests/e2e/run.sh $(AGENTS)
+
+# Re-record the README demo (demo/agent-nvim-demo.gif and .mp4) with VHS; see demo/record.sh.
+demo:
+	./demo/record.sh

@@ -119,6 +119,19 @@ describe('editor.diff', function()
     assert.truthy(api.nvim_win_is_valid(prev_win))
   end)
 
+  it('truncates a long title in the winbar, not the accept and reject hints', function()
+    local path = write('a.lua', { 'local a = 1' })
+    local title = '* [Some Agent] a.lua (0123456789abcdef) with a long decorated tab name'
+    open({ id = 'd1', path = path, new_contents = 'local a = 2\n', title = title })
+    local win = api.nvim_get_current_win()
+    local full = api.nvim_eval_statusline(vim.wo[win].winbar, { winid = win, use_winbar = true, maxwidth = 200 }).str
+    assert.truthy(full:find(title, 1, true), 'the whole title fits in a wide window')
+    local narrow = api.nvim_eval_statusline(vim.wo[win].winbar, { winid = win, use_winbar = true, maxwidth = 64 }).str
+    assert.matches('^ proposed: ', narrow)
+    assert.matches('accept: :w or <leader>aa  reject: <leader>ad $', narrow)
+    assert.falsy(narrow:find(title, 1, true), 'the title is truncated')
+  end)
+
   it('accepts on :w exactly once, cleans up and returns focus', function()
     local path = write('a.txt', { 'one', 'two' })
     vim.cmd('edit ' .. vim.fn.fnameescape(path))
