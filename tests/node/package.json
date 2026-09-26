@@ -1,0 +1,16 @@
+{
+  "name": "agent-nvim-protocol-tests",
+  "private": true,
+  "type": "module",
+  "description": "Protocol conformance tests for agent.nvim's IDE servers (run with `make test-node`).",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.23.0",
+    "eventsource-parser": "^4.1.1",
+    "undici": "^8.11.2",
+    "ws": "^8.18.0",
+    "zod": "^4.6.5"
+  }
+}
