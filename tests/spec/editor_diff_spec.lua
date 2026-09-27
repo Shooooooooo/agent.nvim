@@ -618,4 +618,559 @@ describe('editor.diff', function()
     vim.cmd('write')
     assert.eq('accepted', calls[1].status)
   end)
+
+  -- ----------------------------------------------------------------------------------------------
+  -- The agent terminal in the diff's tab page (config.diff.show_terminal)
+  -- ----------------------------------------------------------------------------------------------
+  describe('with an agent terminal', function()
+    local terminal = require('agent.terminal')
+    local FIX = TEST_ROOT .. '/tests/fixtures/fake_agent.sh'
+    local pids = {}
+    local n = 0
+
+    local function pid_alive(pid)
+      local ok, ret = pcall(vim.uv.kill, pid, 0)
+      return ok and ret == 0
+    end
+
+    ---Start the fake agent (never focused). `env` goes into its environment.
+    ---@return integer bufnr, integer win  its terminal buffer and window
+    local function start_agent(env, layout)
+      n = n + 1
+      local out = dir .. '/agent' .. n
+      local buf, err = terminal.open('fake', {
+        focus = false,
+        layout = layout,
+        launch = function(name)
+          return {
+            name = name,
+            argv = { FIX },
+            env = vim.tbl_extend('force', { FAKE_AGENT_OUT = out }, env or {}),
+            cwd = dir,
+            cleanup = {},
+            session_id = 'session-' .. n,
+          }
+        end,
+      })
+      assert.truthy(buf, err)
+      pids[#pids + 1] = terminal.info().pid
+      return buf, vim.fn.bufwinid(buf)
+    end
+
+    ---Windows of the tab page `tab` that show `buf`.
+    local function wins_of(buf, tab)
+      return vim.tbl_filter(function(w)
+        return api.nvim_win_get_buf(w) == buf
+      end, api.nvim_tabpage_list_wins(tab))
+    end
+
+    local function job_running()
+      local info = terminal.info()
+      return info ~= nil and info.running and vim.fn.jobwait({ info.job }, 0)[1] == -1
+    end
+
+    ---The agent is alive, and shown in exactly one window: `main_win`.
+    local function agent_intact(buf, main_win, job)
+      assert.truthy(job_running(), 'the agent job still runs')
+      assert.eq(job, terminal.info().job, 'the same job')
+      assert.truthy(api.nvim_buf_is_valid(buf), 'the terminal buffer is not wiped')
+      assert.eq(buf, terminal.bufnr())
+      assert.truthy(api.nvim_win_is_valid(main_win), 'the terminal window of the main tab page stays')
+      assert.eq(buf, api.nvim_win_get_buf(main_win))
+      assert.same({ main_win }, vim.fn.win_findbuf(buf), 'no other window shows the terminal')
+    end
+
+    before_each(function()
+      config.setup({ terminal = { layout = 'split', start_insert = false, auto_close = true } })
+      terminal.setup({})
+    end)
+
+    after_each(function()
+      diff.close_all()
+      terminal.stop()
+      wait_for(function()
+        return not vim.iter(pids):any(pid_alive)
+      end, 5000, 'every agent job exited')
+      pids = {}
+    end)
+
+    it('diff.show_terminal defaults to true and must be a boolean', function()
+      assert.eq(true, config.defaults.diff.show_terminal)
+      assert.eq(true, config.setup({}).diff.show_terminal)
+      assert.eq(false, config.setup({ diff = { show_terminal = false } }).diff.show_terminal)
+      assert.error(function()
+        config.setup({ diff = { show_terminal = 'yes' } })
+      end, 'diff.show_terminal')
+    end)
+
+    it('shows the terminal right of the proposal, as wide as its split, with focus on the proposal', function()
+      local path = write('a.txt', { 'one', 'two' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local file_win = api.nvim_get_current_win()
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+      local main_width = api.nvim_win_get_width(main_win)
+      assert.eq(math.floor(vim.o.columns * 0.4), main_width)
+
+      local calls = open({ id = 't1', path = path, new_contents = 'one\nTWO\n' })
+      local info = diff.get('t1')
+      assert.eq(info.tabpage, api.nvim_get_current_tabpage())
+      local wins = api.nvim_tabpage_list_wins(0)
+      assert.eq(3, #wins, 'original | proposed | agent')
+      local term_win = wins_of(buf, 0)[1]
+      assert.truthy(term_win, 'the agent terminal is shown in the diff tab page')
+      local orig_win = vim.fn.bufwinid(info.orig_bufnr)
+      local prop_win = vim.fn.bufwinid(info.bufnr)
+      -- Focus stays on the proposal, so :w accepts.
+      assert.eq(prop_win, api.nvim_get_current_win())
+      assert.eq('n', api.nvim_get_mode().mode)
+      -- original | proposed | agent, the agent on the right edge, as wide as the terminal's split.
+      local col = function(w)
+        return api.nvim_win_get_position(w)[2]
+      end
+      assert.truthy(col(orig_win) < col(prop_win) and col(prop_win) < col(term_win))
+      assert.eq(vim.o.columns, col(term_win) + api.nvim_win_get_width(term_win))
+      assert.eq(main_width, api.nvim_win_get_width(term_win))
+      assert.truthy(math.abs(api.nvim_win_get_width(orig_win) - api.nvim_win_get_width(prop_win)) <= 1,
+        'the original and the proposal share the rest')
+      assert.eq(api.nvim_win_get_height(orig_win), api.nvim_win_get_height(term_win), 'full height')
+      -- The tab line that appears with the second tab page takes one row here (the main tab page is
+      -- laid out again only when it is entered).
+      assert.eq(vim.o.lines - vim.o.cmdheight - 2, api.nvim_win_get_height(term_win), 'tab line, status line')
+      -- Just a terminal window: not part of the diff, no diff winbar, styled like the terminal's.
+      assert.falsy(vim.wo[term_win].diff)
+      assert.falsy(vim.wo[term_win].scrollbind)
+      assert.eq('', vim.wo[term_win].winbar)
+      assert.falsy(vim.wo[term_win].number)
+      assert.falsy(vim.wo[term_win].wrap)
+      assert.truthy(vim.wo[term_win].winfixwidth)
+      assert.truthy(terminal.is_visible())
+      assert.truthy(api.nvim_win_is_valid(main_win))
+
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
+      wait_for(function()
+        return #api.nvim_list_tabpages() == 1
+      end, 1000, 'diff tab page closed')
+      assert.eq(file_win, api.nvim_get_current_win(), 'focus goes back to where it was')
+      assert.falsy(api.nvim_win_is_valid(term_win))
+      agent_intact(buf, main_win, job)
+      assert.eq(main_width, api.nvim_win_get_width(main_win))
+    end)
+
+    it('follows terminal.split_side and the size of the terminal split', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+
+      config.setup({ terminal = { layout = 'split', split_side = 'left', split_size = 0.3, start_insert = false } })
+      local buf, main_win = start_agent()
+      assert.eq(math.floor(vim.o.columns * 0.3), api.nvim_win_get_width(main_win))
+      open({ id = 'left', path = path, new_contents = 'y\n' })
+      local term_win = wins_of(buf, 0)[1]
+      assert.same({ 0, 0 }, { api.nvim_win_get_position(term_win)[2], #vim.tbl_filter(function(w)
+        return api.nvim_win_get_position(w)[2] < api.nvim_win_get_position(term_win)[2]
+      end, api.nvim_tabpage_list_wins(0)) }, 'the agent is on the left edge')
+      assert.eq(math.floor(vim.o.columns * 0.3), api.nvim_win_get_width(term_win))
+      assert.eq(diff.get('left').bufnr, api.nvim_get_current_buf())
+      diff.close('left')
+
+      -- A split the user resized: the diff's window matches it, so the agent's TUI keeps its size.
+      api.nvim_win_set_width(main_win, 30)
+      assert.eq(30, api.nvim_win_get_width(main_win))
+      open({ id = 'resized', path = path, new_contents = 'y\n' })
+      assert.eq(30, api.nvim_win_get_width(wins_of(buf, 0)[1]))
+      diff.close('resized')
+      terminal.stop()
+
+      config.setup({ terminal = { layout = 'split', split_side = 'below', split_size = 0.3, start_insert = false } })
+      local buf2, main2 = start_agent()
+      open({ id = 'below', path = path, new_contents = 'y\n' })
+      term_win = wins_of(buf2, 0)[1]
+      assert.eq(vim.o.columns, api.nvim_win_get_width(term_win), 'full width')
+      assert.eq(api.nvim_win_get_height(main2), api.nvim_win_get_height(term_win))
+      local prop_win = vim.fn.bufwinid(diff.get('below').bufnr)
+      assert.truthy(api.nvim_win_get_position(term_win)[1] > api.nvim_win_get_position(prop_win)[1], 'below the diff')
+      assert.truthy(vim.wo[term_win].winfixheight)
+      assert.eq(prop_win, api.nvim_get_current_win())
+    end)
+
+    it('shows no terminal with show_terminal = false, a float or none layout, or without an agent', function()
+      local path = write('a.txt', { 'x' })
+      local function terminal_windows()
+        local wins = api.nvim_tabpage_list_wins(diff.get('d').tabpage)
+        return #wins, #vim.tbl_filter(function(w)
+          return vim.bo[api.nvim_win_get_buf(w)].buftype == 'terminal'
+        end, wins)
+      end
+
+      -- No agent terminal.
+      open({ id = 'd', path = path, new_contents = 'y\n' })
+      assert.same({ 2, 0 }, { terminal_windows() })
+      diff.close('d')
+
+      -- show_terminal = false.
+      config.setup({ terminal = { layout = 'split', start_insert = false }, diff = { show_terminal = false } })
+      local buf = start_agent()
+      open({ id = 'd', path = path, new_contents = 'y\n' })
+      assert.same({ 2, 0 }, { terminal_windows() })
+      assert.eq(1, #vim.fn.win_findbuf(buf))
+      diff.close('d')
+      terminal.stop()
+
+      -- A float would cover the diff.
+      config.setup({ terminal = { layout = 'float', start_insert = false } })
+      buf = start_agent()
+      assert.eq('editor', api.nvim_win_get_config(vim.fn.win_findbuf(buf)[1]).relative)
+      open({ id = 'd', path = path, new_contents = 'y\n' })
+      assert.same({ 2, 0 }, { terminal_windows() })
+      assert.eq(diff.get('d').bufnr, api.nvim_get_current_buf())
+      diff.close('d')
+      terminal.stop()
+
+      -- 'none': there is no agent terminal.
+      config.setup({ terminal = { layout = 'none', start_insert = false } })
+      assert.eq(nil, (terminal.open('fake', { silent = true, launch = function() error('not called') end })))
+      open({ id = 'd', path = path, new_contents = 'y\n' })
+      assert.same({ 2, 0 }, { terminal_windows() })
+    end)
+
+    it("open_in = 'current' adds no terminal window: it is already in the tab page", function()
+      config.setup({ terminal = { layout = 'split', start_insert = false }, diff = { open_in = 'current' } })
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local buf, main_win = start_agent()
+      open({ id = 'cur', path = path, new_contents = 'y\n' })
+      assert.eq(1, #api.nvim_list_tabpages())
+      assert.same({ main_win }, vim.fn.win_findbuf(buf))
+      diff.close('cur')
+      assert.same({ main_win }, vim.fn.win_findbuf(buf))
+    end)
+
+    it('the agent keeps running and keeps its window after a reject, a :tabclose or a close by the agent', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local file_win = api.nvim_get_current_win()
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+
+      local calls = open({ id = 'r', path = path, new_contents = 'y\n' })
+      assert.eq(1, #wins_of(buf, 0))
+      feed('\\ad')
+      assert.same({ status = 'rejected', trigger = 'user', id = 'r', path = path }, calls[1])
+      wait_for(function()
+        return #api.nvim_list_tabpages() == 1
+      end, 1000, 'tab page closed after the reject key')
+      assert.eq(file_win, api.nvim_get_current_win())
+      agent_intact(buf, main_win, job)
+
+      calls = open({ id = 'tc', path = path, new_contents = 'y\n' })
+      assert.eq(1, #wins_of(buf, 0))
+      vim.cmd('tabclose')
+      wait_for(function()
+        return #calls == 1
+      end, 1000, 'resolved by :tabclose')
+      assert.eq('closed', calls[1].trigger)
+      vim.wait(50)
+      assert.eq(1, #api.nvim_list_tabpages())
+      assert.eq(file_win, api.nvim_get_current_win())
+      agent_intact(buf, main_win, job)
+
+      -- :q in the proposal: the teardown closes the agent's window too, and the tab page goes.
+      calls = open({ id = 'q', path = path, new_contents = 'y\n' })
+      vim.cmd('quit')
+      wait_for(function()
+        return #calls == 1 and #api.nvim_list_tabpages() == 1
+      end, 1000, 'resolved by :quit')
+      agent_intact(buf, main_win, job)
+
+      -- The agent closes the diff while the user is in its window in the diff tab page (they
+      -- answered its prompt there): focus goes back to where it was when the diff opened.
+      calls = open({ id = 'ag', path = path, new_contents = 'y\n' })
+      api.nvim_set_current_win(wins_of(buf, 0)[1])
+      diff.close('ag', { resolve = true })
+      assert.eq('agent', calls[1].trigger)
+      assert.eq(1, #api.nvim_list_tabpages())
+      assert.eq(file_win, api.nvim_get_current_win())
+      agent_intact(buf, main_win, job)
+      assert.same({}, diff_buffers_left())
+    end)
+
+    it('a diff opened from the agent window returns there', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+      api.nvim_set_current_win(main_win)
+      local calls = open({ id = 'fromterm', path = path, new_contents = 'y\n' })
+      assert.eq(diff.get('fromterm').bufnr, api.nvim_get_current_buf())
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
+      wait_for(function()
+        return #api.nvim_list_tabpages() == 1
+      end, 1000)
+      assert.eq(main_win, api.nvim_get_current_win())
+      agent_intact(buf, main_win, job)
+    end)
+
+    it('several diffs: each tab page gets its own terminal window', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local file_win = api.nvim_get_current_win()
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+      local a = open({ id = 'A', path = path, new_contents = 'a\n' })
+      local tab_a = diff.get('A').tabpage
+      local a_term = wins_of(buf, tab_a)[1]
+      -- B is opened from A's view of the agent.
+      api.nvim_set_current_win(a_term)
+      local b = open({ id = 'B', path = path, new_contents = 'b\n' })
+      local tab_b = diff.get('B').tabpage
+      assert.eq(3, #api.nvim_list_tabpages())
+      assert.eq(1, #wins_of(buf, tab_a))
+      assert.eq(1, #wins_of(buf, tab_b))
+      assert.eq(3, #vim.fn.win_findbuf(buf))
+      assert.eq(api.nvim_win_get_width(main_win), api.nvim_win_get_width(wins_of(buf, tab_b)[1]))
+      assert.eq(diff.get('B').bufnr, api.nvim_get_current_buf())
+
+      -- A goes first (from the agent side): B then returns to where A came from.
+      assert.truthy(diff.reject('A'))
+      assert.eq('rejected', a[1].status)
+      assert.eq(2, #api.nvim_list_tabpages())
+      assert.falsy(api.nvim_win_is_valid(a_term))
+      assert.eq(2, #vim.fn.win_findbuf(buf))
+      assert.eq(tab_b, api.nvim_get_current_tabpage(), 'B keeps focus')
+      assert.truthy(diff.accept_current())
+      assert.eq('b\n', b[1].content)
+      assert.eq(1, #api.nvim_list_tabpages())
+      assert.eq(file_win, api.nvim_get_current_win())
+      agent_intact(buf, main_win, job)
+    end)
+
+    it('the agent exiting while a diff shows it closes only its window (auto_close)', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local file_win = api.nvim_get_current_win()
+      local buf = start_agent({ FAKE_AGENT_EXIT = '0', FAKE_AGENT_SLEEP = '1' })
+      local calls = open({ id = 'exit', path = path, new_contents = 'y\n' })
+      local info = diff.get('exit')
+      assert.eq(1, #wins_of(buf, 0))
+      wait_for(function()
+        return terminal.info() == nil
+      end, 5000, 'the agent exited and its terminal was closed')
+      vim.wait(50)
+      assert.falsy(api.nvim_buf_is_valid(buf))
+      assert.truthy(diff.is_open('exit'), 'the diff stays open')
+      assert.eq(info.tabpage, api.nvim_get_current_tabpage())
+      assert.eq(2, #api.nvim_tabpage_list_wins(info.tabpage), 'original | proposed stay')
+      assert.eq(info.bufnr, api.nvim_get_current_buf(), 'focus stays on the proposal')
+      assert.same({}, notes)
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
+      wait_for(function()
+        return #api.nvim_list_tabpages() == 1
+      end, 1000)
+      assert.eq(file_win, api.nvim_get_current_win())
+      assert.same({}, notes)
+    end)
+
+    it('the agent exiting without auto_close leaves its finished terminal in both windows', function()
+      config.setup({ terminal = { layout = 'split', start_insert = false, auto_close = false } })
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local buf, main_win = start_agent({ FAKE_AGENT_EXIT = '0', FAKE_AGENT_SLEEP = '1' })
+      local calls = open({ id = 'keep', path = path, new_contents = 'y\n' })
+      wait_for(function()
+        return not terminal.is_running()
+      end, 5000, 'the agent exited')
+      vim.wait(50)
+      assert.eq(1, #wins_of(buf, 0))
+      assert.eq(3, #api.nvim_tabpage_list_wins(0))
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
+      wait_for(function()
+        return #api.nvim_list_tabpages() == 1
+      end, 1000)
+      assert.truthy(api.nvim_buf_is_valid(buf))
+      assert.same({ main_win }, vim.fn.win_findbuf(buf))
+      assert.eq(0, terminal.info().exit_code)
+    end)
+
+    it(':AgentClose and :Agent in the diff tab page act on its terminal window only', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+      local calls = open({ id = 'cmd', path = path, new_contents = 'y\n' })
+      local tab = diff.get('cmd').tabpage
+      local prop_win = api.nvim_get_current_win()
+      -- close(): the diff's view goes, the main tab page keeps the agent.
+      assert.truthy(terminal.close())
+      assert.eq(0, #wins_of(buf, tab))
+      assert.eq(2, #api.nvim_tabpage_list_wins(tab))
+      assert.falsy(terminal.is_visible())
+      assert.eq(prop_win, api.nvim_get_current_win())
+      agent_intact(buf, main_win, job)
+      -- toggle(): shows it again in this tab page (focused), then hides it here only.
+      assert.eq(buf, terminal.toggle('fake'))
+      assert.eq(tab, api.nvim_get_current_tabpage())
+      local here = wins_of(buf, tab)[1]
+      assert.eq(here, api.nvim_get_current_win())
+      assert.eq(api.nvim_win_get_width(main_win), api.nvim_win_get_width(here))
+      assert.eq(buf, terminal.toggle('fake'))
+      assert.eq(0, #wins_of(buf, tab))
+      agent_intact(buf, main_win, job)
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
+    end)
+
+    ---The original and the proposal of diff `id` share the columns the agent leaves them.
+    local function balanced(id)
+      local info = diff.get(id)
+      local ow = api.nvim_win_get_width(vim.fn.bufwinid(info.orig_bufnr))
+      local pw = api.nvim_win_get_width(vim.fn.bufwinid(info.bufnr))
+      assert.truthy(math.abs(ow - pw) <= 1, ('%s: original %d, proposed %d columns'):format(id, ow, pw))
+    end
+
+    it('closing the diff closes every view of the agent in its tab page, also one shown again there', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local file_win = api.nvim_get_current_win()
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+
+      ---Open diff `id`, and show the agent in its tab page again with `reshow`.
+      ---@return table calls, integer tab
+      local function reshown(id, reshow)
+        local calls = open({ id = id, path = path, new_contents = 'y\n' })
+        local tab = diff.get(id).tabpage
+        reshow()
+        assert.eq(tab, api.nvim_get_current_tabpage())
+        assert.eq(1, #wins_of(buf, tab), id .. ': the agent is shown in the diff tab page again')
+        assert.eq(3, #api.nvim_tabpage_list_wins(tab))
+        return calls, tab
+      end
+      ---The diff resolved with `status`, its tab page gone with every window on the agent, and
+      ---focus back where it was.
+      local function gone(calls, status)
+        assert.eq(status, calls[1] and calls[1].status)
+        wait_for(function()
+          return #api.nvim_list_tabpages() == 1
+        end, 1000, 'the diff tab page closed')
+        assert.eq(file_win, api.nvim_get_current_win())
+        agent_intact(buf, main_win, job)
+      end
+      local function to_proposal(id)
+        api.nvim_set_current_win(vim.fn.bufwinid(diff.get(id).bufnr))
+      end
+
+      -- :Agent twice: hidden, then shown again (focused); :w in the proposal.
+      local calls = reshown('twice', function()
+        assert.eq(buf, terminal.toggle('fake'))
+        assert.eq(0, #wins_of(buf, 0))
+        assert.eq(buf, terminal.toggle('fake'))
+      end)
+      to_proposal('twice')
+      vim.cmd('write')
+      gone(calls, 'accepted')
+
+      -- :AgentClose, then :Agent.
+      calls = reshown('close-toggle', function()
+        assert.truthy(terminal.close())
+        assert.eq(buf, terminal.toggle('fake'))
+      end)
+      to_proposal('close-toggle')
+      vim.cmd('write')
+      gone(calls, 'accepted')
+
+      -- :AgentClose, then :AgentOpen; rejected with the key.
+      calls = reshown('close-open', function()
+        assert.truthy(terminal.close())
+        assert.eq(buf, terminal.open('fake'))
+      end)
+      to_proposal('close-open')
+      feed('\\ad')
+      gone(calls, 'rejected')
+
+      -- Shown again unfocused; the agent closes the diff while the cursor is in that window.
+      local tab
+      calls, tab = reshown('agent-closes', function()
+        assert.truthy(terminal.close())
+        assert.eq(buf, terminal.open('fake', { focus = false }))
+      end)
+      api.nvim_set_current_win(wins_of(buf, tab)[1])
+      diff.close('agent-closes', { resolve = true })
+      gone(calls, 'rejected')
+
+      -- Two views in the diff tab page (the user split the one shown again).
+      calls, tab = reshown('two-views', function()
+        assert.truthy(terminal.close())
+        assert.eq(buf, terminal.open('fake'))
+      end)
+      vim.cmd('split')
+      assert.eq(2, #wins_of(buf, tab))
+      to_proposal('two-views')
+      vim.cmd('write')
+      gone(calls, 'accepted')
+      assert.same({}, diff_buffers_left())
+    end)
+
+    it('an agent started in the diff tab page closes with the diff, and keeps running', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local file_win = api.nvim_get_current_win()
+      local calls = open({ id = 'fresh', path = path, new_contents = 'y\n' })
+      local tab = diff.get('fresh').tabpage
+      assert.eq(2, #api.nvim_tabpage_list_wins(tab), 'no agent yet')
+      local buf, win = start_agent()
+      assert.eq(tab, api.nvim_win_get_tabpage(win))
+      local job = terminal.info().job
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
+      wait_for(function()
+        return #api.nvim_list_tabpages() == 1
+      end, 1000, 'the diff tab page closed')
+      assert.eq(file_win, api.nvim_get_current_win())
+      assert.same({}, vim.fn.win_findbuf(buf), 'hidden')
+      assert.truthy(job_running())
+      assert.eq(job, terminal.info().job)
+    end)
+
+    it('the original and the proposal share what the agent leaves, however it comes into the tab page', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      local buf, main_win = start_agent()
+      local main_width = api.nvim_win_get_width(main_win)
+      for _, case in ipairs({
+        { 'split_here', function() end },
+        { 'toggle', function()
+          assert.truthy(terminal.close())
+          assert.eq(buf, terminal.toggle('fake'))
+        end },
+        { 'open', function()
+          assert.truthy(terminal.close())
+          assert.eq(buf, terminal.open('fake'))
+        end },
+        { 'open unfocused', function()
+          assert.truthy(terminal.close())
+          assert.eq(buf, terminal.open('fake', { focus = false }))
+        end },
+      }) do
+        local id = case[1]
+        open({ id = id, path = path, new_contents = 'y\n' })
+        case[2]()
+        local wins = wins_of(buf, 0)
+        assert.eq(1, #wins, id)
+        assert.eq(main_width, api.nvim_win_get_width(wins[1]), id .. ': as large as the terminal split')
+        balanced(id)
+        diff.close(id)
+      end
+
+      -- An agent started in the diff tab page.
+      terminal.stop()
+      open({ id = 'fresh', path = path, new_contents = 'y\n' })
+      buf = start_agent()
+      assert.eq(1, #wins_of(buf, 0))
+      balanced('fresh')
+    end)
+  end)
 end)

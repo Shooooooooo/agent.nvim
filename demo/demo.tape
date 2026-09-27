@@ -4,8 +4,9 @@
 # Story: open Neovim on a small Lua module, start Claude Code with :Agent claude (its chip shows
 # the open file), select a function (the chip follows the selection), go straight to Claude's
 # prompt and ask for a change (Claude gets the selected lines), watch the $NVIM controller's
-# notification, review the proposed edit in a Neovim diff and accept it with :w, then run the
-# new code. The model turn is scripted in demo/plan.json.
+# notification, review the proposed edit in a Neovim diff (a tab of its own, which shows Claude
+# too, waiting for the review) and accept it with :w, then run the new code. The model turn is
+# scripted in demo/plan.json.
 
 # VHS 0.12.0 cannot encode videos (see record.sh), so it only writes the frames.
 Output frames/
@@ -15,7 +16,10 @@ Require claude
 
 Set Shell "bash"
 Set FontFamily "JetBrainsMono Nerd Font"
-Set FontSize 17
+Set FontSize 16
+# Without VHS's default extra pixel between letters the terminal is 148 columns wide (133 with
+# it), enough for the diff tab: original | proposed | Claude.
+Set LetterSpacing 0
 # record.sh centers the frames on a 1400x800 background when it encodes them.
 Set Width 1364
 Set Height 764
@@ -82,10 +86,12 @@ Sleep 800ms
 Enter
 Wait+Screen@20s /Selected 10 lines from greet\.lua/
 
-# 5. The model notifies through the $NVIM controller, then proposes an edit: a diff tab opens.
+# 5. The model notifies through the $NVIM controller, then proposes an edit: a diff tab opens,
+# original | proposed | Claude, where Claude shows its own permission prompt for the edit.
 Wait+Screen@60s /Review the diff/
 Wait+Screen@60s /proposed/
-Sleep 5.5s
+Wait+Screen@20s /Opened changes in Neovim/
+Sleep 6s
 
 # 6. Accept the proposal with :w. Claude writes the file and the buffer reloads. The switch back
 # is hidden until both have settled: in between, Claude redraws its whole screen (and for a

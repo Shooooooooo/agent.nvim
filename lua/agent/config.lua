@@ -46,6 +46,10 @@ M.defaults = {
   diff = {
     ---@type 'tab'|'current'  Where the diff view opens
     open_in = 'tab',
+    ---@type boolean  In a diff's own tab page, show the agent terminal too (original | proposed | agent),
+    --- on terminal.split_side and as large as the terminal's split, so the agent's TUI does not reflow.
+    --- Only with the 'split' and 'tab' terminal layouts, and only when there is an agent terminal.
+    show_terminal = true,
     keymaps = {
       accept = '<leader>aa',
       reject = '<leader>ad',
@@ -121,6 +125,8 @@ function M.validate(opts)
       return type(v) == 'number' and v > 0 and v < 1
     end, 'a number between 0 and 1')
     vim.validate('selection.debounce_ms', opts.selection.debounce_ms, 'number')
+    vim.validate('diff', opts.diff, 'table')
+    vim.validate('diff.show_terminal', opts.diff.show_terminal, 'boolean')
     vim.validate('agents', opts.agents, 'table')
     for name, a in pairs(opts.agents) do
       vim.validate('agents.' .. name .. '.cmd', a.cmd, 'table')

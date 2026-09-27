@@ -18,7 +18,8 @@
 # VHS types demo/demo.tape into a bash that sources the generated rc file ($DEMO_RC), which
 # defines `nvim` as that isolated Neovim with demo/init.lua. VHS 0.12.0 cannot encode videos
 # itself (its ffmpeg step runs with an already cancelled context), so the tape writes PNG frames
-# and this script encodes them with ffmpeg.
+# and this script encodes them with ffmpeg (after replacing any frame captured as an empty screen,
+# see step 4).
 #
 # Variables: DEMO_OUT (directory for the GIF and MP4, default demo/; use a scratch directory for
 # trial runs, since every run differs slightly: clock, spinner words, session hash),
@@ -136,7 +137,25 @@ if [ "$rc" -ne 0 ] || [ ! -f "$ROOT/frames/frame-text-00001.png" ]; then
   exit 1
 fi
 
-# 4. Encode. Same layers as VHS: the text frames with the cursor frames on top, centered on the
+# 4. Now and then (at random) the terminal in VHS's browser is captured as an empty screen for
+# one frame, all background, when Neovim's screen changes a lot (leaving Terminal mode for the
+# editor, the diff's tab page opening): a flash the terminal itself never shows. Such a frame (all
+# one colour: its lowest luma is its highest) becomes a copy of the frame before it.
+perl -e 'alarm shift; exec @ARGV' 300 ffmpeg -v error -i "$ROOT/frames/frame-text-%05d.png" \
+  -vf 'signalstats,metadata=print:file=-' -f null - 2>/dev/null |
+  awk '/^frame:/ { f++ }
+    /YMIN=/ { sub(/.*=/, ""); lo = $0 }
+    /YMAX=/ { sub(/.*=/, ""); if ($0 == lo) print f }' > "$ROOT/blank-frames" || exit 1
+for n in $(cat "$ROOT/blank-frames"); do
+  [ "$n" -gt 1 ] || continue
+  cur=$(printf '%05d' "$n")
+  prev=$(printf '%05d' $((n - 1)))
+  echo "replacing empty frame $n with frame $((n - 1))"
+  cp "$ROOT/frames/frame-text-$prev.png" "$ROOT/frames/frame-text-$cur.png" || exit 1
+  cp "$ROOT/frames/frame-cursor-$prev.png" "$ROOT/frames/frame-cursor-$cur.png" || exit 1
+done
+
+# 5. Encode. Same layers as VHS: the text frames with the cursor frames on top, centered on the
 # theme's background. Keep FPS and BG in sync with demo/demo.tape (Framerate, Theme).
 FPS=25
 W=1400

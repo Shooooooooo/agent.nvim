@@ -18,7 +18,8 @@
 --             <Esc>: the selection is dropped
 --   4. submit a prompt; the scripted model then
 --      (a) calls the $NVIM controller: exec_lua (sets vim.g.agent_e2e) and open_file (notes.txt)
---      (b) edits a.txt (world -> neovim) through the IDE diff, which this driver accepts
+--      (b) edits a.txt (world -> neovim) through the IDE diff; its tab page must show the agent
+--          terminal too (diff.show_terminal), and this driver accepts it
 --   5. check the effects in Neovim and on disk; stop() the agent, which also stops its provider
 --      (its lock/discovery file goes), tear down, check that no files are left
 -- OpenCode has no IDE diff (its client is receive-only), so (b) is skipped for it.
@@ -647,9 +648,30 @@ if R.diff then
     local d = diff.get(diff.list()[1])
     local proposal = table.concat(vim.api.nvim_buf_get_lines(d.bufnr, 0, -1, false), '\n')
     check('(b) the diff proposes the edit', proposal == 'hello\nneovim', proposal)
+    -- The diff's tab page shows the agent too (diff.show_terminal): original | proposed | agent,
+    -- the agent as wide as its split in the main tab page, the proposal focused.
+    local diff_tab = vim.api.nvim_get_current_tabpage()
+    local wins = vim.api.nvim_tabpage_list_wins(diff_tab)
+    local here = vim.tbl_filter(function(w)
+      return vim.api.nvim_win_get_buf(w) == terminal.bufnr()
+    end, wins)
+    check('(b) the agent terminal is shown in the diff tab page', d.tabpage == diff_tab and #wins == 3
+      and #here == 1 and vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()) == d.bufnr,
+      ('%d windows, %d agent'):format(#wins, #here))
+    local diff_term = here[1]
+    if diff_term then
+      local right = vim.api.nvim_win_get_position(diff_term)[2] + vim.api.nvim_win_get_width(diff_term) == vim.o.columns
+      check('(b) ... on the right, as wide as the terminal split', right
+        and vim.api.nvim_win_get_width(diff_term) == vim.api.nvim_win_get_width(term_win),
+        ('width %d vs %d'):format(vim.api.nvim_win_get_width(diff_term), vim.api.nvim_win_get_width(term_win)))
+    end
     vim.wait(500)
     local aok, aerr = agent.diff_accept()
     check('(b) diff_accept() accepted it in Neovim', aok, aerr)
+    check('(b) the diff tab page closed; the agent runs on in its own window', vim.wait(5000, function()
+      return #vim.api.nvim_list_tabpages() == 1
+    end, 50) and terminal.is_running() and vim.api.nvim_win_is_valid(term_win)
+      and vim.deep_equal(vim.fn.win_findbuf(buf), { term_win }))
     check('(b) the agent wrote the accepted edit to disk', wait_until(60000, function()
       return readf(ws .. '/a.txt') == EXPECTED
     end, 'a.txt on disk'), vim.inspect(readf(ws .. '/a.txt')))

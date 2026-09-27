@@ -3,6 +3,13 @@
 --- A diff shows the original on the left and the proposal on the right, in a new tab page (or,
 --- with `config.diff.open_in = 'current'`, in a new window pair below the main window, unless that
 --- tab page already shows a diff: Neovim would merge the two into one multi-way diff).
+--- A diff's own tab page also shows the agent terminal (config.diff.show_terminal), so that the
+--- agent stays in sight: original | proposed | agent. agent.terminal.split_here() places that window
+--- (on config.terminal.split_side, as large as the terminal's own split) and declines when there is
+--- no agent terminal or its layout is float or none. It is one more window on the terminal buffer:
+--- the teardown closes it, and any other window of the diff's tab page on the agent terminal (one
+--- the user showed there again with :Agent or :AgentOpen), which never stops the agent. Whenever the
+--- agent terminal comes into a tab page with a diff, the original and the proposal share the rest.
 ---  * Left: the file's own buffer when it is loaded and its text equals the file on disk; otherwise
 ---    a read-only scratch copy of the file on disk (empty for a file that does not exist yet). So an
 ---    original buffer with unsaved changes is never shown as "the original".
@@ -250,11 +257,59 @@ local function watch_for_write(abs, since)
   end)
 end
 
+---The agent terminal's buffer, when agent.terminal is loaded and there is one.
+---@return integer|nil
+local function agent_term_buf()
+  local term = package.loaded['agent.terminal']
+  if type(term) ~= 'table' or type(term.bufnr) ~= 'function' then
+    return nil
+  end
+  local ok, b = pcall(term.bufnr)
+  return ok and type(b) == 'number' and b or nil
+end
+
+---Give the original and the proposal equal halves of their width, when they are side by side (the
+---agent terminal's window takes its columns from its neighbour only).
+---@param d table
+local function balance(d)
+  if not (win_valid(d.orig_win) and win_valid(d.prop_win))
+    or api.nvim_win_get_position(d.orig_win)[1] ~= api.nvim_win_get_position(d.prop_win)[1] then
+    return
+  end
+  local w = api.nvim_win_get_width(d.orig_win) + api.nvim_win_get_width(d.prop_win)
+  pcall(api.nvim_win_set_width, d.orig_win, math.floor(w / 2))
+end
+
+---The windows of the diff's tab page that show the agent terminal: its own view (split_here()) and
+---any other, such as one the user showed there again with :Agent or :AgentOpen, or an agent started
+---there. None for a diff without a tab page of its own (open_in = 'current').
+---@param d table
+---@return { win: integer, buf: integer }[]
+local function agent_windows(d)
+  local out = {}
+  if not (d.tab and api.nvim_tabpage_is_valid(d.tab)) then
+    return out
+  end
+  local bufs = {}
+  for _, b in pairs({ d.term_buf or false, agent_term_buf() or false }) do
+    if b then
+      bufs[b] = true
+    end
+  end
+  for _, w in ipairs(api.nvim_tabpage_list_wins(d.tab)) do
+    local b = api.nvim_win_get_buf(w)
+    if bufs[b] then
+      out[#out + 1] = { win = w, buf = b }
+    end
+  end
+  return out
+end
+
 ---@param d table
 ---@return boolean
 local function has_focus(d)
   local cur_win = api.nvim_get_current_win()
-  if cur_win == d.orig_win or cur_win == d.prop_win then
+  if cur_win == d.orig_win or cur_win == d.prop_win or cur_win == d.term_win then
     return true
   end
   if d.tab then
@@ -296,6 +351,16 @@ local function teardown(d)
   end
 
   local to_close = {}
+  -- The agent terminal's windows first, so that focus never passes through them on the way out (a
+  -- user's BufEnter autocmd could enter Terminal mode): every window of the tab page on the agent
+  -- (see agent_windows()), as they were when the diff resolved (a deferred teardown must not take
+  -- windows from a tab page that is no longer the diff's). The terminal buffer stays ('bufhidden' =
+  -- hide), and so does its job.
+  for _, aw in ipairs(d.agent_wins or agent_windows(d)) do
+    if win_valid(aw.win) and api.nvim_win_get_buf(aw.win) == aw.buf then
+      to_close[#to_close + 1] = aw.win
+    end
+  end
   if win_valid(d.orig_win) and api.nvim_win_get_buf(d.orig_win) == d.orig_buf then
     to_close[#to_close + 1] = d.orig_win
   end
@@ -306,7 +371,9 @@ local function teardown(d)
       end
     end
   end
+  local closed = {}
   for _, w in ipairs(to_close) do
+    closed[w] = true
     close_window(w)
   end
   for _, b in ipairs({ d.prop_buf, not d.orig_real and d.orig_buf or nil }) do
@@ -317,7 +384,8 @@ local function teardown(d)
 
   -- Diffs opened from this one's windows return focus to where this one came from.
   for _, other in pairs(diffs) do
-    if other ~= d and (other.prev_win == d.orig_win or other.prev_win == d.prop_win) then
+    if other ~= d and other.prev_win
+      and (closed[other.prev_win] or other.prev_win == d.orig_win or other.prev_win == d.prop_win) then
       other.prev_win, other.prev_mode = d.prev_win, d.prev_mode
     end
   end
@@ -364,6 +432,8 @@ local function finish(d, status, trigger, notify, watch)
   if status == 'accepted' or watch then
     watch_for_write(d.abs, d.sig)
   end
+  -- Before on_resolve and a deferred teardown: what the diff's tab page shows now.
+  d.agent_wins = agent_windows(d)
   if notify and d.on_resolve then
     local ok, err = pcall(d.on_resolve, { status = status, content = content, trigger = trigger, id = d.id, path = d.path })
     if not ok then
@@ -469,6 +539,28 @@ local function attach(d)
   end
 end
 
+---Show the agent terminal in the diff's tab page (config.diff.show_terminal), without focus, and
+---give the original and the proposal equal halves of the rest. agent.terminal decides whether it
+---can (an agent terminal exists, its layout is split or tab) and where the window goes; this module
+---only asks it when it is loaded (no agent.terminal, no agent terminal).
+---@param d table
+local function show_terminal(d)
+  local show = true
+  pcall(function()
+    show = require('agent.config').get().diff.show_terminal ~= false
+  end)
+  local term = package.loaded['agent.terminal']
+  if not show or type(term) ~= 'table' or type(term.split_here) ~= 'function' then
+    return
+  end
+  local ok, win = pcall(term.split_here)
+  if not ok or type(win) ~= 'number' or not win_valid(win) then
+    return
+  end
+  d.term_win, d.term_buf = win, api.nvim_win_get_buf(win)
+  balance(d)
+end
+
 ---@param d table
 local function build_layout(d)
   d.prev_win = api.nvim_get_current_win()
@@ -506,6 +598,8 @@ local function build_layout(d)
     api.nvim_win_set_buf(d.orig_win, d.orig_buf)
     d.prop_win = api.nvim_open_win(d.prop_buf, true, { split = 'right', win = d.orig_win })
     vim.t[d.tab].agent_diff = d.id
+    -- Before :diffthis and the winbars, so that the new window does not copy them.
+    show_terminal(d)
   end
 
   for _, w in ipairs({ d.orig_win, d.prop_win }) do
@@ -809,6 +903,44 @@ function M._stop_watchers()
     stop_watcher(abs)
   end
 end
+
+---The agent terminal came into a window: in a tab page with a diff (shown there again by :Agent or
+---:AgentOpen, or an agent started there), the diff's original and proposal share what it leaves.
+---@param buf integer  the buffer that came into a window
+---@param win integer
+local function on_terminal_shown(buf, win)
+  if buf ~= agent_term_buf() or not win_valid(win) or api.nvim_win_get_buf(win) ~= buf
+    or api.nvim_win_get_config(win).relative ~= '' then
+    return
+  end
+  local tab = api.nvim_win_get_tabpage(win)
+  for _, d in pairs(diffs) do
+    if win_valid(d.prop_win) and api.nvim_win_get_tabpage(d.prop_win) == tab then
+      balance(d)
+    end
+  end
+end
+
+-- A new window on the terminal buffer: curwin is that window while BufWinEnter runs.
+api.nvim_create_autocmd('BufWinEnter', {
+  group = GROUP,
+  callback = function(ev)
+    on_terminal_shown(ev.buf, api.nvim_get_current_win())
+  end,
+})
+-- An agent started in a window of its own (the terminal buffer is the agent's only from then on).
+api.nvim_create_autocmd('User', {
+  group = GROUP,
+  pattern = 'AgentTerminalOpen',
+  callback = function(ev)
+    local buf = type(ev.data) == 'table' and ev.data.bufnr
+    if type(buf) == 'number' and api.nvim_buf_is_valid(buf) then
+      for _, w in ipairs(vim.fn.win_findbuf(buf)) do
+        on_terminal_shown(buf, w)
+      end
+    end
+  end,
+})
 
 api.nvim_create_autocmd('VimLeavePre', {
   group = GROUP,

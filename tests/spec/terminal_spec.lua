@@ -530,6 +530,265 @@ describe('terminal', function()
     assert.eq(2, spawned)
   end)
 
+  describe('with a second window (split_here)', function()
+    local api = vim.api
+    local function wins_in(buf, tab)
+      return vim.tbl_filter(function(w)
+        return api.nvim_win_get_buf(w) == buf
+      end, api.nvim_tabpage_list_wins(tab or 0))
+    end
+    local function job_running()
+      local info = terminal.info()
+      return info ~= nil and vim.fn.jobwait({ info.job }, 0)[1] == -1
+    end
+
+    after_each(function()
+      pcall(vim.cmd, 'silent! tabonly!')
+      pcall(vim.cmd, 'silent! only!')
+    end)
+
+    it('opens one more split in this tab page, unfocused and as large as the terminal split', function()
+      local launch, out = fake()
+      local buf = terminal.open('fake', { launch = launch, focus = false })
+      wait_ready(out)
+      local main_win = vim.fn.bufwinid(buf)
+      local job = terminal.info().job
+      local tab1 = api.nvim_get_current_tabpage()
+      vim.cmd('tabnew')
+      local tab2 = api.nvim_get_current_tabpage()
+      local cur = api.nvim_get_current_win()
+      assert.falsy(terminal.is_visible())
+      local win, why = terminal.split_here()
+      assert.truthy(win, why)
+      assert.eq(cur, api.nvim_get_current_win(), 'not entered')
+      assert.eq(tab2, api.nvim_win_get_tabpage(win))
+      assert.eq(buf, api.nvim_win_get_buf(win))
+      assert.eq(api.nvim_win_get_width(main_win), api.nvim_win_get_width(win))
+      assert.eq(vim.o.columns, api.nvim_win_get_position(win)[2] + api.nvim_win_get_width(win), 'on the right edge')
+      assert.truthy(vim.wo[win].winfixwidth)
+      assert.falsy(vim.wo[win].number)
+      assert.falsy(vim.wo[win].wrap)
+      assert.truthy(terminal.is_visible())
+      -- Once per tab page.
+      local again, why2 = terminal.split_here()
+      assert.eq(nil, again)
+      assert.matches('already shown', why2)
+      -- The job is the same, and both windows show it.
+      assert.eq(job, terminal.info().job)
+      assert.same({ main_win, win }, vim.fn.win_findbuf(buf))
+      -- Closing the extra window (or its tab page) hides nothing else and stops nothing.
+      vim.cmd('tabclose')
+      assert.eq(tab1, api.nvim_get_current_tabpage())
+      assert.same({ main_win }, vim.fn.win_findbuf(buf))
+      vim.wait(100)
+      assert.truthy(job_running())
+      assert.truthy(terminal.is_running())
+      assert.truthy(terminal.is_visible())
+    end)
+
+    it('every window it opens follows the output (the cursor on the last line)', function()
+      -- 60 lines, more than a window shows, then more output for each line sent (the tty echoes
+      -- it and cat prints it).
+      local launch = fake({ argv = { 'sh', '-c', 'i=1; while [ $i -le 60 ]; do echo "line $i"; i=$((i+1)); done; exec cat' } })
+      local buf = terminal.open('fake', { launch = launch, focus = false })
+      local function has_line(text)
+        return vim.tbl_contains(api.nvim_buf_get_lines(buf, 0, -1, false), text)
+      end
+      wait_for(function()
+        return has_line('line 60')
+      end, 5000, 'the first output')
+      local main_win = vim.fn.bufwinid(buf)
+      local tab1 = api.nvim_get_current_tabpage()
+      assert.truthy(api.nvim_buf_line_count(buf) > api.nvim_win_get_height(main_win), 'more lines than the window shows')
+      ---"<first>-<last visible line>/<lines> cursor <line>": at the bottom, the last two are the line count.
+      local function view(win)
+        return api.nvim_win_call(win, function()
+          return ('%d-%d/%d cursor %d'):format(vim.fn.line('w0'), vim.fn.line('w$'), api.nvim_buf_line_count(buf),
+            api.nvim_win_get_cursor(win)[1])
+        end)
+      end
+      local function at_bottom(win, what)
+        local n = api.nvim_buf_line_count(buf)
+        local v = view(win)
+        assert.truthy(v:match('^%d+%-(%d+)/') == tostring(n) and v:match('cursor (%d+)$') == tostring(n),
+          what .. ' shows the last line, with the cursor there: ' .. v)
+      end
+      local n = 0
+      ---More output, while `wins` are shown: each of them keeps showing the last line.
+      local function more(wins, what)
+        n = n + 1
+        local lines = api.nvim_buf_line_count(buf)
+        assert.truthy(terminal.send('more ' .. n .. '\r', { bracketed = false }))
+        wait_for(function()
+          return has_line('more ' .. n) and api.nvim_buf_line_count(buf) > lines
+        end, 5000, 'more output')
+        vim.wait(50)
+        for _, w in ipairs(wins) do
+          at_bottom(w, what .. ' after more output')
+        end
+      end
+
+      -- split_here() in another tab page (a diff's view of the agent).
+      vim.cmd('tabnew')
+      local tab2 = api.nvim_get_current_tabpage()
+      local extra = assert(terminal.split_here())
+      at_bottom(extra, 'split_here()')
+      -- The terminal's own window, started without focus.
+      at_bottom(main_win, 'the window of an unfocused start')
+      more({ extra, main_win }, 'split_here() and the main window')
+      -- Hidden here, shown again here (:AgentOpen) while it is shown in the first tab page; the user
+      -- had scrolled both views back to the top.
+      api.nvim_win_set_cursor(extra, { 1, 0 })
+      api.nvim_win_set_cursor(main_win, { 1, 0 })
+      assert.truthy(terminal.close())
+      assert.eq(buf, terminal.open('fake', { focus = false }))
+      local shown = wins_in(buf, tab2)[1]
+      at_bottom(shown, 'open() in another tab page')
+      more({ shown }, 'open() in another tab page')
+      -- Hidden everywhere (last seen scrolled back to the top), more output, then shown again
+      -- (:Agent), in Normal mode (no start_insert).
+      assert.truthy(terminal.close())
+      api.nvim_set_current_tabpage(tab1)
+      api.nvim_win_set_cursor(main_win, { 1, 0 })
+      assert.truthy(terminal.close())
+      assert.same({}, vim.fn.win_findbuf(buf))
+      more({}, 'hidden')
+      assert.eq(buf, terminal.toggle('fake'))
+      assert.eq('nt', api.nvim_get_mode().mode, 'Normal mode in the terminal window')
+      at_bottom(api.nvim_get_current_win(), 'toggle() of a hidden terminal')
+      more({ api.nvim_get_current_win() }, 'toggle() of a hidden terminal')
+      -- The other layouts.
+      assert.truthy(terminal.close())
+      assert.eq(buf, terminal.open('fake', { focus = false, layout = 'float' }))
+      at_bottom(vim.fn.bufwinid(buf), 'a float')
+      assert.truthy(terminal.close())
+      assert.eq(buf, terminal.open('fake', { focus = false, layout = 'tab' }))
+      local tab_win = vim.fn.win_findbuf(buf)[1]
+      assert.truthy(api.nvim_win_get_tabpage(tab_win) ~= tab1, 'in a tab page of its own')
+      at_bottom(tab_win, 'a tab page')
+    end)
+
+    it('declines without an agent terminal and for the float layout', function()
+      local win, why = terminal.split_here()
+      assert.eq(nil, win)
+      assert.eq('no agent terminal', why)
+      local launch = fake()
+      terminal.open('fake', { launch = launch, layout = 'float', focus = false })
+      vim.cmd('tabnew')
+      win, why = terminal.split_here()
+      assert.eq(nil, win)
+      assert.matches('float', why)
+    end)
+
+    it('close() and toggle() act on the current tab page; close() elsewhere when not shown here', function()
+      local launch, out = fake()
+      local buf = terminal.open('fake', { launch = launch, focus = false })
+      wait_ready(out)
+      local main_win = vim.fn.bufwinid(buf)
+      local job = terminal.info().job
+      local tab1 = api.nvim_get_current_tabpage()
+      vim.cmd('tabnew')
+      local tab2 = api.nvim_get_current_tabpage()
+      local extra = assert(terminal.split_here())
+
+      -- close() in the second tab page closes its window only.
+      assert.truthy(terminal.close())
+      assert.falsy(api.nvim_win_is_valid(extra))
+      assert.truthy(api.nvim_win_is_valid(main_win))
+      assert.falsy(terminal.is_visible())
+      assert.truthy(job_running())
+
+      -- toggle() shows it here (a split, focused), and hides it here only.
+      assert.eq(buf, terminal.toggle('fake'))
+      local shown = wins_in(buf, tab2)[1]
+      assert.truthy(shown)
+      assert.eq(shown, api.nvim_get_current_win())
+      assert.eq(api.nvim_win_get_width(main_win), api.nvim_win_get_width(shown))
+      assert.eq(buf, terminal.toggle('fake'))
+      assert.eq(0, #wins_in(buf, tab2))
+      assert.truthy(api.nvim_win_is_valid(main_win))
+      assert.eq(job, terminal.info().job)
+
+      -- From the first tab page, where it is shown: only that window closes.
+      extra = assert(terminal.split_here())
+      api.nvim_set_current_tabpage(tab1)
+      assert.truthy(terminal.close())
+      assert.falsy(api.nvim_win_is_valid(main_win))
+      assert.truthy(api.nvim_win_is_valid(extra))
+      -- Not shown here any more: close() hides it everywhere else.
+      assert.truthy(terminal.close())
+      assert.falsy(api.nvim_win_is_valid(extra))
+      assert.same({}, vim.fn.win_findbuf(buf))
+      assert.falsy(terminal.close())
+      assert.truthy(job_running())
+      assert.truthy(api.nvim_buf_is_valid(buf))
+    end)
+
+    it('stop() and auto_close close every window, and only those', function()
+      local launch = fake()
+      local buf = terminal.open('fake', { launch = launch, focus = false })
+      vim.cmd('tabnew')
+      local other = api.nvim_get_current_win()
+      vim.cmd('vsplit')
+      local extra = assert(terminal.split_here())
+      assert.eq(3, #api.nvim_tabpage_list_wins(0))
+      assert.truthy(terminal.stop())
+      assert.same({}, vim.fn.win_findbuf(buf))
+      assert.falsy(api.nvim_win_is_valid(extra))
+      assert.eq(2, #api.nvim_tabpage_list_wins(0))
+      assert.truthy(api.nvim_win_is_valid(other))
+
+      local launch2 = fake({ env = { FAKE_AGENT_EXIT = '0', FAKE_AGENT_SLEEP = '1' } })
+      vim.cmd('tabprevious')
+      buf = terminal.open('fake', { launch = launch2, focus = false })
+      vim.cmd('tabnext')
+      local extra2 = assert(terminal.split_here())
+      assert.eq(2, #vim.fn.win_findbuf(buf))
+      wait_for(function()
+        return not vim.api.nvim_buf_is_valid(buf)
+      end, 5000, 'auto close')
+      assert.falsy(api.nvim_win_is_valid(extra2))
+      assert.eq(2, #api.nvim_tabpage_list_wins(0), 'the other windows stay')
+      assert.eq(nil, terminal.info())
+      assert.falsy(has_note('left open'))
+    end)
+
+    it("with the 'tab' layout it matches no split, and show() goes to the terminal's own tab page", function()
+      config.setup({ terminal = { layout = 'tab', auto_close = true, start_insert = false, split_size = 0.3 } })
+      local tab0 = api.nvim_get_current_tabpage()
+      local launch = fake()
+      local buf = terminal.open('fake', { launch = launch })
+      local own_tab = api.nvim_get_current_tabpage()
+      local own_win = api.nvim_get_current_win()
+      assert.truthy(own_tab ~= tab0)
+      -- A float in its tab page (a notification, say) does not make it a split.
+      api.nvim_open_win(api.nvim_create_buf(false, true), false,
+        { relative = 'editor', row = 1, col = 1, width = 10, height = 1 })
+      -- A diff-like tab page next to it.
+      vim.cmd('tabnew')
+      local tab2 = api.nvim_get_current_tabpage()
+      local extra = assert(terminal.split_here())
+      assert.eq(math.floor(vim.o.columns * 0.3), api.nvim_win_get_width(extra))
+      assert.eq(3, #api.nvim_list_tabpages())
+      -- Hidden here, :Agent goes to its own tab page instead of opening another one.
+      assert.eq(buf, terminal.toggle('fake'))
+      assert.falsy(api.nvim_win_is_valid(extra))
+      assert.eq(tab2, api.nvim_get_current_tabpage())
+      assert.eq(buf, terminal.toggle('fake'))
+      assert.eq(own_win, api.nvim_get_current_win())
+      assert.eq(own_tab, api.nvim_get_current_tabpage())
+      assert.eq(3, #api.nvim_list_tabpages())
+      -- From the editor's tab page too; focus = false leaves the cursor alone.
+      api.nvim_set_current_tabpage(tab0)
+      local cur = api.nvim_get_current_win()
+      assert.eq(buf, terminal.open('fake', { focus = false }))
+      assert.eq(cur, api.nvim_get_current_win())
+      assert.eq(buf, terminal.open('fake'))
+      assert.eq(own_win, api.nvim_get_current_win())
+      assert.eq(3, #api.nvim_list_tabpages())
+    end)
+  end)
+
   it('removes the temp files of the running agent on VimLeavePre', function()
     local dir = tmp .. '/leave'
     util.mkdir_p(dir, tonumber('700', 8))

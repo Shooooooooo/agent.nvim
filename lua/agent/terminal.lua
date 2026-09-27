@@ -4,6 +4,16 @@
 --- call) returns an agent.LaunchSpec (see agent.agents.build_launch); this module runs it with
 --- jobstart(term=true), shows it in the configured layout, and cleans up on exit. There is a single
 --- terminal: opening another agent stops the one it holds (agent.open() asks first).
+---
+--- One terminal buffer, possibly several windows: besides its own window (the split, float or tab
+--- page of the layout), a view that takes a tab page of its own, like a diff, can show it in one
+--- more split (split_here()). Every window is just a view of the buffer, and this module keeps no
+--- per-window state: "visible" means shown in the current tab page; toggle() and close() act on
+--- the windows of the current tab page (close(): on every window when there is none here); stop()
+--- and auto_close close them all. Closing a window never stops the job (the buffer is 'bufhidden'
+--- = hide). Neovim sizes a terminal to its largest window, so an extra split is made as large as
+--- the terminal's own split (see split_config), and the agent's TUI does not reflow. Every window
+--- opened here starts on the last line, so that it follows the output (see follow()).
 local config = require('agent.config')
 local util = require('agent.util')
 
@@ -74,6 +84,25 @@ local function windows_of(bufnr, current_tab)
     end
   end
   return out
+end
+
+---@param win integer
+---@return boolean
+local function is_float(win)
+  return vim.api.nvim_win_get_config(win).relative ~= ''
+end
+
+---The number of non-floating windows in tab page `tab`.
+---@param tab integer
+---@return integer
+local function split_count(tab)
+  local n = 0
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+    if not is_float(w) then
+      n = n + 1
+    end
+  end
+  return n
 end
 
 ---Close a window; when it is the last one, show another buffer in it instead.
@@ -193,6 +222,8 @@ local function style_window(win, layout)
   wo.signcolumn = 'no'
   wo.foldcolumn = '0'
   wo.spell = false
+  -- Like the window the terminal was started in (Neovim sets it there, not in later windows).
+  wo.wrap = false
   if layout == 'split' then
     local side = tcfg().split_side
     if side == 'above' or side == 'below' then
@@ -203,7 +234,51 @@ local function style_window(win, layout)
   end
 end
 
----Open a window for `buf` without entering it (except for tabs, which are left again when needed).
+---Put the cursor of `win` on the last line of its buffer, so that the window follows the output.
+---Neovim scrolls a terminal window along with the output only while its cursor is on the last line
+---(or while it is in Terminal mode); a new window on a terminal buffer starts on line 1 (or where
+---a closed window left it), and would show old output and hide the agent's prompt.
+---@param win integer
+local function follow(win)
+  pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(win)), 0 })
+end
+
+---nvim_open_win() config for a split of `buf` along the `side` edge of the current tab page.
+---Its size is the size of a split that already shows `buf` (in another tab page; the largest, when
+---the user resized one), else config.terminal.split_size of the editor. Neovim sizes a terminal
+---to its largest window: a window of the same size keeps the agent's TUI from reflowing (or from
+---being cut off). A window alone in its tab page (the 'tab' layout) is not a split and is not
+---matched.
+---@param buf integer
+---@param side string  'right'|'left'|'below'|'above'
+---@return table
+local function split_config(buf, side)
+  local c = tcfg()
+  local vertical = side ~= 'above' and side ~= 'below'
+  local size
+  for _, w in ipairs(windows_of(buf)) do
+    if not is_float(w) and split_count(vim.api.nvim_win_get_tabpage(w)) > 1 then
+      local width = vim.api.nvim_win_get_width(w)
+      -- A split along the same kind of edge: narrower than the editor for left/right, as wide
+      -- as the editor for above/below.
+      if vertical and width < vim.o.columns then
+        size = math.max(size or 0, width)
+      elseif not vertical and width == vim.o.columns then
+        size = math.max(size or 0, vim.api.nvim_win_get_height(w))
+      end
+    end
+  end
+  local wcfg = { split = side, win = -1 }
+  if vertical then
+    wcfg.width = size or math.max(10, math.floor(vim.o.columns * c.split_size))
+  else
+    wcfg.height = size or math.max(3, math.floor(vim.o.lines * c.split_size))
+  end
+  return wcfg
+end
+
+---Open a window for `buf` without entering it (except for tabs, which are left again when needed),
+---following the output.
 ---@param buf integer
 ---@param layout string
 ---@param name string
@@ -237,19 +312,13 @@ local function open_window(buf, layout, name)
       pcall(vim.api.nvim_set_current_win, prev)
     end
   else
-    local side = c.split_side or 'right'
-    local wcfg = { split = side, win = -1 }
-    if side == 'above' or side == 'below' then
-      wcfg.height = math.max(3, math.floor(vim.o.lines * c.split_size))
-    else
-      wcfg.width = math.max(10, math.floor(vim.o.columns * c.split_size))
-    end
-    ok, win = pcall(vim.api.nvim_open_win, buf, false, wcfg)
+    ok, win = pcall(vim.api.nvim_open_win, buf, false, split_config(buf, c.split_side or 'right'))
   end
   if not ok then
     return nil, tostring(win)
   end
   style_window(win, layout)
+  follow(win)
   return win, nil
 end
 
@@ -415,6 +484,8 @@ local function start(name, opts)
     return nil, ('%s: cannot start %s: %s'):format(name, argv[1], why)
   end
   t.job = job
+  -- The terminal now fills the buffer with its screen's rows.
+  follow(win)
   local pok, pid = pcall(vim.fn.jobpid, job)
   t.pid = pok and pid or nil
   current = t
@@ -431,11 +502,24 @@ local function start(name, opts)
 end
 
 ---Show a running terminal (opening a window if hidden) and focus it unless `focus == false`.
+---With the 'tab' layout, from another tab page (a diff's, for one), that is its own tab page when
+---it has one: a tab page with the terminal as its only (non-floating) window.
 ---@param t agent.Term
 ---@param opts table
 ---@return integer|nil bufnr, string|nil err
 local function show(t, opts)
   local win = windows_of(t.bufnr, true)[1]
+  if not win and (opts.layout or t.layout) == 'tab' then
+    for _, w in ipairs(windows_of(t.bufnr)) do
+      if not is_float(w) and split_count(vim.api.nvim_win_get_tabpage(w)) == 1 then
+        if opts.focus == false then
+          return t.bufnr, nil
+        end
+        win = w
+        break
+      end
+    end
+  end
   if not win then
     local err
     win, err = open_window(t.bufnr, opts.layout or t.layout, t.name)
@@ -497,19 +581,58 @@ function M.open(name, opts)
   return buf, err
 end
 
----Hide the terminal windows (all tabpages); the agent keeps running.
+---Hide the terminal; the agent keeps running. When it is shown in the current tab page, only its
+---windows there close: inside a diff's tab page, the diff's view of the agent goes and the
+---terminal's own window stays. Otherwise its windows in every tab page close (e.g. its own tab
+---page, seen from another).
 ---@return boolean closed  true when a window was closed
 function M.close()
   local t = current
   if not buf_valid(t) then
     return false
   end
-  local wins = windows_of(t.bufnr)
-  hide_all(t)
+  local wins = windows_of(t.bufnr, true)
+  if #wins == 0 then
+    wins = windows_of(t.bufnr)
+  end
+  for _, w in ipairs(wins) do
+    hide_window(w)
+  end
   return #wins > 0
 end
 
----Hide the terminal when `name` runs in it and it is visible in the current tabpage; else M.open().
+---Show the terminal in one more window, in the current tab page, without entering it: a split
+---along the config.terminal.split_side edge, as large as the terminal's own split (see
+---split_config: the agent's TUI keeps its size), following the output. For a view that takes a tab
+---page of its own, like a diff (config.diff.show_terminal), so that the agent stays in sight. Only
+---for the 'split' and 'tab' layouts: a float would cover the view, and 'none' has no terminal. The
+---window is one more view of the buffer: closing it (or its tab page) hides nothing else and never
+---stops the agent; stop() and auto_close close it with the other windows of the terminal.
+---@return integer|nil win, string|nil why  nil when there is no agent terminal (running, or
+---  finished and left open), the layout is 'float' or 'none', the terminal is already shown in
+---  this tab page, or the window cannot be opened
+function M.split_here()
+  local t = current
+  if not buf_valid(t) then
+    return nil, 'no agent terminal'
+  end
+  if t.layout ~= 'split' and t.layout ~= 'tab' then
+    return nil, ('the terminal layout is %q'):format(t.layout)
+  end
+  if #windows_of(t.bufnr, true) > 0 then
+    return nil, 'the terminal is already shown in this tab page'
+  end
+  local ok, win = pcall(vim.api.nvim_open_win, t.bufnr, false, split_config(t.bufnr, tcfg().split_side or 'right'))
+  if not ok then
+    return nil, tostring(win)
+  end
+  style_window(win, 'split')
+  follow(win)
+  return win, nil
+end
+
+---Hide the terminal when `name` runs in it and it is visible in the current tabpage (its windows in
+---the other tab pages stay); else M.open().
 ---@param name string
 ---@param opts agent.TermOpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
@@ -575,7 +698,7 @@ function M.is_running()
   return alive(current)
 end
 
----True when the terminal is shown in the current tabpage.
+---True when the terminal is shown in the current tabpage (in any of its windows).
 ---@return boolean
 function M.is_visible()
   local t = current

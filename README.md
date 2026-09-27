@@ -4,19 +4,20 @@ Run Claude Code, OpenCode, GitHub Copilot CLI or Gemini CLI in a Neovim terminal
 itself serving the IDE integration each CLI expects from VS Code. Like
 [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim), but for four agents.
 
-![agent.nvim demo: lines selected in Neovim show up in Claude Code's split; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller and its edit is accepted in a Neovim diff with :w](demo/agent-nvim-demo.gif)
+![agent.nvim demo: lines selected in Neovim show up in Claude Code's split; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller, and its edit opens in a Neovim diff tab with Claude Code still shown beside it and is accepted with :w](demo/agent-nvim-demo.gif)
 
 Select lines, switch to Claude with `<C-w>l` and type the request: Claude notifies through the
-$NVIM controller, and its edit is accepted in a Neovim diff with `:w`. This is the real Claude
-Code TUI, with the model's replies scripted so that the recording is reproducible (see
-[demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
+$NVIM controller, and its edit opens in a Neovim diff tab, with Claude still in view, where `:w`
+accepts it. This is the real Claude Code TUI, with the model's replies scripted so that the
+recording is reproducible (see [demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
 
 ## Features
 
 - The agent runs in a split, float or tab. `:Agent` toggles the terminal; the agent keeps running
   while hidden. One agent runs at a time: starting another one asks before replacing it.
 - The agent automatically sees your current file and visual selection.
-- Proposed edits open as a side-by-side diff in Neovim: accept with `:w`, reject by closing it.
+- Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
+  accept with `:w`, reject by closing it.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
   Neovim it runs in.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
@@ -74,7 +75,8 @@ opens it (pressing `<Esc>` first would drop the selection).
    the agent keeps the selection. Leaving Visual mode in the file (`<Esc>`) drops it, and the
    agent then sees just the current file.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
-   `<leader>aa`, reject with `<leader>ad` or by closing the tab. Claude Code's default mode
+   `<leader>aa`, reject with `<leader>ad` or by closing the tab. The tab shows the agent's
+   terminal too, so you can read its prompt or answer there instead. Claude Code's default mode
    rarely asks, see [Claude Code](#claude-code).
 5. Run `:Agent` again to hide the terminal. The agent keeps running.
 
@@ -84,7 +86,7 @@ opens it (pressing `<Esc>` first would drop the selection).
 |---|---|
 | `:Agent [name]` | Toggle the agent terminal, starting the agent if needed. |
 | `:AgentOpen [name]` | Open (start or show) the agent terminal and focus it. |
-| `:AgentClose` | Hide the terminal. The agent keeps running. |
+| `:AgentClose` | Hide the terminal (in a diff tab, only there). The agent keeps running. |
 | `:AgentStop` | Stop the agent, and its IDE server unless `auto_start` is on. |
 | `:AgentDiffAccept` | Accept the current diff. |
 | `:AgentDiffReject` | Reject the current diff. |
@@ -111,6 +113,7 @@ require('agent').setup({
     split_size = 0.4,       -- fraction of the editor width (or height)
   },
   diff = {
+    show_terminal = true,   -- show the agent terminal in diff tabs; false: full-width diff
     keymaps = { accept = '<leader>aa', reject = '<leader>ad' }, -- '' or false disables a key
   },
   agents = {

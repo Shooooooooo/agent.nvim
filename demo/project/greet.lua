@@ -1,4 +1,4 @@
--- greet.lua: say hello to everyone on the list
+-- greet.lua: say hello to everyone
 local M = {}
 
 function M.greet(names)

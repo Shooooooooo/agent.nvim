@@ -16,6 +16,10 @@ if not pcall(vim.cmd.colorscheme, 'catppuccin') then
   vim.cmd.colorscheme('habamax')
 end
 vim.o.number = true
+-- The diff tab is split three ways (original | proposed | Claude): keep the code's gutter narrow,
+-- so that the code fits (3 columns for the line numbers, no fold column in the diff windows).
+vim.o.numberwidth = 3
+vim.opt.diffopt:append('foldcolumn:0')
 vim.o.cursorline = true
 vim.o.signcolumn = 'no'
 vim.o.showmode = false
@@ -52,12 +56,25 @@ local diff_sides = {
 }
 vim.api.nvim_create_autocmd({ 'WinEnter', 'BufWinEnter' }, {
   callback = vim.schedule_wrap(function()
+    local file -- the file under review, from the original side's winbar (' original: <file>')
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      file = file or vim.wo[win].winbar:match('^ original: (.+)$')
+    end
     for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       if vim.wo[win].diff then
         -- agent.nvim's proposal is the only acwrite buffer (agent-diff://<id>) in its diff.
         local proposal = vim.bo[vim.api.nvim_win_get_buf(win)].buftype == 'acwrite'
         vim.wo[win].winhighlight = proposal and diff_sides.new or diff_sides.old
         vim.wo[win].number = true
+        -- The proposal's winbar is ' proposed: %<<title> %=accept: :w ', and Claude's title for
+        -- the diff ('✻ [Claude Code] greet.lua (<id>) ⧉') does not fit in a third of the screen:
+        -- name the file instead, as agent.nvim does for a diff without a title.
+        local bar = vim.wo[win].winbar
+        if proposal and file and bar:find('%<', 1, true) then
+          vim.wo[win].winbar = bar:gsub('%%<.*%%=', function()
+            return file .. ' %='
+          end, 1)
+        end
       end
     end
   end),
@@ -137,9 +154,12 @@ vim.api.nvim_create_autocmd('TermEnter', {
 
 -- agent.nvim
 require('agent').setup({
-  terminal = { split_size = 0.5 },
-  -- The demo uses :w to accept; without the key hints the proposal's winbar fits in half the
-  -- screen ('accept: :w').
+  -- The default size: Claude gets 59 of the 148 columns. A diff opens in a tab of its own that
+  -- shows Claude too, as wide as here (diff.show_terminal, on by default), so that Claude's TUI
+  -- does not reflow: original | proposed | Claude, with about 40 columns of code on each side.
+  terminal = { split_size = 0.4 },
+  -- The demo uses :w to accept; without the key hints the proposal's winbar has more room
+  -- ('accept: :w').
   diff = { keymaps = { accept = '', reject = '' } },
   agents = {
     claude = {

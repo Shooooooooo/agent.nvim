@@ -407,8 +407,9 @@ function M.open(name, opts)
   return with_agent(terminal.open, name, opts)
 end
 
----Toggle the agent terminal: hide it when `name` runs in it and it is visible in this tab, else
----open and focus it (replacing another running agent like M.open()).
+---Toggle the agent terminal: hide it when `name` runs in it and it is visible in this tab page (its
+---windows in other tab pages, such as a diff's, stay), else open and focus it (replacing another
+---running agent like M.open()).
 ---@param name string|nil  agent name (default: the running agent, else config.default_agent)
 ---@param opts agent.OpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
@@ -416,7 +417,9 @@ function M.toggle(name, opts)
   return with_agent(terminal.toggle, name, opts)
 end
 
----Hide the agent terminal; the agent keeps running.
+---Hide the agent terminal; the agent keeps running. Where it is shown in the current tab page, only
+---there: in a diff's tab page (config.diff.show_terminal) the diff's view of the agent closes and
+---the terminal's own window stays. Otherwise in every tab page. See agent.terminal.close().
 ---@return boolean closed
 function M.close()
   ensure_setup()
