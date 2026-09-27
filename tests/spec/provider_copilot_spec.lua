@@ -896,48 +896,38 @@ describe('notifications', function()
     a:close()
   end)
 
-  it('at_mention sends add_file_reference to one session, with null selection for a whole file', function()
-    local file = util.realpath(ws) .. '/a.txt'
-    write(file, 'one\ntwo\nthrée\nfour\n')
-    local old, sent_old = streaming_session({ last_activity = 1, copilot_pid = 11, copilot_parent_pid = 10 })
-    local new, sent_new = streaming_session({ last_activity = 2, copilot_pid = 21, copilot_parent_pid = 20 })
-
-    assert.truthy(P.at_mention(file))
-    assert.eq(0, #sent_old)
-    assert.eq(1, #sent_new)
-    local whole = vim.json.decode(vim.json.encode(sent_new[1]))
-    assert.eq('add_file_reference', whole.method)
-    assert.same({ filePath = file, fileUrl = vim.uri_from_fname(file), selection = vim.NIL, selectedText = vim.NIL }, whole.params)
-    -- Both keys must be present as JSON null.
-    assert.matches('"selection":null', vim.json.encode(sent_new[1].params))
-    assert.matches('"selectedText":null', vim.json.encode(sent_new[1].params))
-
-    -- A line range (file not loaded: read from disk), targeted by the terminal job pid.
-    assert.truthy(P.at_mention(file, 2, 3, { pid = 10 }))
-    assert.eq(1, #sent_old)
-    assert.same({
-      filePath = file, fileUrl = vim.uri_from_fname(file),
-      selection = { start = { line = 1, character = 0 }, ['end'] = { line = 2, character = 5 } },
-      selectedText = 'two\nthrée',
-    }, sent_old[1].params)
-
-    -- Loaded buffer: UTF-16 end column; reversed range is normalized.
-    vim.cmd('edit ' .. vim.fn.fnameescape(file))
-    assert.truthy(P.at_mention(file, 3, 3, { session = new.info.copilot_session_id or new.id }))
-    local p = sent_new[#sent_new].params
-    assert.same({ start = { line = 2, character = 0 }, ['end'] = { line = 2, character = 5 } }, p.selection)
-    assert.eq('thrée', p.selectedText)
-    assert.truthy(P.at_mention(file, 3, 2, { pid = 21 }))
-    assert.same({ line = 1, character = 0 }, sent_new[#sent_new].params.selection.start)
-
-    assert.falsy(P.at_mention(file, 1, 1, { pid = 999 }))
-    old:close()
-    new:close()
-  end)
-
-  it('at_mention returns false without a connected CLI or when stopped', function()
-    assert.falsy(P.at_mention(ws .. '/a.txt'))
-    P.stop()
-    assert.falsy(P.at_mention(ws .. '/a.txt'))
+  it('a selection dropped by leaving Visual mode reaches the stream, the cache and get_selection', function()
+    local selection = require('agent.editor.selection')
+    selection.start()
+    local unsubscribe = selection.subscribe(P.on_selection) -- as agent.nvim forwards it
+    local a, sent = streaming_session()
+    local ok, err = pcall(function()
+      local file = util.realpath(ws) .. '/a.txt'
+      vim.cmd('edit ' .. vim.fn.fnameescape(file))
+      api.nvim_win_set_cursor(0, { 1, 0 })
+      vim.cmd('normal! vllll')
+      wait_for(function()
+        return #sent > 0 and sent[#sent].params.text == 'hello'
+      end, 2000, 'selection_changed with the selection')
+      vim.cmd('normal! \27')
+      wait_for(function()
+        return sent[#sent].params.selection.isEmpty
+      end, 2000, 'selection_changed with the cursor only')
+      assert.eq('', sent[#sent].params.text)
+      assert.eq(file, sent[#sent].params.filePath)
+      assert.eq('', P._state().last_selection.text)
+      local data = result_json(call(a, 'get_selection'))
+      assert.eq('', data.text)
+      assert.eq(true, data.current)
+      -- Not a file buffer any more: the cached selection is the dropped one too.
+      vim.cmd('enew')
+      data = result_json(call(a, 'get_selection'))
+      assert.eq('', data.text)
+      assert.eq(file, data.filePath)
+    end)
+    unsubscribe()
+    selection.stop()
+    a:close()
+    assert.truthy(ok, err)
   end)
 end)

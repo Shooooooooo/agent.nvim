@@ -16,8 +16,8 @@
 //   plan.chunk_ms      stream text in word-sized chunks, this many ms apart (default 0: one chunk)
 // A request is part of the scripted turn when some user text contains the trigger. The next step is
 // the number of tool results in the conversation that answer OUR earlier tool calls (ids with an
-// e2e prefix), so synthetic tool results an agent adds itself (e.g. Claude reading an @-mentioned
-// file) do not shift the script. A step's tool is a regex matched against the tool names in the
+// e2e prefix), so synthetic tool results an agent adds itself (e.g. Claude reading a file the
+// prompt names with @path) do not shift the script. A step's tool is a regex matched against the tool names in the
 // request; when none matches (a side request such as a title, or a missing tool) the answer is a
 // plain text "OK" and the miss is logged.
 import http from 'node:http';

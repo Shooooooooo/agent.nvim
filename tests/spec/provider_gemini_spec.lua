@@ -896,6 +896,12 @@ describe('ide/contextUpdate', function()
     assert.eq('alpha\nbeta', files[1].selectedText)
     vim.cmd('normal! \27')
     assert.eq(3, #c:events('ide/contextUpdate'))
+    -- Leaving Visual mode in the file window drops the selection after a short grace period.
+    msg = c:wait_event('ide/contextUpdate', 4)
+    files = msg.params.workspaceState.openFiles
+    assert.eq(a, files[1].path)
+    assert.eq(true, files[1].isActive)
+    assert.eq(nil, files[1].selectedText)
   end)
 
   it('truncates the selected text and lists at most 10 files', function()
@@ -950,8 +956,7 @@ describe('ide/contextUpdate', function()
 end)
 
 describe('misc', function()
-  it('at_mention is unsupported and on_selection is safe when stopped', function()
-    assert.eq(false, P.at_mention('/x', 1, 2))
+  it('on_selection is safe when stopped', function()
     P.on_selection(nil)
     assert.falsy(P.is_running())
   end)

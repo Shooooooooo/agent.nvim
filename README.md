@@ -4,28 +4,30 @@ Run Claude Code, OpenCode, GitHub Copilot CLI and Gemini CLI in a Neovim termina
 itself serving the IDE integration each CLI expects from VS Code. Like
 [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim), but for four agents.
 
-![agent.nvim demo: Claude Code in a Neovim split sees the open file and the selection, gets the selected lines as an @-mention, sends a notification through the $NVIM controller, and its edit is reviewed and accepted in a Neovim diff](demo/agent-nvim-demo.gif)
+![agent.nvim demo: lines selected in Neovim show up in Claude Code's split; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller and its edit is accepted in a Neovim diff with :w](demo/agent-nvim-demo.gif)
 
-The real Claude Code TUI running in agent.nvim, with the model's replies scripted so that the
-recording is reproducible (see [demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
+Select lines, switch to Claude with `<C-w>l` and type the request: Claude notifies through the
+$NVIM controller, and its edit is accepted in a Neovim diff with `:w`. This is the real Claude
+Code TUI, with the model's replies scripted so that the recording is reproducible (see
+[demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
 
 ## Features
 
 - Agents run in a split, float or tab. `:Agent` toggles the terminal; the agent keeps running
   while hidden.
-- The agent sees your current file and selection, and you can @-mention files and line ranges.
+- The agent automatically sees your current file and visual selection.
 - Proposed edits open as a side-by-side diff in Neovim: accept with `:w`, reject by closing it.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
   Neovim it runs in.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
   a token.
 
-| Agent | Selection | @-mentions | Diffs in Neovim | Diagnostics |
-|---|---|---|---|---|
-| Claude Code (`claude`) | yes | yes | yes, editable | yes |
-| OpenCode (`opencode`) | yes | yes | no | through the controller |
-| GitHub Copilot CLI (`copilot`) | yes | yes | yes, read-only | yes |
-| Gemini CLI (`gemini`) | yes | typed into the prompt | yes, editable | through the controller |
+| Agent | Sees file and selection | Diffs in Neovim | Diagnostics |
+|---|---|---|---|
+| Claude Code (`claude`) | yes | yes, editable | yes |
+| OpenCode (`opencode`) | yes | no | through the controller |
+| GitHub Copilot CLI (`copilot`) | selection (file through a tool) | yes, read-only | yes |
+| Gemini CLI (`gemini`) | yes | yes, editable | through the controller |
 
 ## Requirements
 
@@ -45,11 +47,9 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   main = 'agent',
   opts = {},
   keys = {
-    { '<leader>ac', '<cmd>Agent<cr>', desc = 'Toggle agent' },
-    { '<leader>as', '<cmd>AgentSend<cr>', mode = 'x', desc = 'Send selection to agent' },
-    { '<leader>ab', '<cmd>AgentAdd<cr>', desc = 'Add current file to agent' },
+    { '<leader>ac', '<cmd>Agent<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
   },
-  cmd = { 'Agent', 'AgentOpen', 'AgentSend', 'AgentAdd', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' },
+  cmd = { 'Agent', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' },
 }
 ```
 
@@ -57,10 +57,11 @@ With `vim.pack` (Neovim 0.12+):
 
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
-vim.keymap.set('n', '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })
-vim.keymap.set('x', '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send selection to agent' })
-vim.keymap.set('n', '<leader>ab', '<cmd>AgentAdd<cr>', { desc = 'Add current file to agent' })
+vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })
 ```
+
+The mapping works in Visual mode too, so that a selection reaches the agent when `<leader>ac`
+opens it (pressing `<Esc>` first would drop the selection).
 
 ## Quick start
 
@@ -69,8 +70,9 @@ vim.keymap.set('n', '<leader>ab', '<cmd>AgentAdd<cr>', { desc = 'Add current fil
 2. Run `:Agent` to open Claude in a split on the right (or `:Agent opencode`, `:Agent copilot`,
    `:Agent gemini`). The agent connects to Neovim by itself; Gemini needs a
    [one-time setup](#gemini-cli) first.
-3. Select lines and run `:AgentSend` (`<leader>as`) to @-mention them. `:AgentAdd` mentions the
-   current file.
+3. Select lines and switch to the agent straight from Visual mode (`<C-w>l`, then `i` to type):
+   the agent keeps the selection. Leaving Visual mode in the file (`<Esc>`) drops it, and the
+   agent then sees just the current file.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
    `<leader>aa`, reject with `<leader>ad` or by closing the tab. Claude Code's default mode
    rarely asks, see [Claude Code](#claude-code).
@@ -84,8 +86,6 @@ vim.keymap.set('n', '<leader>ab', '<cmd>AgentAdd<cr>', { desc = 'Add current fil
 | `:AgentOpen [name]` | Open (start or show) an agent terminal and focus it. |
 | `:AgentClose [name]` | Hide the terminal. The agent keeps running. |
 | `:AgentStop [name]` | Stop the agent. `:AgentStop!` stops every agent and IDE server. |
-| `:[range]AgentSend [name]` | @-mention the selected lines. |
-| `:AgentAdd [file] [start] [end]` | @-mention a file (default: the current one), optionally a line range. |
 | `:AgentDiffAccept` | Accept the current diff. |
 | `:AgentDiffReject` | Reject the current diff. |
 | `:AgentStatus` | Show the agents and the IDE servers. |
@@ -137,11 +137,13 @@ Full reference: `:help agent-config`.
 ### OpenCode
 
 - Connects through the Claude IDE server's lock file in `~/.claude/ide`; nothing to set up.
-- It only receives the selection and @-mentions: its edits are written directly, so there are no
-  diffs in Neovim. The $NVIM controller works.
+- It only receives the file and selection: its edits are written directly, so there are no diffs
+  in Neovim. The $NVIM controller works.
 
 ### GitHub Copilot CLI
 
+- It attaches only a non-empty selection to your prompt, not the current file. Its model can
+  still read the current file and cursor with its `ide-get_selection` tool.
 - **Security:** `providers.copilot.trust_workspace = true` makes Copilot skip its folder-trust
   prompt and load the repository's own MCP servers, settings and hooks without asking. Leave it
   `false` (the default), or pass a `function(folder)` that returns `true` only for folders you

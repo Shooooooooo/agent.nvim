@@ -8,12 +8,12 @@
 #   tests/e2e/run.sh claude copilot       # only these
 #
 # For each agent, a headless Neovim runs tests/e2e/driver.lua: it calls require('agent').setup()
-# and require('agent').open(<agent>) (split layout), waits for the agent's IDE connection, sends an
-# at-mention, and submits a prompt. A scripted model turn then (a) calls the $NVIM controller
-# (exec_lua and open_file) and (b) proposes an edit that goes through the IDE diff, which the
-# driver accepts in Neovim. The driver checks the effects in Neovim and on disk, tears down, and
-# checks that no lock/discovery files or temp dirs are left. This script then checks that no
-# process started by the run is still alive.
+# and require('agent').open(<agent>) (split layout), waits for the agent's IDE connection, selects
+# lines in the editor and checks that the agent got the selection, and submits a prompt. A scripted
+# model turn then (a) calls the $NVIM controller (exec_lua and open_file) and (b) proposes an edit
+# that goes through the IDE diff, which the driver accepts in Neovim. The driver checks the effects
+# in Neovim and on disk, tears down, and checks that no lock/discovery files or temp dirs are left.
+# This script then checks that no process started by the run is still alive.
 #
 # Isolation: nothing touches your real agent configs or accounts.
 #   * HOME, XDG_*_HOME, CLAUDE_CONFIG_DIR, COPILOT_HOME and GEMINI_CLI_HOME point into a fresh

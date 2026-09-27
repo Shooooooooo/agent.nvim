@@ -21,25 +21,12 @@ local M = {}
 ---IDE providers, in a stable order.
 M.PROVIDERS = { 'claude', 'copilot', 'gemini' }
 
----Providers with an at-mention notification (gemini has none, so mentions are always typed).
-local MENTION_PROVIDERS = { claude = true, copilot = true }
-
----After a launch, a provider mention that fails is retried this long (the agent is still
----connecting) before the reference is typed into the terminal instead.
-M.MENTION_WAIT_MS = 15000
-M.MENTION_POLL_MS = 250
----A reference typed into a terminal that was started less than this ago is delayed until then,
----so the agent's TUI is ready to receive input.
-M.STARTUP_GRACE_MS = 3000
-
 local state = {
   setup_done = false,
   ---@type integer|nil
   augroup = nil,
   ---@type fun()|nil  selection subscription
   unsubscribe = nil,
-  ---@type table<string, number>  agent name -> util.now_ms() of its last launch
-  launched = {},
 }
 
 local function scoped()
@@ -209,14 +196,10 @@ local function launcher(name, open_opts)
     },
     auto_approve = open_opts.auto_approve,
     on_exit = function(code)
-      state.launched[name] = nil
       scoped().debug('%s exited with code %d', name, code)
       vim.schedule(reload_changed_buffers)
     end,
   })
-  if spec then
-    state.launched[name] = util.now_ms()
-  end
   return spec, err
 end
 
@@ -354,7 +337,6 @@ function M.stop(name)
       return false
     end
   end
-  state.launched[name] = nil
   return terminal.stop(name)
 end
 
@@ -362,7 +344,6 @@ end
 ---tracking, and delete this Neovim's agent.nvim temp directory. Runs on VimLeavePre.
 function M.teardown()
   pcall(terminal.stop_all)
-  state.launched = {}
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
     if P and P.stop then
@@ -376,318 +357,6 @@ function M.teardown()
   local dir = run_dir_path()
   util.remove_dir(dir)
   pcall(uv.fs_rmdir, vim.fs.dirname(dir))
-end
-
--- ---------------------------------------------------------------------------
--- At-mentions
--- ---------------------------------------------------------------------------
-
----Gemini @-command path escaping (POSIX: backslash before special characters).
----@param p string
----@return string
-local function gemini_escape(p)
-  if util.is_windows then
-    if p:find('[%s&()%[%]{}^=;!\'+,`~%%$@#]') then
-      return '"' .. p .. '"'
-    end
-    return p
-  end
-  return (p:gsub('([ \t()%[%]{};|*?$`\'"#&<>!~\\])', '\\%1'))
-end
-
----The reference an agent understands when typed into its prompt, e.g. `@src/a.lua#L3-5`.
----Paths inside `cwd` are relative to it, others absolute. Lines are 1-based and inclusive; nil
----means the whole file.
----  claude:   @path  @path#L3  @path#L3-5
----  opencode: @path  @path#3   @path#3-5
----  copilot:  @path  @path:3   @path:3-5
----  gemini:   @path  @path (lines 3-5)   (Gemini's @ includes whole files; spaces are escaped)
----@param kind string  agent kind ('claude'|'opencode'|'copilot'|'gemini')
----@param path string
----@param l1 integer|nil
----@param l2 integer|nil
----@param cwd string|nil  the agent's working directory
----@return string
-function M.reference(kind, path, l1, l2, cwd)
-  local abs = util.abspath(path)
-  local rel = abs
-  if cwd and cwd ~= '' then
-    local candidates = { { util.abspath(cwd), abs }, { util.realpath(cwd), util.realpath(abs) } }
-    for _, c in ipairs(candidates) do
-      local base, p = c[1], c[2]
-      if p ~= base and util.path_contains(base, p) then
-        rel = p:sub(#base + (base:sub(-1) == '/' and 1 or 2))
-        break
-      end
-    end
-  end
-  local range = ''
-  if l1 then
-    l2 = l2 or l1
-    if kind == 'gemini' then
-      range = l2 > l1 and (' (lines %d-%d)'):format(l1, l2) or (' (line %d)'):format(l1)
-    else
-      local sep = ({ claude = '#L', opencode = '#', copilot = ':' })[kind] or '#L'
-      range = sep .. l1 .. (l2 > l1 and ('-' .. l2) or '')
-    end
-  end
-  if kind == 'gemini' then
-    return '@' .. gemini_escape(rel) .. range
-  end
-  return '@' .. rel .. range
-end
-
----Mention through the provider: to the client in the agent's terminal (by its job pid), or with no
----terminal running, to the connected clients of the agent's kind.
----@param def agent.AgentDef
----@param name string
----@return boolean sent
-local function provider_mention(def, name, path, l1, l2)
-  local P = loaded_provider(def.provider)
-  if not P or not P.is_running() or not P.at_mention then
-    return false
-  end
-  local info = terminal.info(name)
-  local pid = info and info.running and info.pid or nil
-  local ok, sent = pcall(P.at_mention, path, l1, l2, { kind = def.kind, pid = pid })
-  if not ok then
-    scoped().error('%s.at_mention failed: %s', def.provider, tostring(sent))
-    return false
-  end
-  return sent == true
-end
-
----Does the agent's provider have a client of the agent's kind (connected, maybe not ready yet)?
----@param def agent.AgentDef
----@return boolean
-local function has_client(def)
-  local P = loaded_provider(def.provider)
-  if not MENTION_PROVIDERS[def.provider] or not P or not P.is_running() then
-    return false
-  end
-  local ok, st = pcall(P.status)
-  if not ok or type(st) ~= 'table' or (st.clients or 0) == 0 then
-    return false
-  end
-  for _, s in ipairs(type(st.sessions) == 'table' and st.sessions or {}) do
-    -- Claude sessions carry their kind (claude or opencode); Copilot's are all copilot.
-    if s.kind == nil or s.kind == def.kind then
-      return true
-    end
-  end
-  return false
-end
-
----Mention to an agent that runs outside agent.nvim's terminals (started by hand, e.g. with
----terminal.layout = 'none') and is connected to the IDE server. Not while another agent of the
----same kind runs in an agent.nvim terminal: its client could not be told apart.
----@param def agent.AgentDef
----@param name string  the target agent, not running in a terminal
----@return boolean sent
-local function external_mention(def, name, path, l1, l2)
-  if not has_client(def) then
-    return false
-  end
-  local agents = require('agent.agents')
-  for _, other in ipairs(terminal.running()) do
-    local d = agents.get(other)
-    if other ~= name and d and d.provider == def.provider and d.kind == def.kind then
-      return false
-    end
-  end
-  return provider_mention(def, name, path, l1, l2)
-end
-
----@return boolean ok, string|nil err
-local function type_reference(name, def, path, l1, l2)
-  local info = terminal.info(name)
-  local text = M.reference(def.kind, path, l1, l2, info and info.cwd) .. ' '
-  return terminal.send(name, text)
-end
-
-local function retry_mention(name, def, path, l1, l2, deadline)
-  vim.defer_fn(function()
-    if not terminal.is_running(name) then
-      return
-    end
-    if provider_mention(def, name, path, l1, l2) then
-      return
-    end
-    if util.now_ms() < deadline then
-      return retry_mention(name, def, path, l1, l2, deadline)
-    end
-    local ok, err = type_reference(name, def, path, l1, l2)
-    if not ok then
-      log.notify(tostring(err), vim.log.levels.WARN)
-    end
-  end, M.MENTION_POLL_MS)
-end
-
----@class agent.MentionOpts
----@field name? string    target agent (default: the most recently focused agent; else
----                       config.default_agent, which is started)
----@field focus? boolean  focus the agent's terminal afterwards (default false)
-
----At-mention a file or a line range in an agent's prompt. The mention goes to the provider of the
----target agent (targeted by its terminal pid). When the provider cannot deliver it (not connected,
----or gemini, which has no mention notification) the reference is typed into the agent's terminal
----in the agent's own syntax instead (see M.reference).
----When the agent is not running in a terminal but an agent of its kind that the user started by
----hand is connected to the IDE server, the mention goes there. Otherwise the agent is started
----(except with terminal.layout = 'none', where that is an error).
----@param path string
----@param l1 integer|nil  1-based first line; nil = the whole file
----@param l2 integer|nil  1-based last line (inclusive)
----@param opts agent.MentionOpts|nil
----@return boolean ok, string how_or_err  'sent' | 'typed' | 'pending' (retried after a launch), or the error
-function M.mention(path, l1, l2, opts)
-  ensure_setup()
-  opts = opts or {}
-  if type(path) ~= 'string' or path == '' then
-    return false, 'no file to mention'
-  end
-  path = util.abspath(path)
-  if l1 then
-    l2 = l2 or l1
-    if l2 < l1 then
-      l1, l2 = l2, l1
-    end
-    l1 = math.max(1, math.floor(l1))
-    l2 = math.max(l1, math.floor(l2))
-  else
-    l2 = nil
-  end
-  local name = opts.name
-  if name == nil or name == '' then
-    name = terminal.last_focused() or config.get().default_agent
-  end
-  local agents = require('agent.agents')
-  local def = agents.get(name)
-  if not def then
-    return false, ('unknown agent %q'):format(tostring(name))
-  end
-  if not terminal.is_running(name) then
-    if external_mention(def, name, path, l1, l2) then
-      return true, 'sent'
-    end
-    if config.get().terminal.layout == 'none' then
-      if not MENTION_PROVIDERS[def.provider] then
-        return false, ('%s is not running in Neovim and cannot take mentions (terminal.layout is "none")')
-          :format(name)
-      end
-      return false, ('no %s is connected to Neovim (terminal.layout is "none": start it in your own terminal)')
-        :format(name)
-    end
-    local buf, err = terminal.open(name, { focus = opts.focus == true, silent = true })
-    if not buf then
-      return false, err or (name .. ' is not running')
-    end
-  end
-
-  local how
-  if provider_mention(def, name, path, l1, l2) then
-    how = 'sent'
-  else
-    local launched = state.launched[name]
-    local since = launched and (util.now_ms() - launched) or math.huge
-    if MENTION_PROVIDERS[def.provider] and provider_enabled(def.provider) and since < M.MENTION_WAIT_MS then
-      retry_mention(name, def, path, l1, l2, launched + M.MENTION_WAIT_MS)
-      how = 'pending'
-    elseif since < M.STARTUP_GRACE_MS then
-      vim.defer_fn(function()
-        if terminal.is_running(name) then
-          local ok, err = type_reference(name, def, path, l1, l2)
-          if not ok then
-            log.notify(tostring(err), vim.log.levels.WARN)
-          end
-        end
-      end, math.max(0, math.floor(M.STARTUP_GRACE_MS - since)))
-      how = 'pending'
-    else
-      local ok, err = type_reference(name, def, path, l1, l2)
-      if not ok then
-        return false, err
-      end
-      how = 'typed'
-    end
-  end
-  if opts.focus then
-    terminal.open(name, { focus = true })
-  end
-  return true, how
-end
-
----The last visual selection of a file buffer: its '< and '> marks (what `gv` reselects).
----@param buf integer|nil
----@return string|nil path, integer|nil l1, integer|nil l2
-local function last_visual_marks(buf)
-  if not buf or not require('agent.editor.context').is_file_buffer(buf) then
-    return nil
-  end
-  local ok1, a = pcall(vim.api.nvim_buf_get_mark, buf, '<')
-  local ok2, b = pcall(vim.api.nvim_buf_get_mark, buf, '>')
-  if not (ok1 and ok2) or a[1] == 0 or b[1] == 0 then
-    return nil
-  end
-  return vim.api.nvim_buf_get_name(buf), math.min(a[1], b[1]), math.max(a[1], b[1])
-end
-
----At-mention the selection. With `range`, lines line1..line2 of `range.path` (default: the
----current buffer, which must be a file); without it, the visual selection: the live one in visual
----mode, else the one just left, else (from a buffer that is not a file) the latest selection made
----in a file, else the last visual selection ('<,'>) of the current file or, from a buffer that is
----not a file, of the last focused file.
----@param range { path?: string, line1: integer, line2?: integer }|nil
----@param opts agent.MentionOpts|nil
----@return boolean ok, string how_or_err
-function M.send_selection(range, opts)
-  ensure_setup()
-  local context = require('agent.editor.context')
-  local buf = vim.api.nvim_get_current_buf()
-  local path, l1, l2
-  if range and range.line1 then
-    path = range.path
-    if not path then
-      if not context.is_file_buffer(buf) then
-        return false, 'no selection in a file buffer'
-      end
-      path = vim.api.nvim_buf_get_name(buf)
-    end
-    l1, l2 = range.line1, range.line2 or range.line1
-  else
-    local selection = require('agent.editor.selection')
-    path, l1, l2 = selection.visual_range()
-    if not path and not vim.api.nvim_get_mode().mode:match('^[vVsS\22\19]') then
-      path, l1, l2 = last_visual_marks(context.is_file_buffer(buf) and buf or selection.last_focused_buf())
-    end
-  end
-  if not path then
-    return false, 'no selection in a file buffer'
-  end
-  return M.mention(path, l1, l2, opts)
-end
-
----At-mention a file (or a directory), optionally a line range of it.
----@param path string|nil  default: the current buffer's file
----@param l1 integer|nil
----@param l2 integer|nil
----@param opts agent.MentionOpts|nil
----@return boolean ok, string how_or_err
-function M.add_file(path, l1, l2, opts)
-  ensure_setup()
-  if path == nil or path == '' then
-    local buf = vim.api.nvim_get_current_buf()
-    if not require('agent.editor.context').is_file_buffer(buf) then
-      return false, 'the current buffer is not a file'
-    end
-    path = vim.api.nvim_buf_get_name(buf)
-  else
-    path = vim.fn.fnamemodify(vim.fn.expand(path), ':p')
-  end
-  if not uv.fs_stat(path) then
-    return false, 'no such file: ' .. path
-  end
-  return M.mention(path, l1, l2, opts)
 end
 
 -- ---------------------------------------------------------------------------
@@ -909,30 +578,6 @@ function commands.AgentStop(o)
   if not M.stop(name) then
     notify(name and (name .. ' is not running') or 'no agent is running', vim.log.levels.WARN)
   end
-end
-
-function commands.AgentSend(o)
-  local range
-  local visual = vim.fn.mode():match('^[vVsS\22\19]') ~= nil
-  if o.range and o.range > 0 and not visual then
-    range = { line1 = o.line1, line2 = o.line2 }
-  end
-  local ok, how = M.send_selection(range, { name = arg1(o) })
-  if visual then
-    vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'n', false)
-  end
-  report(ok, how)
-end
-
-function commands.AgentAdd(o)
-  local file = o.fargs[1]
-  local l1 = o.fargs[2] and tonumber(o.fargs[2])
-  local l2 = o.fargs[3] and tonumber(o.fargs[3])
-  if (o.fargs[2] and not l1) or (o.fargs[3] and not l2) then
-    return report(false, 'usage: :AgentAdd [file] [start_line] [end_line]')
-  end
-  local ok, how = M.add_file(file, l1, l2)
-  report(ok, how)
 end
 
 function commands.AgentDiffAccept()

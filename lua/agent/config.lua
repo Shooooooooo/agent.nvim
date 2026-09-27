@@ -56,7 +56,7 @@ M.defaults = {
     claude = { cmd = { 'claude' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false },
     opencode = {
       cmd = { 'opencode' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false,
-      ---@type integer  OpenCode reads at_mentioned/selection lines as 1-based; this offset is added to the 0-based wire values
+      ---@type integer  OpenCode reads selection lines as 1-based; this offset is added to the 0-based wire values
       line_offset = 1,
       ---@type boolean  Unset TERM_PROGRAM/TERM_PROGRAM_VERSION/GIT_ASKPASS inherited from a VS Code terminal
       scrub_vscode_env = true,

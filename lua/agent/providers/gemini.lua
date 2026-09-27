@@ -1090,12 +1090,6 @@ function M.on_selection(_)
   schedule_context()
 end
 
----Gemini has no at-mention notification.
----@return boolean false
-function M.at_mention(_, _, _)
-  return false
-end
-
 ---Internal state, for tests.
 ---@return table|nil
 function M._state()

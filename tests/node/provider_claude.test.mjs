@@ -309,11 +309,6 @@ function decodeSelection(p) {
   if (typeof p.text !== 'string' || !p.selection || !isPos(p.selection.start) || !isPos(p.selection.end)) return undefined;
   return { filePath: p.filePath, ranges: [{ text: p.text, selection: p.selection }] };
 }
-/** OpenCode's EditorMentionSchema: both lines required. */
-function decodeMention(p) {
-  if (!p || typeof p.filePath !== 'string' || typeof p.lineStart !== 'number' || typeof p.lineEnd !== 'number') return undefined;
-  return p;
-}
 
 async function opencodeClient(root, directory) {
   const conn = discoverEditorConnection(root, directory);
@@ -321,7 +316,7 @@ async function opencodeClient(root, directory) {
   const socket = conn.authToken
     ? new WebSocket(conn.url, { headers: { 'x-claude-code-ide-authorization': conn.authToken } })
     : new WebSocket(conn.url);
-  const c = { socket, selections: [], mentions: [], dropped: [], server: undefined, conn };
+  const c = { socket, selections: [], dropped: [], server: undefined, conn };
   let requestID = 0;
   const pending = new Map();
   const send = (payload) => socket.readyState === 1 && socket.send(JSON.stringify({ jsonrpc: '2.0', ...payload }));
@@ -331,10 +326,6 @@ async function opencodeClient(root, directory) {
     if (message.method === 'selection_changed') {
       const s = decodeSelection(message.params);
       if (s) return c.selections.push({ ...s, source: 'websocket' });
-    }
-    if (message.method === 'at_mentioned') {
-      const m = decodeMention(message.params);
-      if (m) return c.mentions.push(m);
     }
     if (message.method) return c.dropped.push(message);
     if (typeof message.id !== 'number') return;
@@ -451,10 +442,6 @@ describe('Claude Code 2.1.283 replay', () => {
     const clients = await fx.lua('return P.clients()');
     assert.equal(clients[0].pid, 4242);
     assert.equal(clients[0].name, 'claude-code');
-
-    // at_mentioned (0-based; Claude adds 1 and shows @b.txt#L2-3)
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, 2, 3)`), true);
-    assert.deepEqual((await c.note('at_mentioned')).params, { filePath: fx.workspace + '/b.txt', lineStart: 1, lineEnd: 2 });
 
     // Turn start: closeAllDiffTabs {} (errors ignored by Claude).
     c.raw(CLAUDE_TOOL_CALL(2, 'closeAllDiffTabs', {}));
@@ -610,17 +597,14 @@ describe('OpenCode client', () => {
     const clients = await fx.lua('return P.clients()');
     assert.equal(clients[0].kind, 'opencode');
 
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, 2, 3)`), true);
-    await until(() => c.mentions.length === 1, 2000, 'mention');
-    assert.deepEqual(c.mentions[0], { filePath: fx.workspace + '/b.txt', lineStart: 2, lineEnd: 3 });
-    // Whole file -> 1..N (OpenCode requires both lines).
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')})`), true);
-    await until(() => c.mentions.length === 2, 2000, 'mention 2');
-    assert.deepEqual(c.mentions[1], { filePath: fx.workspace + '/b.txt', lineStart: 1, lineEnd: 3 });
-    // Directories are not sent to OpenCode.
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace)})`), false);
+    // A later selection change is pushed at once, also with +1.
+    await fx.lua(`P.on_selection({ path = ${luaStr(fx.workspace + '/b.txt')}, bufnr = 1, text = 'two\\nthree',
+      start = { line = 1, character = 0 }, finish = { line = 2, character = 5 }, is_empty = false, mode = 'V' })`);
+    await until(() => c.selections.length === 2, 2000, 'second selection');
+    const r1 = c.selections[1].ranges[0];
+    assert.equal(r1.text, 'two\nthree');
+    assert.deepEqual([r1.selection.start, r1.selection.end], [{ line: 2, character: 1 }, { line: 3, character: 6 }]);
     await sleep(200);
-    assert.equal(c.mentions.length, 2);
     assert.deepEqual(c.dropped, [], 'every notification decoded under OpenCode\'s schemas');
     await c.close();
   });

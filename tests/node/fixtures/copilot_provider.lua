@@ -4,7 +4,7 @@
 -- Prints one JSON line {lock, socket, ws, ide_dir} once listening. Then reads commands from stdin,
 -- one per line ("<word> [json]"), and prints one JSON line per command:
 --   stats | select {path,start:[l,c],end:[l,c]} | cursor {path,line,col} | enew
---   mention {path,start?,end?,pid?,session?} | accept <tab> | reject <tab> | closeui <tab>
+--   accept <tab> | reject <tab> | closeui <tab>
 --   diffinfo <tab> | diag {path,items} | write {path,text} | buflines <path> | launch {cwd}
 --   stop | quit (or EOF)
 local root, tmp = arg[1], arg[2]
@@ -93,10 +93,6 @@ end
 function handlers.enew()
   vim.cmd('enew')
   return { ok = true }
-end
-
-function handlers.mention(a)
-  return { sent = P.at_mention(a.path, a.start, a['end'], { pid = a.pid, session = a.session }) }
 end
 
 function handlers.accept(tab)

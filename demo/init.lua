@@ -160,5 +160,3 @@ require('agent').setup({
   },
 })
 vim.keymap.set('n', '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })
-vim.keymap.set('x', '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send selection to agent' })
-vim.keymap.set('n', '<leader>ab', '<cmd>AgentAdd<cr>', { desc = 'Add current file to agent' })

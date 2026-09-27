@@ -10,7 +10,7 @@
 --- * Tools: get_vscode_info, get_selection, open_diff (held open until the user decides),
 ---   close_diff, get_diagnostics, update_session_name.
 --- * Notifications, sent on the session's GET stream: selection_changed (to every session, and
----   replayed when a stream opens) and add_file_reference (to one session).
+---   replayed when a stream opens).
 --- * The proposed side of a diff is read-only: after SAVED the CLI writes its own content.
 local uv = vim.uv or vim.loop
 local util = require('agent.util')
@@ -370,24 +370,6 @@ end
 -- Sessions
 -- ---------------------------------------------------------------------------
 
----@param st table
----@return agent.mcp.Session[]
-local function streaming_sessions(st)
-  local out = {}
-  for _, s in ipairs(st.binding:sessions()) do
-    if s.initialized and st.binding:has_stream(s) then
-      out[#out + 1] = s
-    end
-  end
-  return out
-end
-
----@param s agent.mcp.Session
----@param pid integer|nil
-local function pid_matches(s, pid)
-  return pid ~= nil and (s.info.copilot_pid == pid or s.info.copilot_parent_pid == pid)
-end
-
 ---The agent terminal (agent.terminal) that runs this session's CLI, if any.
 ---@param s agent.mcp.Session
 ---@return string|nil name, integer|nil bufnr
@@ -403,51 +385,6 @@ local function terminal_of(s)
     end
   end
   return nil
-end
-
----Choose the session for a targeted notification: opts.session (Mcp-Session-Id or
----X-Copilot-Session-Id), else opts.pid (the CLI's pid or its parent's, e.g. a terminal job pid),
----else the CLI in the most recently focused agent terminal, else the most recently active session.
----@param st table
----@param opts { session?: string, pid?: integer }
----@return agent.mcp.Session|nil
-local function pick_session(st, opts)
-  local list = streaming_sessions(st)
-  if #list == 0 then
-    return nil
-  end
-  if opts.session then
-    for _, s in ipairs(list) do
-      if s.id == opts.session or s.info.copilot_session_id == opts.session then
-        return s
-      end
-    end
-    return nil
-  end
-  if opts.pid then
-    for _, s in ipairs(list) do
-      if pid_matches(s, opts.pid) then
-        return s
-      end
-    end
-    return nil
-  end
-  local term = package.loaded['agent.terminal']
-  if term then
-    local name = term.last_focused()
-    local info = name and term.info(name)
-    if info and info.running and info.pid then
-      for _, s in ipairs(list) do
-        if pid_matches(s, info.pid) then
-          return s
-        end
-      end
-    end
-  end
-  table.sort(list, function(a, b)
-    return (a.info.last_activity or 0) > (b.info.last_activity or 0)
-  end)
-  return list[1]
 end
 
 -- ---------------------------------------------------------------------------
@@ -1068,63 +1005,6 @@ function M.on_selection(s)
   st.srv:broadcast('selection_changed', params, function(session)
     return st.binding:has_stream(session)
   end)
-end
-
----@param path string
----@param first integer 1-based
----@param last integer 1-based
----@return string[]|nil lines  from the loaded buffer, else from disk
-local function range_lines(path, first, last)
-  local b = context().find_buf(path, { loaded = true })
-  if b then
-    return api.nvim_buf_get_lines(b, first - 1, last, false)
-  end
-  local ok, lines = pcall(vim.fn.readfile, path, '', last)
-  if ok and type(lines) == 'table' then
-    return vim.list_slice(lines, first, last)
-  end
-  return nil
-end
-
----Insert an `@file[:L1-L2]` reference into one CLI's prompt (add_file_reference).
----@param path string
----@param start_line integer|nil  1-based, inclusive; nil = the whole file
----@param end_line integer|nil    1-based, inclusive; default start_line
----@param opts { session?: string, pid?: integer }|nil  target (see pick_session); default: the CLI in
----  the most recently focused agent terminal, else the most recently active one
----@return boolean sent
-function M.at_mention(path, start_line, end_line, opts)
-  local st = state
-  if not st or type(path) ~= 'string' or path == '' then
-    return false
-  end
-  local session = pick_session(st, opts or {})
-  if not session then
-    return false
-  end
-  local abs = util.abspath(path)
-  local params = { filePath = abs, fileUrl = util.file_url(abs), selection = vim.NIL, selectedText = vim.NIL }
-  if start_line then
-    end_line = end_line or start_line
-    if end_line < start_line then
-      start_line, end_line = end_line, start_line
-    end
-    start_line = math.max(start_line, 1)
-    end_line = math.max(end_line, start_line)
-    local lines = range_lines(abs, start_line, end_line)
-    local last_col = 0
-    if lines and #lines > 0 then
-      local last = lines[#lines]
-      local ok, n = pcall(vim.str_utfindex, last, 'utf-16', #last, false)
-      last_col = ok and n or #last
-      params.selectedText = table.concat(lines, '\n')
-    end
-    params.selection = {
-      start = { line = start_line - 1, character = 0 },
-      ['end'] = { line = end_line - 1, character = last_col },
-    }
-  end
-  return session:notify('add_file_reference', params)
 end
 
 ---Internal state, for tests.

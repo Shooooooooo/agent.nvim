@@ -162,18 +162,6 @@ function M.abspath(path)
   return abs
 end
 
----True when `child` equals `parent` or is inside it (plain string prefix on normalized paths).
----@param parent string
----@param child string
----@return boolean
-function M.path_contains(parent, child)
-  if parent == child then
-    return true
-  end
-  local p = parent:sub(-1) == '/' and parent or (parent .. '/')
-  return child:sub(1, #p) == p
-end
-
 ---Percent-encoded file URL (RFC 8089), e.g. for Copilot fileUrl values.
 ---@param path string absolute path
 ---@return string

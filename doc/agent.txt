@@ -40,9 +40,9 @@ the CLI connects to:
   Gemini CLI     Gemini IDE companion: MCP Streamable HTTP on 127.0.0.1,
                  discovery file in $TMPDIR/gemini/ide
 
-With the IDE connection the agent sees your selection, you can @-mention
-files and line ranges from Neovim, proposed edits open as a diff in Neovim for
-you to accept or reject, and the agent can read your diagnostics.
+With the IDE connection the agent sees your current file and visual
+selection (|agent-context|), proposed edits open as a diff in Neovim for you
+to accept or reject, and the agent can read your diagnostics.
 
 The $NVIM controller (|agent-nvim-mcp|) is a stdio MCP server that agent.nvim
 registers for each agent it launches, without editing your agent config files.
@@ -83,13 +83,11 @@ lazy.nvim: >lua
       main = 'agent',
       opts = {},
       keys = {
-        { '<leader>ac', '<cmd>Agent<cr>', desc = 'Toggle agent' },
-        { '<leader>as', '<cmd>AgentSend<cr>', mode = 'x',
-          desc = 'Send selection to agent' },
-        { '<leader>ab', '<cmd>AgentAdd<cr>', desc = 'Add file to agent' },
+        { '<leader>ac', '<cmd>Agent<cr>', mode = { 'n', 'x' },
+          desc = 'Toggle agent' },
       },
-      cmd = { 'Agent', 'AgentOpen', 'AgentSend', 'AgentAdd', 'AgentStatus',
-              'AgentMcpConfig', 'AgentGeminiSetup' },
+      cmd = { 'Agent', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig',
+              'AgentGeminiSetup' },
     }
 <
 If you use `auto_start = true`, do not lazy-load the plugin: the IDE servers
@@ -98,10 +96,11 @@ must already be running when you start an agent yourself.
 vim.pack (Neovim 0.12+): >lua
     vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
     require('agent').setup({})
-    vim.keymap.set('n', '<leader>ac', '<cmd>Agent<cr>')
-    vim.keymap.set('x', '<leader>as', '<cmd>AgentSend<cr>')
-    vim.keymap.set('n', '<leader>ab', '<cmd>AgentAdd<cr>')
+    vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>Agent<cr>')
 <
+The mappings work in Visual mode too (`x`), so that a selection reaches the
+agent when <leader>ac opens it: <Esc> first would drop it (|agent-context|).
+
 Calling setup() is optional: every command calls setup({}) the first time it
 runs, if setup() has not been called yet.
 
@@ -113,8 +112,10 @@ runs, if setup() has not been called yet.
 2. Run |:Agent| to open the default agent (claude) in a split on the right,
    or `:Agent copilot`, `:Agent gemini` or `:Agent opencode`. The IDE server
    starts on first use, and the agent connects to it by itself.
-3. Select lines and run |:AgentSend|. The agent's prompt gets an @-mention of
-   those lines. |:AgentAdd| mentions the whole current file.
+3. Select lines and switch to the agent window straight from Visual mode
+   (<C-w>l, then `i` to type): the agent keeps the selection. Leaving Visual
+   mode in the file (<Esc>) drops it, and the agent then sees just the
+   current file. See |agent-context|.
 4. Ask the agent to change a file. When it asks for permission, a diff tab
    opens in Neovim. Accept with `:w` (or <leader>aa), reject with <leader>ad
    or by closing the tab. See |agent-diff|. Claude Code starts in auto mode,
@@ -128,12 +129,7 @@ run |:AgentGeminiSetup| once. See |agent-gemini|.
 5. Commands                                                   *agent-commands*
 
 [name] defaults to the most recently focused running agent, and then to
-`default_agent`. The commands complete agent names. The @-mention commands
-send to that same agent. If it is not running in an agent.nvim terminal, but
-an agent of its kind that you started yourself is connected to the IDE server
-(Claude, OpenCode or Copilot), the mention goes to that one. Otherwise they
-start the agent in the background first; with `terminal.layout = 'none'`
-that is an error instead. See |agent-mention-target|.
+`default_agent`. The commands complete agent names.
 
                                                                       *:Agent*
 :Agent [name]
@@ -156,20 +152,6 @@ that is an error instead. See |agent-mention-target|.
 :AgentStop!
     Stop every agent and every IDE server. Lock and discovery files are
     removed. This also runs on |VimLeavePre|.
-
-                                                                  *:AgentSend*
-:[range]AgentSend [name]
-    @-mention the selected lines in an agent's prompt. With a range, those
-    lines of the current file. Without one, the visual selection: the live
-    one when run from Visual mode (for example through `<cmd>AgentSend<cr>`),
-    otherwise the last one of the current file ('<,'>, what |gv|
-    reselects). From the agent's terminal it is the latest selection made in
-    a file, else the last one of the last focused file.
-
-                                                                   *:AgentAdd*
-:AgentAdd [file] [start] [end]
-    @-mention a file or directory (default: the current file), optionally a
-    line range of it. Example: `:AgentAdd % 10 20`
 
                                                             *:AgentDiffAccept*
 :AgentDiffAccept
@@ -205,8 +187,6 @@ that is an error instead. See |agent-mention-target|.
 ==============================================================================
 6. Lua API                                                         *agent-api*
 
-Lines are 1-based and inclusive; nil lines mean the whole file.
-
                                                                *agent.setup()*
 require('agent').setup({opts})
     Configure agent.nvim; see |agent-config|. Safe to call again (the latest
@@ -233,28 +213,6 @@ require('agent').stop({name})
 require('agent').teardown()
     Stop every agent and IDE server (|:AgentStop!|).
 
-                                                             *agent.mention()*
-require('agent').mention({path}, {l1}, {l2}, {opts})
-    @-mention a file or a line range. {opts}: `name` (target agent), `focus`
-    (focus its terminal afterwards). Returns ok and how:
-      "sent"     the IDE server delivered it (or queued it for a Claude or
-                 OpenCode client that is still connecting)
-      "typed"    it was typed into the agent's prompt instead (Gemini, or no
-                 client connected)
-      "pending"  right after a launch; it will be retried or typed shortly
-    The mention goes to the agent in the target terminal only, never to
-    another agent's prompt (|agent-mention-target|).
-
-                                                      *agent.send_selection()*
-require('agent').send_selection({range}, {opts})
-    {range} is `{ path?, line1, line2? }`, or nil for the visual selection
-    as |:AgentSend| picks it. Without `path` the current buffer must be a
-    file.
-
-                                                            *agent.add_file()*
-require('agent').add_file({path}, {l1}, {l2}, {opts})
-    {path} nil means the current file.
-
                                                               *agent.status()*
 require('agent').status()
     Table with `servername`, `last_focused`, `agents` and `providers`.
@@ -267,15 +225,6 @@ require('agent').mcp_config({name})
 require('agent').diff_accept()
 require('agent').diff_reject()
     Like |:AgentDiffAccept| and |:AgentDiffReject|.
-
-                                                           *agent.reference()*
-require('agent').reference({kind}, {path}, {l1}, {l2}, {cwd})
-    The @-reference an agent understands when typed into its prompt:
-      claude     @path  @path#L3  @path#L3-5
-      opencode   @path  @path#3   @path#3-5
-      copilot    @path  @path:3   @path:3-5
-      gemini     @path  @path (lines 3-5)
-    Paths inside {cwd} are relative, others absolute.
 
                                                              *agent-open-opts*
 Options of |agent.open()| and |agent.toggle()|. `focus` and `layout` also
@@ -360,9 +309,6 @@ auto_start (false)
 terminal.layout ("split")
     "split", "float", "tab" or "none". "none" means the plugin does not start
     agents: you run them yourself (combine it with `auto_start = true`).
-    @-mentions then go through the IDE connection to the agent you started
-    (Claude, OpenCode, Copilot); with no such agent connected, they fail with
-    an error.
 terminal.split_side ("right")
     "right", "left", "below" or "above".
 terminal.split_size (0.4)
@@ -371,17 +317,17 @@ terminal.float ({ width = 0.85, height = 0.85, border = 'rounded' })
     Size (fractions) and border of the floating window.
 terminal.start_insert (true)
     Enter Terminal mode when agent.nvim opens or shows the terminal (|:Agent|,
-    |:AgentOpen|, |agent.open()|, a mention with `focus`). Moving into its
-    window yourself keeps Normal mode.
+    |:AgentOpen|, |agent.open()|). Moving into its window yourself keeps
+    Normal mode.
 terminal.auto_close (true)
     Close the terminal when the agent exits. An agent that exits non-zero
     within 5 seconds keeps its terminal open, so startup errors stay
     readable.
 selection.track (true)
     Send the selection, the cursor and (Gemini) the open files to connected
-    agents, when they change and when an agent connects. With false nothing
-    is pushed; tools an agent calls itself (Copilot's get_selection, Claude's
-    compatibility getCurrentSelection) still answer.
+    agents, when they change and when an agent connects (|agent-context|).
+    With false nothing is pushed; tools an agent calls itself (Copilot's
+    get_selection, Claude's compatibility getCurrentSelection) still answer.
 selection.debounce_ms (100)
     Debounce for selection events.
 diff.open_in ("tab")
@@ -449,8 +395,6 @@ providers.claude.lock_dir (~/.claude/ide)
 providers.claude.notify_delay_ms (600)
     Delay between a Claude Code connection and the first notification
     (Claude registers its handlers late).
-providers.claude.mention_timeout_ms (10000)
-    How long a mention waits for a client that is still connecting.
 providers.copilot.lock_dir ($COPILOT_HOME/ide, else ~/.copilot/ide)
     Lock directory. COPILOT_HOME set through `agents.copilot.env` is honored.
 providers.copilot.socket_dir ($TMPDIR, then /tmp)
@@ -495,32 +439,48 @@ Any extra entry under `agents` becomes an agent. It needs `cmd` and
                  Claude       OpenCode     Copilot         Gemini ~
   Selection      yes          yes          yes             yes (recent
                                                            files, cursor)
-  @-mentions     protocol     protocol     protocol        typed
-                 @f#L3-5      @f#3-5       @f:3-5          @f (lines 3-5)
+  Current file   yes          yes          tool only       yes
   Diffs          yes,         no           yes,            yes,
                  editable                  read-only       editable
   Diagnostics    yes          no           yes             no
   Setup          none         none         none            /ide enable,
                                                            |:AgentGeminiSetup|
 
-A mention the IDE connection cannot deliver is typed into the agent's prompt
-instead (as a bracketed paste), in the agent's own syntax. Paths inside the
-agent's working directory are relative; other paths are absolute.
+                                                               *agent-context*
+What the agent sees ~
+There is nothing to send by hand: agent.nvim reports the file you are in and
+your visual selection to every connected agent as they change
+(`selection.track`). While the agent's terminal has focus, the last file you
+were in stays the current one.
 
-                                                        *agent-mention-target*
-A mention goes only to the agent in the target terminal, never to another
-agent's prompt:
-- Claude and Copilot report their pid, which is matched against the
-  terminal's job. If that agent is not connected yet, a Claude mention is
-  queued for up to `providers.claude.mention_timeout_ms` after a launch of
-  that kind, and a Copilot mention is retried for 15 seconds after the
-  launch; otherwise it is typed.
-- OpenCode reports no pid. The mention is sent when it is the only OpenCode
-  client and no OpenCode was launched since it connected. Otherwise it is
-  queued (after a recent OpenCode launch) or typed.
-- An agent you started yourself (no agent.nvim terminal) gets mentions
-  through the IDE connection, unless another agent of the same kind runs in
-  an agent.nvim terminal.
+Select lines, then switch to the agent window straight from Visual mode, for
+example with <C-w>l. Where the focus is 50 ms after you leave Visual mode
+decides what happens to the selection:
+- A file window (<Esc>, y, d, >, a click in the file, <C-w>j to another
+  file): the selection is dropped, and the agent sees just the file and the
+  cursor.
+- The agent window or another non-file window (<C-w>l, a click in the
+  terminal, a Visual-mode mapping to `<cmd>AgentOpen<cr>`): the selection is
+  kept for your next prompt. It is dropped when a file window has focus
+  again.
+- `:` from Visual mode keeps the selection while the command line, or the
+  command-line window (q:, <C-f>), is open. Once the command has run, the
+  same rule applies: the selection is dropped when a file window has focus
+  (after `:'<,'>s/a/b/`, or a command line cancelled with <Esc>), and kept
+  when the command moved to the agent window.
+- A change to the selected text drops the selection, even on the way to
+  the agent window: an operator (d, >, J), `:'<,'>s/a/b/`, a block insert
+  (I, $A) or a formatter. A write, such as an autosave, does not. Neither
+  does a change elsewhere in the file: when a line is added above the
+  selection, the selection follows its text.
+- A blockwise selection made with $ extends to the end of every line, as
+  y yanks it.
+
+What each agent does with it:
+- Claude, OpenCode and Gemini attach the selection to your next prompt, or
+  the current file when nothing is selected.
+- Copilot attaches only a non-empty selection. Its model can still read the
+  current file, cursor and selection with its ide-get_selection tool.
 
 ------------------------------------------------------------------------------
 Claude Code                                                     *agent-claude*
@@ -538,8 +498,8 @@ reconnects on its own after a dropped connection.
 
 What works ~
 - Selection: Claude shows the selection ("2 lines selected") and attaches it
-  to your next prompt.
-- @-mentions arrive as @file#L3-5.
+  to your next prompt. With nothing selected it shows and attaches the
+  current file ("In a.txt").
 - Diffs: when Claude's Edit or Write tool asks for permission, a diff opens
   in Neovim. You can edit the proposal before accepting; Claude writes
   exactly what you accept. The terminal prompt stays active too, and
@@ -596,10 +556,9 @@ lock is rewritten, so its modification time is the newest. When several
 Neovims serve the same folder, OpenCode picks the newest lock.
 
 What works ~
-- Selection: OpenCode shows the selection label (file#3-5) and attaches it to
-  your next prompt.
-- @-mentions arrive as @file#3-5. A whole-file mention is sent as lines 1
-  to N.
+- Selection: OpenCode shows the file and selection label (file#3-5) and
+  attaches it to your next prompt. With nothing selected it attaches a note
+  that you opened the file.
 
 Limitations ~
 - OpenCode only receives: it never calls the IDE tools. There are no diffs
@@ -608,8 +567,6 @@ Limitations ~
 - Line offset: the Claude protocol sends 0-based lines, and OpenCode shows
   and reads them as 1-based. agent.nvim adds `agents.opencode.line_offset`
   (default 1) to what it sends to OpenCode.
-- Directories cannot be @-mentioned through the protocol; they are typed
-  into the prompt instead.
 - Setting `providers.claude.lock_dir` to anything other than ~/.claude/ide
   hides the lock from OpenCode.
 - Lock files: OpenCode does not check whether a lock's process is alive, so
@@ -636,7 +593,6 @@ What works ~
 - Selection: the footer shows @file:3-5. When you submit a prompt with a
   non-empty selection, Copilot attaches it. The current selection is sent
   again whenever Copilot (re)connects.
-- @-mentions insert "@file:3-5 " into the prompt.
 - Diffs: when Copilot shows a permission prompt for a file write, a diff
   opens in Neovim. The proposal is read-only: after an accept Copilot writes
   its own content, so edits there would be lost. Accept or reject in Neovim,
@@ -713,10 +669,6 @@ One-time setup ~
 What works ~
 - Context: Gemini receives the recently focused files (up to 10), with the
   cursor and selected text of the active one.
-- @-mentions: Gemini's protocol has none, so the reference is typed into the
-  prompt as "@file (lines 3-5)". Gemini's @ includes the whole file; the
-  range is plain text for the model. Spaces and special characters in the
-  path are escaped.
 - Diffs: when Gemini asks to confirm write_file or replace, a diff opens in
   Neovim. Accept there and Gemini writes the proposal, with your edits.
   Reject (or close the diff) and the tool call is cancelled. Answering in
@@ -768,7 +720,9 @@ get_editor_state
     No arguments. JSON: cwd, mode, current {bufnr, path, filetype, modified,
     cursor {line, col}}, visual_selection {path, start_line, end_line, text}
     or null, windows [{winid, bufnr, path, is_current, is_terminal,
-    is_floating}], tabpage, buffer_count.
+    is_floating}], tabpage, buffer_count. visual_selection is the live
+    selection in Visual mode, else the last one (the '< and '> marks), which
+    unlike |agent-context| stays after <Esc>.
 list_buffers
     include_unlisted? JSON list: bufnr, path, name, filetype, buftype,
     modified, loaded, line_count, is_current.
@@ -872,10 +826,8 @@ once with the plugin). Then:
 - Gemini connects at startup once IDE mode is enabled. Set
   `providers.gemini.export_env = true` so it picks this Neovim
   deterministically.
-Once connected, |:AgentSend|, |:AgentAdd| and |agent.mention()| reach a
-Claude, OpenCode or Copilot you started yourself through the IDE connection,
-as long as no agent of the same kind runs in an agent.nvim terminal. Gemini
-has no mention in its protocol, so it cannot get them.
+Once connected, it sees your file and selection as described in
+|agent-context|.
 
                                                               *agent-security*
 Security ~
@@ -981,8 +933,7 @@ b:agent_diff_id         Diff proposal and scratch original buffers: the diff
 t:agent_diff            Diff tab pages: the diff id.
                                                               *b:agent_ignore*
 b:agent_ignore          Set it yourself: when true, the buffer is not
-                        reported as a selection, an open file or a mention
-                        target.
+                        reported as a selection or an open file.
                                                          *g:loaded_agent_nvim*
 g:loaded_agent_nvim     Load guard of plugin/agent.lua.
 
@@ -1037,13 +988,13 @@ A diff does not open ~
     Claude refuses when the file has unsaved changes. Copilot and Gemini
     open diffs only when they ask for your confirmation (not in
     auto-approve, auto-edit or YOLO modes).
-A mention went nowhere ~
-    Right after a launch the IDE connection may not be up yet. Claude and
-    OpenCode mentions are queued for up to 10 seconds
-    (`providers.claude.mention_timeout_ms`) and dropped with a warning if the
-    target agent does not connect. Copilot mentions are retried for 15
-    seconds and then typed into the prompt. Gemini mentions are typed once
-    the terminal is 3 seconds old.
+The agent does not see the selection ~
+    Check that it is connected (|:AgentStatus| shows a client) and that
+    `selection.track` is on. The selection is dropped when you leave Visual
+    mode in the file (for example with <Esc>), when you go back to a file
+    window and when its text changes: select again and switch to the agent
+    straight from Visual mode.
+    Copilot attaches only a non-empty selection (|agent-context|).
 "could not write the Claude lock file: E739: ..." ~
     Shown at setup() with `auto_start`, or when Claude or OpenCode starts.
     The lock directory (`providers.claude.lock_dir`, default ~/.claude/ide)
@@ -1088,9 +1039,10 @@ The live end-to-end test runs the real agent CLIs and is not part of
     tests/e2e/run.sh gemini
 <
 For each agent a headless Neovim opens the agent, waits for the IDE
-connection, sends an @-mention and submits a prompt. A scripted model turn
-then calls the $NVIM controller and proposes an edit, which the driver
-accepts in the Neovim diff. Everything is isolated:
+connection, selects two lines, checks that the agent received them and
+submits a prompt. A scripted model turn then calls the $NVIM controller and
+proposes an edit, which the driver accepts in the Neovim diff. Everything is
+isolated:
 - HOME, the XDG directories, CLAUDE_CONFIG_DIR, COPILOT_HOME and
   GEMINI_CLI_HOME point to a temp directory, and the environment is rebuilt
   with env -i.

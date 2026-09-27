@@ -33,9 +33,6 @@ M.PROTOCOL_VERSIONS = { '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05' }
 M.FALLBACK_PROTOCOL_VERSION = '2024-11-05'
 --- Delay between a Claude Code connection completing and the first notification (§6.3).
 M.DEFAULT_NOTIFY_DELAY_MS = 600
---- How long an undeliverable at-mention waits for a client, and how long after a launch
---- mentions are queued even though no client is connected yet.
-M.DEFAULT_MENTION_TIMEOUT_MS = 10000
 M.DEFAULT_PORT_RANGE = { min = 10000, max = 65535 }
 
 local SCHEMA = 'http://json-schema.org/draft-07/schema#'
@@ -52,9 +49,6 @@ local state = {
   job_folders = {}, ---@type string[]  realpaths (and literal paths) of launched agents' cwds
   diffs = {}, ---@type table<string, table>  tab_name -> pending openDiff
   last_selection = nil, ---@type agent.Selection|nil
-  queue = {}, ---@type table[]  undelivered at-mentions
-  last_launch = nil, ---@type number|nil  util.now_ms() of the last launch_info()/before_spawn()
-  kind_launch = {}, ---@type table<string, number>  agent kind -> util.now_ms() of its last before_spawn()
   group = nil, ---@type integer|nil
 }
 
@@ -174,20 +168,6 @@ local function pid_alive(pid)
     return true
   end
   return name ~= 'ESRCH'
-end
-
----@param path string
----@return integer
-local function file_line_count(path)
-  local b = context.find_buf(path, { loaded = true })
-  if b then
-    return vim.api.nvim_buf_line_count(b)
-  end
-  local ok, lines = pcall(vim.fn.readfile, path)
-  if ok and type(lines) == 'table' then
-    return #lines
-  end
-  return 1
 end
 
 ---no_proxy with the loopback addresses appended (both casings are honored by Claude's proxy code).
@@ -355,7 +335,7 @@ end
 
 ---@param session agent.mcp.Session
 ---@param s agent.Selection|nil
-local function send_selection(session, s)
+local function notify_selection(session, s)
   if not s or not s.path or not s.start or not s.finish then
     return
   end
@@ -369,164 +349,19 @@ local function send_selection(session, s)
   end
 end
 
----@param m table  { path, start0?, end0?, is_dir }
----@param kind 'claude'|'opencode'
----@return table|nil params  nil when this client cannot take the mention
-local function render_mention(m, kind)
-  if kind == 'opencode' then
-    if m.is_dir then
-      return nil -- OpenCode turns directories into a bogus text/plain part (§9.6)
-    end
-    local s0, e0 = m.start0, m.end0
-    if not s0 then
-      s0, e0 = 0, math.max(1, file_line_count(m.path)) - 1
-    end
-    local off = opencode_offset()
-    return { filePath = m.path, lineStart = s0 + off, lineEnd = e0 + off }
-  end
-  -- Claude: 0-based; both keys omitted for a whole file or a directory (never null).
-  local p = { filePath = m.path }
-  if m.start0 then
-    p.lineStart, p.lineEnd = m.start0, m.end0
-  end
-  return p
-end
-
----@param session agent.mcp.Session
----@param m table
----@return boolean sent
-local function send_mention(session, m)
-  local params = render_mention(m, session.data.kind)
-  if not params then
-    return false
-  end
-  return session:notify('at_mentioned', params)
-end
-
----@param session agent.mcp.Session
----@param filter table|nil { pid?, kind?, session? }
----@return boolean
-local function matches(session, filter)
-  if not filter then
-    return true
-  end
-  if filter.session and session.id ~= filter.session then
-    return false
-  end
-  if filter.kind and session.data.kind ~= filter.kind then
-    return false
-  end
-  return true
-end
-
----Is `pid` the client's own pid or one of its close ancestors (a wrapper script or shell)?
----@param session agent.mcp.Session
----@param pid integer
----@return boolean
-local function pid_matches(session, pid)
-  local cur = session.data.pid
-  for _ = 1, 4 do
-    if not cur or cur <= 1 then
-      return false
-    end
-    if cur == pid then
-      return true
-    end
-    local ok, info = pcall(vim.api.nvim_get_proc, cur)
-    cur = ok and type(info) == 'table' and info.ppid or nil
-  end
-  return false
-end
-
----Open sessions that match the filter's kind and session (not its pid): ready ones, or
----(include_unready) also those still connecting, including connections that have not sent
----initialize yet (kind unknown).
----@param filter table|nil
----@param include_unready boolean
+---Open sessions that completed initialize and are ready for notifications.
 ---@return agent.mcp.Session[]
-local function targets(filter, include_unready)
+local function ready_sessions()
   local out = {}
   if not state.srv then
     return out
   end
   for _, s in ipairs(state.srv:sessions()) do
-    if not s.closed then
-      if s.initialized and s.data.ready and matches(s, filter) then
-        out[#out + 1] = s
-      elseif include_unready and not s.data.ready and (not s.initialized or matches(s, filter)) then
-        out[#out + 1] = s
-      end
+    if not s.closed and s.initialized and s.data.ready then
+      out[#out + 1] = s
     end
   end
   return out
-end
-
----@return integer
-local function mention_timeout()
-  return opt_number('mention_timeout_ms', M.DEFAULT_MENTION_TIMEOUT_MS)
-end
-
----Was an agent of this kind (any agent without a kind) launched in the last mention timeout?
----@param kind string|nil
----@return number|nil when  util.now_ms() of that launch
-local function recent_launch(kind)
-  local t = state.last_launch
-  if kind then
-    t = state.kind_launch[kind]
-  end
-  if t and util.now_ms() - t < mention_timeout() then
-    return t
-  end
-  return nil
-end
-
----The ready clients a mention goes to now. With filter.pid (the target terminal's job pid): the
----clients whose Claude pid matches; else the one client of the kind that reported no pid (OpenCode),
----but only when it is the only candidate: no other client of the kind without a pid, and no agent
----of the kind launched since it connected. A Claude that reported another pid never qualifies.
----@param filter table|nil
----@return agent.mcp.Session[]
-local function mention_targets(filter)
-  local ready = targets(filter, false)
-  if not (filter and filter.pid) then
-    return ready
-  end
-  local matched = {}
-  for _, s in ipairs(ready) do
-    if pid_matches(s, filter.pid) then
-      matched[#matched + 1] = s
-    end
-  end
-  if #matched > 0 then
-    return matched
-  end
-  local pidless = {}
-  for _, s in ipairs(targets(filter, true)) do
-    if s.initialized and not s.data.pid then
-      pidless[#pidless + 1] = s
-    end
-  end
-  local only = pidless[1]
-  if #pidless ~= 1 or not only.data.ready then
-    return {}
-  end
-  local launched = recent_launch(filter.kind)
-  if launched and launched >= (only.data.opened_at or 0) then
-    return {}
-  end
-  return { only }
-end
-
----Is a client that may be the mention's target still connecting (not ready for notifications)?
----@param filter table|nil
----@return boolean
-local function target_connecting(filter)
-  for _, s in ipairs(targets(filter, true)) do
-    if not s.data.ready and not (filter and filter.pid and s.data.pid and not pid_matches(s, filter.pid)) then
-      return true
-    end
-  end
-  return false
 end
 
 ---The selection to send to a client that just became ready.
@@ -542,35 +377,7 @@ local function current_selection()
   return state.last_selection
 end
 
----Should a queued mention go to this newly ready client? A pid-targeted mention skips clients
----that reported a different pid (another Claude); clients without a pid (OpenCode) qualify.
----@param session agent.mcp.Session
----@param m table
----@return boolean
-local function queue_match(session, m)
-  local f = m.filter
-  if not matches(session, f) then
-    return false
-  end
-  if f and f.pid and session.data.pid and not pid_matches(session, f.pid) then
-    return false
-  end
-  return true
-end
-
----@param session agent.mcp.Session
-local function flush_queue(session)
-  local now = util.now_ms()
-  local keep = {}
-  for _, m in ipairs(state.queue) do
-    if m.expires_at > now and not (queue_match(session, m) and send_mention(session, m)) then
-      keep[#keep + 1] = m
-    end
-  end
-  state.queue = keep
-end
-
----The client can take notifications now: send the current selection and queued mentions.
+---The client can take notifications now: send it the current selection.
 ---@param session agent.mcp.Session
 local function mark_ready(session)
   local data = session.data
@@ -587,9 +394,8 @@ local function mark_ready(session)
   data.ready = true
   log.debug('session %s (%s) ready for notifications', session.id, tostring(data.client_name))
   if tracking() then
-    send_selection(session, current_selection())
+    notify_selection(session, current_selection())
   end
-  flush_queue(session)
 end
 
 ---(Re)arm the post-connect delay for a Claude Code client. Every connection-completing message
@@ -1173,7 +979,6 @@ local function listen_opts(srv)
         info = { transport = 'ws', conn_id = conn.id, remote = conn.remote, headers = conn.headers },
       })
       conn.data.session.data.kind = 'claude'
-      conn.data.session.data.opened_at = util.now_ms()
       log.debug('connection %d open (subprotocol %s)', conn.id, tostring(conn.protocol))
     end,
     on_message = function(conn, text)
@@ -1283,7 +1088,6 @@ function M.stop()
   server:close()
   util.remove(state.lock_path)
   state.lock_path, state.lock_json = nil, nil
-  state.queue, state.last_launch, state.kind_launch = {}, nil, {}
   if state.group then
     pcall(vim.api.nvim_del_augroup_by_id, state.group)
     state.group = nil
@@ -1323,7 +1127,6 @@ function M.launch_info(o)
   if not ok then
     return nil, err
   end
-  state.last_launch = util.now_ms()
   if o and o.cwd then
     add_job_folder(o.cwd)
   end
@@ -1332,15 +1135,10 @@ end
 
 ---before_spawn hook (pass it for opencode): makes sure the job's cwd is in workspaceFolders and
 ---rewrites the lock so its mtime is the newest, which is OpenCode's tie-break between Neovims (§11).
----It also records the launch of an agent of `spec.kind`, for at_mention().
----@param spec { cwd?: string, kind?: string }|nil
+---@param spec { cwd?: string }|nil
 function M.before_spawn(spec)
   if not state.ws then
     return
-  end
-  state.last_launch = util.now_ms()
-  if spec and type(spec.kind) == 'string' then
-    state.kind_launch[spec.kind] = state.last_launch
   end
   if spec and spec.cwd then
     add_job_folder(spec.cwd)
@@ -1402,64 +1200,9 @@ function M.on_selection(s)
     return
   end
   state.last_selection = s
-  for _, session in ipairs(targets(nil, false)) do
-    send_selection(session, s)
+  for _, session in ipairs(ready_sessions()) do
+    notify_selection(session, s)
   end
-end
-
----@class agent.claude.MentionOpts
----@field kind? 'claude'|'opencode'  only clients of this kind
----@field pid? integer               only the client in the terminal with this job pid: the one whose Claude pid (or a close ancestor) is this pid, else the only client of the kind without a pid (OpenCode)
----@field session? string            only this MCP session
-
----Insert an @-mention into the agents' prompts (at_mentioned). Lines are 1-based and inclusive; nil
----means the whole file (or a directory). Sent now to the ready target clients (see MentionOpts.pid);
----queued when a client that may be the target is still connecting or an agent (of `o.kind`) was
----launched in the last few seconds. Otherwise false, and the caller types the reference instead.
----@param path string
----@param start_line integer|nil
----@param end_line integer|nil
----@param o agent.claude.MentionOpts|nil
----@return boolean ok  false when nothing was sent or queued
-function M.at_mention(path, start_line, end_line, o)
-  if not state.ws or type(path) ~= 'string' or path == '' then
-    return false
-  end
-  local abs = abs_path(path)
-  local st = uv.fs_stat(abs)
-  local m = { path = abs, is_dir = st ~= nil and st.type == 'directory', filter = o }
-  if start_line and not m.is_dir then
-    m.start0 = math.max(0, math.floor(start_line) - 1)
-    m.end0 = math.max(m.start0, math.floor(end_line or start_line) - 1)
-  end
-  local sent = false
-  for _, session in ipairs(mention_targets(o)) do
-    if send_mention(session, m) then
-      sent = true
-    end
-  end
-  if sent then
-    return true
-  end
-  local timeout = mention_timeout()
-  if not target_connecting(o) and not recent_launch(o and o.kind) then
-    return false
-  end
-  if m.is_dir and o and o.kind == 'opencode' then
-    return false
-  end
-  m.expires_at = util.now_ms() + timeout
-  table.insert(state.queue, m)
-  vim.defer_fn(function()
-    for i, q in ipairs(state.queue) do
-      if q == m then
-        table.remove(state.queue, i)
-        log.warn('at-mention of %s dropped: no agent connected in time', m.path)
-        break
-      end
-    end
-  end, timeout)
-  return true
 end
 
 ---Internal state, for tests.
@@ -1470,7 +1213,7 @@ function M._reset()
   M.stop()
   state.port, state.token = nil, nil
   state.job_folders = {}
-  state.last_selection, state.last_launch, state.kind_launch = nil, nil, {}
+  state.last_selection = nil
 end
 
 return M

@@ -1,5 +1,5 @@
 -- Integration of agent.nvim: plugin/agent.lua, setup(), the launcher wiring for every agent kind
--- (with the fake agent CLI), selection forwarding, at-mentions and their typed fallback, teardown.
+-- (with the fake agent CLI), selection forwarding, teardown.
 local util = require('agent.util')
 local uv = vim.uv
 
@@ -56,20 +56,6 @@ local function wait_ready(name)
   end, 5000, name .. ' fake agent ready')
 end
 
-local function stdin_of(name)
-  return read(out_of(name) .. '.stdin') or ''
-end
-
-local function wait_stdin(name, text)
-  wait_for(function()
-    return stdin_of(name):find(text, 1, true) ~= nil
-  end, 5000, ('%s stdin to contain %q'):format(name, text))
-end
-
-local function pasted(text)
-  return '\27[200~' .. text .. '\27[201~'
-end
-
 local function files_in(dir)
   local out = {}
   for name in vim.fs.dir(dir) do
@@ -88,7 +74,7 @@ local function base_opts()
   return {
     terminal = { layout = 'split', start_insert = false },
     providers = {
-      claude = { lock_dir = tmp .. '/claude-ide', mention_timeout_ms = 1 },
+      claude = { lock_dir = tmp .. '/claude-ide' },
       copilot = { lock_dir = tmp .. '/copilot-ide' },
       gemini = { discovery_dir = tmp .. '/gemini-ide' },
     },
@@ -134,12 +120,10 @@ describe('plugin/agent.lua', function()
     vim.cmd.runtime('plugin/agent.lua')
     assert.eq(1, vim.g.loaded_agent_nvim)
     local cmds = vim.api.nvim_get_commands({})
-    for _, c in ipairs({ 'Agent', 'AgentOpen', 'AgentClose', 'AgentStop', 'AgentSend', 'AgentAdd', 'AgentDiffAccept',
-      'AgentDiffReject', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' }) do
+    for _, c in ipairs({ 'Agent', 'AgentOpen', 'AgentClose', 'AgentStop', 'AgentDiffAccept', 'AgentDiffReject',
+      'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' }) do
       assert.truthy(cmds[c], ':' .. c .. ' exists')
     end
-    assert.eq('?', cmds.AgentSend.nargs)
-    assert.truthy(cmds.AgentSend.range ~= nil and cmds.AgentSend.range ~= '', ':AgentSend takes a range')
     assert.truthy(cmds.AgentStop.bang)
     assert.falsy(agent._state.setup_done, 'defining commands does not call setup()')
     -- The load guard: sourcing again is a no-op.
@@ -170,7 +154,7 @@ describe('plugin/agent.lua', function()
 end)
 
 describe('agent', function()
-  local agent, terminal, saved
+  local agent, terminal
 
   before_each(function()
     agent = require('agent')
@@ -181,16 +165,12 @@ describe('agent', function()
     ws = tmp .. '/ws'
     util.mkdir_p(ws, tonumber('700', 8))
     write(ws .. '/a.txt', 'one\ntwo\nthree\nfour\n')
-    write(ws .. '/my file.txt', 'x\n')
     vim.env.GEMINI_CLI_HOME = tmp .. '/ghome'
     vim.cmd.cd(ws)
     notes = {}
     vim.notify = function(msg, level)
       notes[#notes + 1] = { msg = msg, level = level }
     end
-    saved = { wait = agent.MENTION_WAIT_MS, grace = agent.STARTUP_GRACE_MS, poll = agent.MENTION_POLL_MS }
-    -- Mentions fall back to typing at once unless a test says otherwise.
-    agent.MENTION_WAIT_MS, agent.STARTUP_GRACE_MS, agent.MENTION_POLL_MS = 0, 0, 20
     setup()
   end)
 
@@ -204,7 +184,6 @@ describe('agent', function()
     vim.cmd.cd(orig_cwd)
     vim.notify = orig_notify
     vim.env.GEMINI_CLI_HOME = orig_gemini_home
-    agent.MENTION_WAIT_MS, agent.STARTUP_GRACE_MS, agent.MENTION_POLL_MS = saved.wait, saved.grace, saved.poll
     util.remove_dir(tmp)
   end)
 
@@ -388,229 +367,6 @@ describe('agent', function()
         require('agent.providers.' .. name).on_selection = fn
       end
       assert.truthy(ok, err)
-    end)
-  end)
-
-  describe('at-mentions', function()
-    it('go to the provider of the most recently focused agent, targeted by its terminal pid', function()
-      local calls = {}
-      local P = require('agent.providers.copilot')
-      local orig = P.at_mention
-      P.at_mention = function(path, l1, l2, o)
-        calls[#calls + 1] = { path = path, l1 = l1, l2 = l2, o = o }
-        return true
-      end
-      local ok, err = pcall(function()
-        agent.open('claude')
-        agent.open('copilot')
-        wait_ready('claude')
-        wait_ready('copilot')
-        assert.eq('copilot', terminal.last_focused())
-        local sent, how = agent.add_file(ws .. '/a.txt', 2, 3)
-        assert.truthy(sent, how)
-        assert.eq('sent', how)
-        assert.eq(1, #calls)
-        assert.eq(ws .. '/a.txt', calls[1].path)
-        assert.eq(2, calls[1].l1)
-        assert.eq(3, calls[1].l2)
-        assert.eq(terminal.info('copilot').pid, calls[1].o.pid)
-        assert.eq('copilot', calls[1].o.kind)
-        -- Focusing claude's terminal retargets: claude's provider has no client, so the reference is typed.
-        vim.api.nvim_set_current_win(term_win('claude'))
-        assert.eq('claude', terminal.last_focused())
-        local sent2, how2 = agent.add_file(ws .. '/a.txt', 2, 3)
-        assert.truthy(sent2, how2)
-        assert.eq('typed', how2)
-        wait_stdin('claude', pasted('@a.txt#L2-3 '))
-        assert.eq(1, #calls)
-        assert.eq('', stdin_of('copilot'))
-      end)
-      P.at_mention = orig
-      assert.truthy(ok, err)
-    end)
-
-    it('fall back to typing a reference in the agent\'s own syntax', function()
-      local cases = {
-        claude = { { 2, 4, '@a.txt#L2-4 ' }, { 3, 3, '@a.txt#L3 ' }, { nil, nil, '@a.txt ' } },
-        opencode = { { 2, 4, '@a.txt#2-4 ' }, { 3, 3, '@a.txt#3 ' } },
-        copilot = { { 2, 4, '@a.txt:2-4 ' }, { 3, 3, '@a.txt:3 ' } },
-        gemini = { { nil, nil, '@a.txt ' }, { 2, 4, '@a.txt (lines 2-4) ' } },
-      }
-      for name, list in pairs(cases) do
-        agent.open(name)
-        wait_ready(name)
-        for _, c in ipairs(list) do
-          local ok, how = agent.mention(ws .. '/a.txt', c[1], c[2], { name = name })
-          assert.truthy(ok, how)
-          assert.eq('typed', how, name)
-          wait_stdin(name, pasted(c[3]))
-        end
-      end
-      -- Gemini escapes spaces; paths outside the agent's cwd stay absolute.
-      agent.mention(ws .. '/my file.txt', nil, nil, { name = 'gemini' })
-      wait_stdin('gemini', pasted('@my\\ file.txt '))
-      agent.mention(tmp .. '/outside.txt', 1, 2, { name = 'copilot' })
-      wait_stdin('copilot', pasted('@' .. tmp .. '/outside.txt:1-2 '))
-    end)
-
-    it('retry through the provider while a just-launched agent connects, then type', function()
-      agent.MENTION_WAIT_MS = 400
-      local ok, how = agent.mention(ws .. '/a.txt', 1, 1, { name = 'copilot' })
-      assert.truthy(ok, how)
-      assert.eq('pending', how)
-      assert.truthy(terminal.is_running('copilot'), 'the agent was started')
-      wait_ready('copilot')
-      wait_stdin('copilot', pasted('@a.txt:1 '))
-    end)
-
-    it('without a running agent, start the default agent and deliver once it is up', function()
-      agent.STARTUP_GRACE_MS = 800
-      setup({ default_agent = 'gemini' })
-      assert.eq(0, #terminal.running())
-      local ok, how = agent.mention(ws .. '/a.txt')
-      assert.truthy(ok, how)
-      assert.eq('pending', how)
-      assert.same({ 'gemini' }, terminal.running())
-      wait_stdin('gemini', pasted('@a.txt '))
-    end)
-
-    it(':AgentSend sends the range, :AgentAdd a file with lines', function()
-      agent.open('claude')
-      wait_ready('claude')
-      edit_in_main(ws .. '/a.txt')
-      vim.cmd('2,3AgentSend')
-      wait_stdin('claude', pasted('@a.txt#L2-3 '))
-      vim.cmd('AgentAdd a.txt 1 4')
-      wait_stdin('claude', pasted('@a.txt#L1-4 '))
-      vim.cmd('AgentAdd')
-      wait_stdin('claude', pasted('@a.txt '))
-      vim.cmd('AgentAdd nosuch.txt')
-      assert.truthy(vim.tbl_contains(vim.tbl_map(function(n)
-        return n.msg:find('no such file', 1, true) ~= nil
-      end, notes), true), 'an error is shown for a missing file')
-    end)
-
-    it(':AgentSend without a range uses the visual selection', function()
-      agent.open('copilot')
-      wait_ready('copilot')
-      edit_in_main(ws .. '/a.txt')
-      vim.api.nvim_win_set_cursor(0, { 2, 0 })
-      vim.cmd('normal! Vj')
-      assert.eq('V', vim.fn.mode())
-      vim.cmd('AgentSend')
-      wait_stdin('copilot', pasted('@a.txt:2-3 '))
-    end)
-
-    it(':AgentSend outside Visual mode uses the last visual selection, after the cursor moved', function()
-      for _, track in ipairs({ true, false }) do
-        setup({ selection = { track = track } })
-        agent.open('claude')
-        wait_ready('claude')
-        edit_in_main(ws .. '/a.txt')
-        vim.api.nvim_win_set_cursor(0, { 2, 0 })
-        vim.api.nvim_feedkeys(vim.keycode('Vj<Esc>'), 'nx', false)
-        vim.api.nvim_win_set_cursor(0, { 4, 0 })
-        vim.cmd('AgentSend')
-        wait_stdin('claude', pasted('@a.txt#L2-3 '))
-        agent.stop('claude')
-        wait_for(function()
-          return not terminal.is_running('claude')
-        end, 5000, 'claude stopped')
-        vim.fn.delete(out_of('claude') .. '.env')
-        vim.fn.delete(out_of('claude') .. '.stdin')
-      end
-    end)
-
-    it(':AgentSend from the agent terminal uses the last selection of the last focused file', function()
-      agent.open('claude')
-      wait_ready('claude')
-      edit_in_main(ws .. '/a.txt')
-      vim.api.nvim_win_set_cursor(0, { 1, 0 })
-      vim.api.nvim_feedkeys(vim.keycode('Vj<Esc>'), 'nx', false)
-      vim.api.nvim_win_set_cursor(0, { 4, 0 })
-      require('agent.editor.selection').flush()
-      vim.api.nvim_set_current_win(term_win('claude'))
-      vim.cmd('AgentSend')
-      wait_stdin('claude', pasted('@a.txt#L1-2 '))
-      -- A range means lines of the current buffer, and the terminal is not a file.
-      local n = #notes
-      vim.cmd('3,4AgentSend')
-      assert.eq(n + 1, #notes)
-      assert.matches('no selection in a file buffer', notes[#notes].msg)
-      vim.wait(100)
-      assert.falsy(stdin_of('claude'):find('L3-4', 1, true), 'nothing sent for a range in the terminal')
-    end)
-  end)
-
-  describe('agents started by hand', function()
-    local P, orig, calls, clients
-
-    before_each(function()
-      P = require('agent.providers.claude')
-      orig = { at_mention = P.at_mention, status = P.status }
-      calls, clients = {}, {}
-      P.at_mention = function(path, l1, l2, o)
-        calls[#calls + 1] = { path = path, l1 = l1, l2 = l2, o = o }
-        return #clients > 0
-      end
-      P.status = function()
-        local s = orig.status()
-        s.clients, s.sessions = #clients, clients
-        return s
-      end
-    end)
-
-    after_each(function()
-      P.at_mention, P.status = orig.at_mention, orig.status
-    end)
-
-    it('terminal.layout = none: mentions go to the connected agent, else a clear error', function()
-      setup({ auto_start = true, terminal = { layout = 'none' } })
-      assert.truthy(P.is_running())
-      local ok, how = agent.add_file(ws .. '/a.txt', 1, 2)
-      assert.falsy(ok)
-      assert.matches('no claude is connected', how)
-      assert.eq(0, #calls)
-      -- A Claude the user started in their own terminal connects.
-      clients[1] = { id = 's1', kind = 'claude', pid = 4242, ready = true }
-      ok, how = agent.add_file(ws .. '/a.txt', 1, 2)
-      assert.truthy(ok, how)
-      assert.eq('sent', how)
-      assert.same({ path = ws .. '/a.txt', l1 = 1, l2 = 2, o = { kind = 'claude' } }, calls[#calls])
-      edit_in_main(ws .. '/a.txt')
-      vim.cmd('2,3AgentSend')
-      assert.same({ 2, 3 }, { calls[#calls].l1, calls[#calls].l2 })
-      vim.cmd('AgentAdd')
-      assert.eq(3, #calls)
-      assert.eq(0, #terminal.running(), 'nothing was started')
-      -- Another kind connected (OpenCode) does not count for claude.
-      clients[1] = { id = 's2', kind = 'opencode', ready = true }
-      ok, how = agent.add_file(ws .. '/a.txt')
-      assert.falsy(ok)
-      assert.matches('no claude is connected', how)
-      assert.eq(3, #calls)
-    end)
-
-    it('a connected agent started by hand gets the mention instead of a new terminal', function()
-      setup({ auto_start = true })
-      clients[1] = { id = 's1', kind = 'claude', pid = 4242, ready = true }
-      local ok, how = agent.add_file(ws .. '/a.txt')
-      assert.truthy(ok, how)
-      assert.eq('sent', how)
-      assert.eq(nil, calls[1].o.pid)
-      assert.eq(0, #terminal.running(), 'no second Claude was started')
-    end)
-
-    it('not while another agent of that kind runs in a terminal: its client cannot be told apart', function()
-      setup({ agents = { claude2 = { cmd = { FIX }, provider = 'claude', kind = 'claude',
-        env = { FAKE_AGENT_OUT = out_of('claude2') } } } })
-      agent.open('claude2')
-      wait_ready('claude2')
-      clients[1] = { id = 's1', kind = 'claude', pid = terminal.info('claude2').pid, ready = true }
-      local ok, how = agent.mention(ws .. '/a.txt', 1, 1, { name = 'claude' })
-      assert.truthy(ok, how)
-      assert.truthy(terminal.is_running('claude'), 'claude was started')
-      assert.eq(terminal.info('claude').pid, calls[#calls].o.pid)
     end)
   end)
 

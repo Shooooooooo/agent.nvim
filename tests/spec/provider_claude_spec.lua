@@ -22,7 +22,7 @@ local OPENCODE_INITIALIZE = '{"jsonrpc":"2.0","id":1,"method":"initialize","para
 
 local function setup_config(extra)
   config.setup(vim.tbl_deep_extend('force', {
-    providers = { claude = { lock_dir = LOCK_DIR, notify_delay_ms = 80, mention_timeout_ms = 1500 } },
+    providers = { claude = { lock_dir = LOCK_DIR, notify_delay_ms = 80 } },
   }, extra or {}))
 end
 
@@ -627,123 +627,6 @@ describe('selection_changed', function()
   end)
 end)
 
-describe('at_mentioned', function()
-  local file
-  before_each(function()
-    assert.truthy(P.start())
-    file = TMP .. '/mention.txt'
-    write(file, 'one\ntwo\nthree\nfour\n')
-  end)
-
-  it('sends 0-based lines to Claude and omits them for a whole file or directory', function()
-    local c = track(claude_client())
-    wait_ready(1)
-    assert.truthy(P.at_mention(file, 5, 10))
-    assert.same({ filePath = file, lineStart = 4, lineEnd = 9 }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(file, 3))
-    assert.same({ filePath = file, lineStart = 2, lineEnd = 2 }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(file))
-    assert.same({ filePath = file }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(TMP))
-    assert.same({ filePath = TMP }, c.take('at_mentioned').params)
-  end)
-
-  it('sends 1-based lines to OpenCode, whole files as 1..N, and no directories', function()
-    local c = track(opencode_client())
-    wait_ready(1)
-    assert.truthy(P.at_mention(file, 5, 10))
-    assert.same({ filePath = file, lineStart = 5, lineEnd = 10 }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(file))
-    assert.same({ filePath = file, lineStart = 1, lineEnd = 4 }, c.take('at_mentioned').params)
-    assert.falsy(P.at_mention(TMP))
-    vim.wait(100)
-    assert.eq(0, #c.notifications('at_mentioned'))
-  end)
-
-  it('returns false with no client and no recent launch; queues after a launch and flushes on ready', function()
-    assert.falsy(P.at_mention(file, 1, 2))
-    P.launch_info()
-    assert.truthy(P.at_mention(file, 1, 2))
-    local c = track(claude_client())
-    local n = c.take('at_mentioned', 2000)
-    assert.same({ filePath = file, lineStart = 0, lineEnd = 1 }, n.params)
-    assert.eq(0, #P._state.queue)
-  end)
-
-  it('targets one kind or one Claude pid when asked', function()
-    local a = track(claude_client({ pid = 1111 }))
-    local b = track(claude_client({ pid = 2222 }))
-    local o = track(opencode_client())
-    wait_ready(3)
-    a.clear()
-    b.clear()
-    o.clear()
-    assert.truthy(P.at_mention(file, 2, 2, { kind = 'claude', pid = 2222 }))
-    b.take('at_mentioned')
-    assert.truthy(P.at_mention(file, 2, 2, { kind = 'opencode' }))
-    o.take('at_mentioned')
-    vim.wait(100)
-    assert.eq(0, #a.notifications('at_mentioned'))
-    assert.eq(0, #b.notifications('at_mentioned'))
-  end)
-
-  it('never sends a pid-targeted mention to a Claude that reported another pid', function()
-    local a = track(claude_client({ pid = 1111 }))
-    wait_ready(1)
-    a.clear()
-    -- The target terminal's Claude (pid 2222) is not connected and nothing was launched: init
-    -- types the reference into that terminal instead.
-    assert.falsy(P.at_mention(file, 2, 3, { kind = 'claude', pid = 2222 }))
-    -- An OpenCode launch does not make it wait for a Claude either.
-    P.before_spawn({ kind = 'opencode', cwd = TMP })
-    assert.falsy(P.at_mention(file, 2, 3, { kind = 'claude', pid = 2222 }))
-    -- A Claude was just launched: queued for the target's Claude, not inserted into the other one's prompt.
-    P.before_spawn({ kind = 'claude', cwd = TMP })
-    assert.truthy(P.at_mention(file, 2, 3, { kind = 'claude', pid = 2222 }))
-    vim.wait(100)
-    assert.eq(0, #a.notifications('at_mentioned'))
-    local b = track(claude_client({ pid = 2222 }))
-    assert.same({ filePath = file, lineStart = 1, lineEnd = 2 }, b.take('at_mentioned', 2000).params)
-    vim.wait(100)
-    assert.eq(0, #a.notifications('at_mentioned'))
-  end)
-
-  it('sends a pid-targeted mention to an OpenCode (no pid) only when it is the only candidate', function()
-    local o1 = track(opencode_client())
-    wait_ready(1)
-    o1.clear()
-    assert.truthy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
-    o1.take('at_mentioned')
-    -- Two OpenCodes: which one runs in that terminal is unknown, so neither gets it (init types it).
-    local o2 = track(opencode_client())
-    wait_ready(2)
-    o2.clear()
-    assert.falsy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
-    vim.wait(100)
-    assert.eq(0, #o1.notifications('at_mentioned'))
-    assert.eq(0, #o2.notifications('at_mentioned'))
-  end)
-
-  it('queues a mention for an OpenCode launched after the connected one', function()
-    local o1 = track(opencode_client())
-    wait_ready(1)
-    o1.clear()
-    -- A Claude launch does not make the connected OpenCode ambiguous.
-    P.before_spawn({ kind = 'claude', cwd = TMP })
-    assert.truthy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
-    o1.take('at_mentioned')
-    -- A second OpenCode was just launched, and the mention may be for it.
-    P.before_spawn({ kind = 'opencode', cwd = TMP })
-    assert.truthy(P.at_mention(file, 3, 3, { kind = 'opencode', pid = 4343 }))
-    vim.wait(100)
-    assert.eq(0, #o1.notifications('at_mentioned'))
-    local o2 = track(opencode_client())
-    assert.same({ filePath = file, lineStart = 3, lineEnd = 3 }, o2.take('at_mentioned', 2000).params)
-    vim.wait(100)
-    assert.eq(0, #o1.notifications('at_mentioned'))
-  end)
-end)
-
 describe('openDiff', function()
   local target, c
   before_each(function()
@@ -1084,27 +967,6 @@ describe('compatibility tools', function()
     vim.cmd('enew')
     r = vim.json.decode(text_of(c.tool('getCurrentSelection')))
     assert.eq(true, r.success) -- the latest file selection is kept
-  end)
-end)
-
-describe('mention queue', function()
-  it('drops a queued mention when no client connects in time', function()
-    setup_config({ providers = { claude = { mention_timeout_ms = 150 } } })
-    assert.truthy(P.start())
-    P.before_spawn({ cwd = TMP })
-    local notified = {}
-    local orig = vim.notify
-    vim.notify = function(msg)
-      notified[#notified + 1] = msg
-    end
-    assert.truthy(P.at_mention(TMP .. '/x.txt', 1, 1))
-    assert.eq(1, #P._state.queue)
-    vim.wait(400, function()
-      return #P._state.queue == 0 and #notified > 0
-    end)
-    vim.notify = orig
-    assert.eq(0, #P._state.queue)
-    assert.matches('dropped', notified[1] or '')
   end)
 end)
 

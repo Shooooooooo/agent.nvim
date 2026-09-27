@@ -1,8 +1,9 @@
 # agent.nvim README demo. Do not run this tape directly: run demo/record.sh (or `make demo`),
 # which builds the isolated environment, exports DEMO_RC and encodes the frames written here.
 #
-# Story: open Neovim on a small Lua module, start Claude Code with :Agent claude, select a
-# function and @-mention it with :AgentSend, ask for a change, watch the $NVIM controller's
+# Story: open Neovim on a small Lua module, start Claude Code with :Agent claude (its chip shows
+# the open file), select a function (the chip follows the selection), go straight to Claude's
+# prompt and ask for a change (Claude gets the selected lines), watch the $NVIM controller's
 # notification, review the proposed edit in a Neovim diff and accept it with :w, then run the
 # new code. The model turn is scripted in demo/plan.json.
 
@@ -51,7 +52,7 @@ Show
 Wait+Screen@60s /In greet\.lua/
 Sleep 3s
 
-# 3. Select the function in the editor and @-mention it.
+# 3. Select the function in the editor. Claude's chip follows the selection as it grows.
 Ctrl+\
 Ctrl+N
 Ctrl+W
@@ -62,25 +63,24 @@ Sleep 400ms
 Type "V"
 Down@170ms 9
 Wait+Screen@10s /10 lines selected/
-Sleep 1.5s
-Type ":AgentSend"
-Sleep 700ms
-Enter
-Wait+Screen@20s /@greet\.lua#L4-13/
-Sleep 2s
+Sleep 2.5s
 
-# 4. Ask for the change in Claude's prompt. (Hidden: the window switch would show Neovim's
-# normal-mode cursor inside Claude's prompt for a frame.)
+# 4. Straight from Visual mode to Claude's prompt (<C-w>l): leaving Visual mode keeps the
+# selection, so the chip still shows the lines. Ask for the change; Claude's transcript shows
+# the selected lines went along. (The switch is hidden: it would show Neovim's normal-mode
+# cursor inside Claude's prompt for a frame.)
 Hide
 Ctrl+W
 Type "l"
 Type "i"
-Sleep 200ms
+Sleep 300ms
+Wait+Screen@10s /10 lines selected/
 Show
-Sleep 600ms
+Sleep 1.8s
 Type "use table.concat and handle an empty list"
 Sleep 800ms
 Enter
+Wait+Screen@20s /Selected 10 lines from greet\.lua/
 
 # 5. The model notifies through the $NVIM controller, then proposes an edit: a diff tab opens.
 Wait+Screen@60s /Review the diff/

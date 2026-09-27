@@ -10,8 +10,12 @@
 -- The scenario, for each agent:
 --   1. require('agent').setup() with the split terminal layout, then require('agent').open(<kind>)
 --   2. wait for the agent's IDE connection to agent.nvim's provider
---   3. at-mention a.txt lines 1-2 (provider notification, or the typed fallback for gemini) and
---      check that the agent's TUI shows the reference
+--   3. selection tracking, driven with keys as a user would, checked on the wire (the last
+--      selection agent.nvim pushed) and in the agent's TUI (Gemini's TUI does not show it):
+--      (kept) select a.txt lines 1-2 (Vj) and go straight from Visual mode to the agent window
+--             (<C-w>l): the agent keeps the selection;
+--      (dropped) back in the file window the agent sees the cursor only; select again (Vj), then
+--             <Esc>: the selection is dropped
 --   4. submit a prompt; the scripted model then
 --      (a) calls the $NVIM controller: exec_lua (sets vim.g.agent_e2e) and open_file (notes.txt)
 --      (b) edits a.txt (world -> neovim) through the IDE diff, which this driver accepts
@@ -187,6 +191,20 @@ local function claude_client(k)
   end
 end
 
+---The text of the last selection_changed sent to the ready client of kind `k` for a.txt ('' when
+---only the cursor was sent), or nil.
+local function claude_wire(k)
+  local st = claude_provider()._state
+  for _, s in ipairs(st.srv and st.srv:sessions() or {}) do
+    if not s.closed and s.data.kind == k and s.data.ready and s.data.sel_key then
+      local ok, p = pcall(vim.json.decode, s.data.sel_key)
+      if ok and type(p) == 'table' and p.filePath == ws .. '/a.txt' then
+        return p.text
+      end
+    end
+  end
+end
+
 local K = {}
 
 K.claude = {
@@ -213,8 +231,12 @@ K.claude = {
   connected = function()
     return claude_client('claude') ~= nil
   end,
-  reference = '@a.txt#L1-2',
-  mention = { 'sent' },
+  -- The TUI with the selection, and with the cursor only.
+  selection = '⧉ 2 lines selected',
+  no_selection = 'In a.txt',
+  wire = function()
+    return claude_wire('claude')
+  end,
   prompts = {},
   diff = true,
   lock_dir = function()
@@ -252,8 +274,13 @@ K.copilot = {
     end
     return false
   end,
-  reference = '@a.txt:1-2',
-  mention = { 'sent' },
+  selection = '@a.txt:1-2',
+  no_selection = '@a.txt',
+  wire = function()
+    local st = require('agent.providers.copilot')._state()
+    local p = st and st.last_selection
+    return p and p.filePath == ws .. '/a.txt' and p.text or nil
+  end,
   prompts = { { 'Do you trust the files', '\r' } },
   diff = true,
   lock_dir = function()
@@ -327,10 +354,18 @@ K.gemini = {
   connected = function()
     return require('agent.providers.gemini').status().streams >= 1
   end,
-  -- Gemini has no mention notification: the reference is typed (after the startup grace period
-  -- when the agent was launched moments ago, hence 'pending').
-  reference = '@a.txt (lines 1-2)',
-  mention = { 'typed', 'pending' },
+  -- Gemini's TUI does not show the selection: only the last ide/contextUpdate sent is checked.
+  wire = function()
+    local st = require('agent.providers.gemini')._state()
+    for _, s in ipairs(st and st.binding:sessions() or {}) do
+      local sent = s.data.gemini and s.data.gemini.last_context
+      local ok, ctx = pcall(vim.json.decode, sent or '')
+      local f = ok and type(ctx) == 'table' and ctx.workspaceState.openFiles[1]
+      if f and f.path == ws .. '/a.txt' and f.isActive then
+        return f.selectedText or ''
+      end
+    end
+  end,
   prompts = {},
   diff = true,
   lock_dir = function()
@@ -375,8 +410,11 @@ K.opencode = {
   connected = function()
     return claude_client('opencode') ~= nil
   end,
-  reference = 'a.txt#1-2',
-  mention = { 'sent' },
+  selection = 'a.txt#1-2',
+  no_selection = 'a.txt',
+  wire = function()
+    return claude_wire('opencode')
+  end,
   prompts = {},
   diff = false,
   lock_dir = function()
@@ -517,14 +555,57 @@ if not check('the agent connected to the agent.nvim IDE provider', wait_until(90
 end
 vim.wait(1500)
 
--- 3. At-mention (provider notification or typed fallback)
+-- 3. Selection tracking, with keys as a user would press them
+local SELECTED = 'hello\nworld'
+local function feed(keys, mode)
+  vim.api.nvim_feedkeys(vim.keycode(keys), mode or 'nx', false)
+end
+---The agent got the selection (selected) or the cursor only: on the wire, and in its TUI.
+local function agent_has(selected)
+  if R.wire() ~= (selected and SELECTED or '') then
+    return false
+  end
+  if not R.selection then
+    return true
+  end
+  local t = tty()
+  if selected then
+    return t:find(R.selection, 1, true) ~= nil
+  end
+  return t:find(R.selection, 1, true) == nil and t:find(R.no_selection, 1, true) ~= nil
+end
+local shown = R.selection and (' (TUI: ' .. R.selection .. ')') or ' (ide/contextUpdate selectedText)'
+local dropped = R.no_selection and (' (TUI: ' .. R.no_selection .. ')') or ' (no selectedText)'
+local term_win = vim.fn.bufwinid(buf)
+
+-- (kept) Select lines 1-2, then go straight from Visual mode to the agent window.
 vim.api.nvim_set_current_win(main_win)
-local mok, how = agent.send_selection({ path = ws .. '/a.txt', line1 = 1, line2 = 2 }, { name = kind })
-check('send_selection() delivered the at-mention (' .. table.concat(R.mention, '/') .. ')',
-  mok and vim.tbl_contains(R.mention, how), how)
-check('the TUI shows the reference ' .. R.reference, wait_until(20000, function()
-  return tty():find(R.reference, 1, true) ~= nil
-end, 'reference in the TUI'))
+vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
+feed('Vj', 'nx!') -- Visual mode stays on
+check('Vj: the agent got the selection' .. shown, wait_until(20000, function()
+  return agent_has(true)
+end, 'the selection at the agent'))
+feed('<C-w>l')
+check('<C-w>l from Visual mode: the agent window has focus', vim.api.nvim_get_current_win() == term_win,
+  vim.api.nvim_get_current_win())
+vim.wait(2000) -- well past the grace period and the debounce
+check('the selection is kept for the agent' .. shown, agent_has(true), vim.inspect(R.wire()))
+
+-- (dropped) Back in the file window, Normal mode: the cursor only. Select again, then <Esc>.
+feed('<C-w>p')
+check('<C-w>p: back in the file window', vim.api.nvim_get_current_win() == main_win)
+check('back in the file: the agent got the cursor only' .. dropped, wait_until(20000, function()
+  return agent_has(false)
+end, 'the cursor only at the agent'))
+vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
+feed('Vj', 'nx!')
+check('Vj again: the agent got the selection' .. shown, wait_until(20000, function()
+  return agent_has(true)
+end, 'the selection at the agent'))
+feed('<Esc>')
+check('<Esc> dropped the selection: the agent got the cursor only' .. dropped, wait_until(20000, function()
+  return agent_has(false)
+end, 'the cursor only at the agent'))
 
 -- 4. Prompt
 vim.wait(1000)
@@ -569,7 +650,7 @@ if R.diff then
     end, 'a.txt buffer reload'))
   end
 else
-  skip('(b) edit through the IDE diff', 'OpenCode has no IDE diff: its editor client only receives selections and mentions')
+  skip('(b) edit through the IDE diff', 'OpenCode has no IDE diff: its editor client only receives selections')
 end
 
 if kind ~= 'gemini' then

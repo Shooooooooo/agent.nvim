@@ -39,6 +39,14 @@ IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable 
   lines. OpenCode reads Claude-protocol lines as 1-based. Gemini's cursor is 1-based. The
   controller's tools are 1-based and inclusive. Columns are byte offsets except where noted
   (Copilot and Gemini use UTF-16 when the buffer is loaded).
+- **Selection.** `lua/agent/editor/selection.lua` feeds all four protocols (the pushed
+  notifications and the pull tools). When Visual mode ends, the selection is held for
+  `DEMOTE_MS` (50 ms). If a file window then has focus (`<Esc>`, `y`, `d`, a click in the file),
+  it is replaced by the cursor, sent as an empty selection (Gemini: no `selectedText`). A cursor
+  move or text change during the grace period drops it at once. If focus went straight to the
+  agent terminal or another non-file window (`<C-w>l`, `<cmd>Agent<cr>`), it is kept until a
+  file window has focus again. Re-entering Visual mode cancels the drop. A command line opened
+  from Visual mode pauses the grace period, which restarts once the command has run.
 - **Blocking tools.** A diff tool that waits for the user must be answered asynchronously. Never
   block the Neovim UI. Everything that runs in a libuv callback goes through `vim.schedule`.
 - **Files.** Lock and discovery files are mode 0600. They are written atomically (temp file plus
@@ -159,8 +167,8 @@ Claude 2.1.283, in order (captured):
   - Claude rejects versions outside `2025-11-25` … `2024-10-07`.
   - Never use `serverInfo.name = "Claude Code JetBrains Plugin"`, which disables Claude's
     diagnostics baseline.
-- `ide_connected.pid` is Claude's pid. It maps a client to its terminal job (`jobpid()` is that
-  pid or a close ancestor).
+- `ide_connected.pid` is Claude's pid. agent.nvim only records it (the provider's `clients()` and
+  `status()`).
 - Claude registers its notification handlers **after** the connection completes, and drops
   earlier notifications. The server waits 600 ms after the last of `notifications/initialized`,
   `ide_connected` and `tools/list` before the first notification. OpenCode can be notified right
@@ -202,28 +210,17 @@ after `openDiff` and `close_tab`, right before the write.
   - Sent to a client when it becomes ready and on every change. With `selection.track = false`
     nothing is sent, not even on connect. The pull tools `getCurrentSelection` and
     `getLatestSelection` still answer.
-- `at_mentioned` `{filePath, lineStart?, lineEnd?}`
-  - Lines are 0-based. Claude inserts `@<relative path>#L<a>[-<b>] `. Omit both keys (never
-    `null`) for a whole file or a directory.
-  - OpenCode requires both lines, treats them as **1-based**, and inserts `@<path>#<a>[-<b>]`. A
-    whole file is sent as lines 1..N. Directories are not sent to OpenCode.
-  - **Targeting.** A mention for an agent terminal carries that terminal's job pid. It goes only
-    to the Claude whose `ide_connected.pid` is that pid or a close descendant of it, never to a
-    Claude that reported another pid. OpenCode reports no pid: it gets the mention only when it
-    is the only OpenCode client and no OpenCode was launched since it connected. When no client
-    matches, the mention is queued (for `providers.claude.mention_timeout_ms`) if a client that
-    may be the target is still connecting or an agent of that kind was launched in that window;
-    otherwise `at_mention` returns false and the reference is typed into the terminal.
-  - A mention for an agent the user started by hand (no agent.nvim terminal) carries no pid and
-    goes to the ready clients of its kind. init.lua sends it only while no agent of that kind runs
-    in an agent.nvim terminal.
+- `at_mentioned` `{filePath, lineStart?, lineEnd?}` is part of the protocol, but **agent.nvim does
+  not send it**: `selection_changed` is the only context it pushes. For reference:
+  - Lines are 0-based. Claude inserts `@<relative path>#L<a>[-<b>] `. Both keys are omitted
+    (never `null`) for a whole file or a directory.
+  - OpenCode requires both lines, treats them as **1-based**, and inserts `@<path>#<a>[-<b>]`, so
+    a whole file would be lines 1..N. It has no form for a directory.
 
 | Aspect | Claude Code | OpenCode |
 |---|---|---|
 | First notification | at least 600 ms after the connection completes | right after `initialize` |
 | Lines and characters | 0-based | + `agents.opencode.line_offset` (default 1) |
-| Whole-file mention | `{filePath}` | `{filePath, lineStart: 1, lineEnd: N}` |
-| Directory mention | `{filePath: <dir>}` | not sent (typed instead) |
 | Tools and diffs | yes | none; OpenCode's edit tool writes files directly |
 
 ### Launch environment
@@ -385,16 +382,12 @@ The server name `ide` is reserved.
   - It is sent to every session, and replayed when a GET stream opens (the CLI clears its cache on
     every reconnect).
   - Do not send an empty selection just because focus moved into the terminal.
-- `add_file_reference` `{filePath, fileUrl, selection: {start, end} | null, selectedText: string | null}`.
-  - `selection` and `selectedText` **must be present even when null** (encode `vim.NIL`),
-    otherwise the message is dropped.
-  - The CLI inserts `@<relative path>[:L1[-L2]] `. It targets one session. For an agent terminal
-    that is the CLI running in it (matched by `x-copilot-pid`/`x-copilot-parent-pid` against the
-    terminal's job pid), or none, and the reference is typed instead. For a Copilot the user
-    started by hand (no pid): the CLI in the last focused agent terminal, else the most recently
-    active session.
-- `diagnostics_changed` and `add_selection` are not sent. 1.0.88 has no handler for the first,
-  and the second is an alias of `add_file_reference`.
+- `add_file_reference` `{filePath, fileUrl, selection: {start, end} | null, selectedText: string | null}`
+  is part of the protocol, but **agent.nvim does not send it**. For reference: `selection` and
+  `selectedText` must be present even when null, otherwise the message is dropped, and the CLI
+  inserts `@<relative path>[:L1[-L2]] ` into its prompt.
+- `diagnostics_changed` and `add_selection` are not sent either. 1.0.88 has no handler for the
+  first, and the second is an alias of `add_file_reference`.
 
 ---
 
@@ -535,7 +528,8 @@ disconnects the IDE client for the rest of the process.** Optional fields are om
 - `ide/contextUpdate` `{workspaceState: {openFiles: [{path, timestamp, isActive?, cursor?: {line, character}, selectedText?}]}}`
   - Up to 10 recently focused files. Exactly one, the newest, has `isActive: true`, with a 1-based
     cursor (UTF-16 character).
-  - `selectedText` appears only in visual mode, truncated to 16384.
+  - `selectedText` appears only while there is a selection: in Visual mode, or kept after a switch
+    from Visual mode straight to the agent terminal (see Conventions). Truncated to 16384.
   - With no files, send `{"workspaceState":{"openFiles":[]}}`. Debounced 50 ms, broadcast to every
     session.
   - With `selection.track = false` that empty context is all Gemini gets, also on stream open.
@@ -706,6 +700,8 @@ user's config for the session.
 - **Tools.** `get_editor_state`, `list_buffers`, `read_buffer`, `edit_buffer`, `open_file`,
   `get_diagnostics`, `execute_command`, `eval`, `exec_lua`, `notify`.
   - The schemas are in `nvim_mcp/server.lua`; the README has the argument table.
+  - `get_editor_state.visual_selection` is the live selection in Visual mode, otherwise the last
+    one (`'<` and `'>`). Unlike the IDE context (Conventions, Selection) it stays after `<Esc>`.
   - Lines are 1-based and inclusive. Arguments are validated against the schema (unknown, missing
     or mistyped arguments give an `isError` result).
   - Results are text, JSON where structured. A tool failure is `{isError: true, content: [{type: "text", text}]}`.

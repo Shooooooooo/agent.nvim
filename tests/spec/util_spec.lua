@@ -67,12 +67,6 @@ describe('util', function()
     assert.same({ 1 }, v.b)
   end)
 
-  it('path_contains', function()
-    assert.truthy(util.path_contains('/a/b', '/a/b/c'))
-    assert.truthy(util.path_contains('/a/b', '/a/b'))
-    assert.falsy(util.path_contains('/a/b', '/a/bc'))
-  end)
-
   it('file urls', function()
     assert.eq('file:///tmp/a b', util.file_url_raw('/tmp/a b'))
     assert.eq('file:///tmp/a%20b', util.file_url('/tmp/a b'))
