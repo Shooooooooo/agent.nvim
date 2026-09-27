@@ -2,7 +2,9 @@
 ---
 --- A diff shows the original on the left and the proposal on the right, in a new tab page (or,
 --- with `config.diff.open_in = 'current'`, in a new window pair below the main window, unless that
---- tab page already shows a diff: Neovim would merge the two into one multi-way diff).
+--- tab page already shows a diff: Neovim would merge the two into one multi-way diff; with no main
+--- window, such as beside the agent terminal alone, below one split off for the pair, which closes
+--- with the diff, see close_helper()).
 --- A diff's own tab page also shows the agent terminal (config.diff.show_terminal), so that the
 --- agent stays in sight: original | proposed | agent. agent.terminal.split_here() places that window
 --- (on config.terminal.split_side, as large as the terminal's own split) and declines when there is
@@ -309,13 +311,62 @@ end
 ---@return boolean
 local function has_focus(d)
   local cur_win = api.nvim_get_current_win()
-  if cur_win == d.orig_win or cur_win == d.prop_win or cur_win == d.term_win then
+  if cur_win == d.orig_win or cur_win == d.prop_win or cur_win == d.term_win
+    or (d.helper and cur_win == d.helper.win) then
     return true
   end
   if d.tab then
     return api.nvim_get_current_tabpage() == d.tab or not api.nvim_tabpage_is_valid(d.tab)
   end
   return false
+end
+
+---The non-floating windows of tab page `tab` (0: the current one) and their sizes.
+---@param tab integer
+---@return { win: integer, width: integer, height: integer }[]
+local function window_sizes(tab)
+  local out = {}
+  for _, w in ipairs(api.nvim_tabpage_list_wins(tab)) do
+    if api.nvim_win_get_config(w).relative == '' then
+      local width, height = api.nvim_win_get_width(w), api.nvim_win_get_height(w)
+      out[#out + 1] = { win = w, width = width, height = height }
+    end
+  end
+  return out
+end
+
+---Close the window build_layout() split off for the pair (d.helper), unless it is in use (it shows
+---a file, or text typed into its placeholder: `:edit` names an empty buffer and keeps it) or it is
+---the last window of its tab page, and give the windows of that tab page the sizes they had before,
+---when they are still the same windows.
+---@param d table
+---@return integer|nil closed  the window, when closed
+local function close_helper(d)
+  local h = d.helper
+  d.helper = nil
+  if not (h and win_valid(h.win) and api.nvim_win_get_buf(h.win) == h.buf and buf_valid(h.buf)
+    and api.nvim_buf_get_name(h.buf) == '' and not vim.bo[h.buf].modified) then
+    return nil
+  end
+  local tab = api.nvim_win_get_tabpage(h.win)
+  if #window_sizes(tab) < 2 or not pcall(api.nvim_win_close, h.win, true) then
+    return nil
+  end
+  if api.nvim_tabpage_is_valid(tab) then
+    local now = window_sizes(tab)
+    local same = #now == #h.sizes
+    for i = 1, same and #now or 0 do
+      same = same and now[i].win == h.sizes[i].win
+    end
+    -- Twice, as winrestcmd() does: a size set first can be changed by the ones after it.
+    for _ = 1, same and 2 or 0 do
+      for _, s in ipairs(h.sizes) do
+        pcall(api.nvim_win_set_width, s.win, s.width)
+        pcall(api.nvim_win_set_height, s.win, s.height)
+      end
+    end
+  end
+  return h.win
 end
 
 ---@param win integer
@@ -380,6 +431,10 @@ local function teardown(d)
     if buf_valid(b) then
       pcall(api.nvim_buf_delete, b, { force = true })
     end
+  end
+  local helper = close_helper(d)
+  if helper then
+    closed[helper] = true
   end
 
   -- Diffs opened from this one's windows return focus to where this one came from.
@@ -541,8 +596,8 @@ end
 
 ---Show the agent terminal in the diff's tab page (config.diff.show_terminal), without focus, and
 ---give the original and the proposal equal halves of the rest. agent.terminal decides whether it
----can (an agent terminal exists, its layout is split or tab) and where the window goes; this module
----only asks it when it is loaded (no agent.terminal, no agent terminal).
+---can (an agent terminal exists, its layout is split, tab or current) and where the window goes;
+---this module only asks it when it is loaded (no agent.terminal, no agent terminal).
 ---@param d table
 local function show_terminal(d)
   local show = true
@@ -583,7 +638,18 @@ local function build_layout(d)
   end
 
   if open_in == 'current' then
-    local main = context.main_window() or d.prev_win
+    local main = context.main_window({ create = false })
+    if not main then
+      -- No editor window in this tab page (the agent terminal alone, say): main_window() splits
+      -- one off, with an empty placeholder buffer. It is only there for the pair: the teardown
+      -- closes it and gives the other windows their sizes back (see close_helper()).
+      local sizes = window_sizes(0)
+      main = context.main_window()
+      if main then
+        d.helper = { win = main, buf = api.nvim_win_get_buf(main), sizes = sizes }
+      end
+    end
+    main = main or d.prev_win
     d.orig_win = api.nvim_open_win(d.orig_buf, false, { split = 'below', win = main })
     d.prop_win = api.nvim_open_win(d.prop_buf, false, { split = 'right', win = d.orig_win })
   else

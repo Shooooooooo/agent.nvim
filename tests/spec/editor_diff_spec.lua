@@ -1172,5 +1172,228 @@ describe('editor.diff', function()
       assert.eq(1, #wins_of(buf, 0))
       balanced('fresh')
     end)
+
+    describe("with the 'current' layout", function()
+      before_each(function()
+        config.setup({ terminal = { layout = 'current', start_insert = false, auto_close = true } })
+      end)
+
+      ---a.txt | a.txt, and the agent started in the right window, which it takes over (the cursor
+      ---stays there: start_agent() does not focus).
+      ---@return string path, integer buf, integer agent_win, integer file_win, integer file_buf
+      local function setup_windows(env)
+        local path = write('a.txt', { 'x' })
+        vim.cmd('edit ' .. vim.fn.fnameescape(path))
+        local file_buf = api.nvim_get_current_buf()
+        local file_win = api.nvim_get_current_win()
+        vim.cmd('rightbelow vsplit')
+        local agent_win = api.nvim_get_current_win()
+        local buf = start_agent(env)
+        assert.eq(buf, api.nvim_win_get_buf(agent_win), 'the agent took the current window')
+        assert.eq(agent_win, api.nvim_get_current_win())
+        assert.eq(file_buf, vim.w[agent_win].agent_nvim_prev.buf)
+        return path, buf, agent_win, file_win, file_buf
+      end
+
+      it('the diff tab page shows the agent on split_side, split_size wide; focus returns to its window', function()
+        local path, buf, agent_win, file_win, file_buf = setup_windows()
+        local job = terminal.info().job
+        -- The agent's window is narrower than the editor: it is still not matched as a split.
+        assert.truthy(api.nvim_win_get_width(agent_win) < vim.o.columns)
+        local calls = open({ id = 'cur', path = path, new_contents = 'y\n' })
+        local info = diff.get('cur')
+        assert.eq(info.tabpage, api.nvim_get_current_tabpage())
+        assert.eq(3, #api.nvim_tabpage_list_wins(0), 'original | proposed | agent')
+        local term_win = wins_of(buf, 0)[1]
+        assert.truthy(term_win)
+        assert.eq(math.floor(vim.o.columns * 0.4), api.nvim_win_get_width(term_win))
+        assert.eq(vim.o.columns, api.nvim_win_get_position(term_win)[2] + api.nvim_win_get_width(term_win))
+        assert.eq(nil, vim.w[term_win].agent_nvim_prev, 'a split of its own')
+        assert.eq(info.bufnr, api.nvim_get_current_buf(), 'focus on the proposal')
+        balanced('cur')
+        vim.cmd('write')
+        assert.eq('accepted', calls[1].status)
+        wait_for(function()
+          return #api.nvim_list_tabpages() == 1
+        end, 1000, 'the diff tab page closed')
+        assert.eq(agent_win, api.nvim_get_current_win(), "back in the agent's window, where the diff came from")
+        assert.same({ agent_win }, vim.fn.win_findbuf(buf))
+        assert.eq(file_buf, api.nvim_win_get_buf(file_win))
+        assert.truthy(job_running())
+        assert.eq(job, terminal.info().job)
+
+        -- Opened from the file window: focus goes back there.
+        api.nvim_set_current_win(file_win)
+        calls = open({ id = 'cur2', path = path, new_contents = 'z\n' })
+        feed('\\ad')
+        assert.eq('rejected', calls[1].status)
+        wait_for(function()
+          return #api.nvim_list_tabpages() == 1
+        end, 1000, 'the diff tab page closed')
+        assert.eq(file_win, api.nvim_get_current_win())
+        assert.same({ agent_win }, vim.fn.win_findbuf(buf))
+      end)
+
+      it(':AgentClose and :Agent in the diff tab page: the diff windows are never given to the agent', function()
+        local path, buf, agent_win = setup_windows()
+        local job = terminal.info().job
+        local calls = open({ id = 'cmd', path = path, new_contents = 'y\n' })
+        local tab = diff.get('cmd').tabpage
+        local prop_win = api.nvim_get_current_win()
+        local orig_win = vim.fn.bufwinid(diff.get('cmd').orig_bufnr)
+        assert.truthy(terminal.close())
+        assert.eq(0, #wins_of(buf, tab))
+        assert.same({ agent_win }, vim.fn.win_findbuf(buf), "the agent's own window keeps it")
+        -- :Agent from the proposal: a split on split_side, as the diff's view was.
+        assert.eq(buf, terminal.toggle('fake'))
+        local here = wins_of(buf, tab)[1]
+        assert.truthy(here and here ~= prop_win and here ~= orig_win)
+        assert.eq(here, api.nvim_get_current_win())
+        assert.eq(3, #api.nvim_tabpage_list_wins(tab))
+        assert.eq(diff.get('cmd').bufnr, api.nvim_win_get_buf(prop_win))
+        assert.eq(diff.get('cmd').orig_bufnr, api.nvim_win_get_buf(orig_win))
+        assert.eq(math.floor(vim.o.columns * 0.4), api.nvim_win_get_width(here))
+        assert.eq(vim.o.columns, api.nvim_win_get_position(here)[2] + api.nvim_win_get_width(here))
+        balanced('cmd')
+        -- From the original too, after hiding it again.
+        assert.eq(buf, terminal.toggle('fake'))
+        assert.eq(0, #wins_of(buf, tab))
+        api.nvim_set_current_win(orig_win)
+        assert.eq(buf, terminal.open('fake'))
+        assert.eq(1, #wins_of(buf, tab))
+        assert.eq(diff.get('cmd').orig_bufnr, api.nvim_win_get_buf(orig_win))
+        api.nvim_set_current_win(prop_win)
+        vim.cmd('write')
+        assert.eq('accepted', calls[1].status)
+        wait_for(function()
+          return #api.nvim_list_tabpages() == 1
+        end, 1000, 'the diff tab page closed')
+        assert.same({ agent_win }, vim.fn.win_findbuf(buf))
+        assert.truthy(job_running())
+        assert.eq(job, terminal.info().job)
+      end)
+
+      it("the agent exiting while a diff shows it: the diff's view closes, its own window gets its buffer back", function()
+        local path, buf, agent_win, _, file_buf = setup_windows({ FAKE_AGENT_EXIT = '0', FAKE_AGENT_SLEEP = '1' })
+        local calls = open({ id = 'exit', path = path, new_contents = 'y\n' })
+        local info = diff.get('exit')
+        assert.eq(1, #wins_of(buf, 0))
+        wait_for(function()
+          return terminal.info() == nil
+        end, 5000, 'the agent exited and its terminal was closed')
+        vim.wait(50)
+        assert.falsy(api.nvim_buf_is_valid(buf))
+        assert.eq(2, #api.nvim_tabpage_list_wins(info.tabpage), 'original | proposed stay')
+        assert.eq(info.bufnr, api.nvim_get_current_buf(), 'focus stays on the proposal')
+        assert.truthy(api.nvim_win_is_valid(agent_win))
+        assert.eq(file_buf, api.nvim_win_get_buf(agent_win))
+        vim.cmd('write')
+        assert.eq('accepted', calls[1].status)
+        wait_for(function()
+          return #api.nvim_list_tabpages() == 1
+        end, 1000)
+        assert.eq(agent_win, api.nvim_get_current_win())
+        assert.same({}, notes)
+      end)
+
+      it("open_in = 'current' with no editor window: the window made for the pair closes with the diff", function()
+        config.setup({ terminal = { layout = 'current', start_insert = false }, diff = { open_in = 'current' } })
+        local path = write('a.txt', { 'x' })
+        vim.cmd('edit ' .. vim.fn.fnameescape(path))
+        local buf, agent_win = start_agent()
+        assert.same({ agent_win }, api.nvim_tabpage_list_wins(0), 'the agent is the only window')
+        assert.eq(vim.o.columns, api.nvim_win_get_width(agent_win))
+        for _, how in ipairs({ 'accept', 'agent' }) do
+          local calls = open({ id = how, path = path, new_contents = 'y\n' })
+          local info = diff.get(how)
+          local wins = api.nvim_tabpage_list_wins(0)
+          assert.eq(1, #api.nvim_list_tabpages(), how)
+          assert.eq(4, #wins, how .. ': a window above the pair, the pair, the agent')
+          local helper
+          for _, w in ipairs(wins) do
+            local b = api.nvim_win_get_buf(w)
+            if w ~= agent_win and b ~= info.bufnr and b ~= info.orig_bufnr then
+              helper = w
+            end
+          end
+          assert.truthy(helper, how)
+          local helper_buf = api.nvim_win_get_buf(helper)
+          assert.truthy(api.nvim_win_get_width(agent_win) < vim.o.columns, how .. ': the agent is narrower meanwhile')
+          if how == 'accept' then
+            vim.cmd('write')
+            assert.eq('accepted', calls[1].status)
+          else
+            diff.close(how)
+          end
+          wait_for(function()
+            return #api.nvim_tabpage_list_wins(0) == 1
+          end, 1000, how .. ': only the agent window is left')
+          assert.same({ agent_win }, api.nvim_tabpage_list_wins(0), how)
+          assert.falsy(api.nvim_buf_is_valid(helper_buf), how .. ': its placeholder buffer is gone')
+          assert.eq(vim.o.columns, api.nvim_win_get_width(agent_win), how .. ': the agent has its full width back')
+          assert.eq(buf, api.nvim_win_get_buf(agent_win), how)
+          assert.eq(agent_win, api.nvim_get_current_win(), how .. ': focus back in the agent window')
+        end
+
+        -- Beside a sidebar (not an editor window): the sizes are as before the diff.
+        vim.cmd('topleft vnew')
+        local side = api.nvim_get_current_win()
+        vim.bo.buftype = 'nofile'
+        vim.cmd('vertical resize 30')
+        vim.wo.winfixwidth = true
+        api.nvim_set_current_win(agent_win)
+        local before = { api.nvim_win_get_width(side), api.nvim_win_get_width(agent_win) }
+        local calls = open({ id = 'side', path = path, new_contents = 'y\n' })
+        assert.eq(5, #api.nvim_tabpage_list_wins(0), 'sidebar | a window above the pair, the pair | agent')
+        vim.cmd('write')
+        assert.eq('accepted', calls[1].status)
+        wait_for(function()
+          return #api.nvim_tabpage_list_wins(0) == 2
+        end, 1000, 'sidebar | agent')
+        assert.same({ side, agent_win }, api.nvim_tabpage_list_wins(0))
+        assert.same(before, { api.nvim_win_get_width(side), api.nvim_win_get_width(agent_win) })
+
+        -- A file shown in that window meanwhile keeps it.
+        calls = open({ id = 'kept', path = path, new_contents = 'z\n' })
+        local helper
+        for _, w in ipairs(api.nvim_tabpage_list_wins(0)) do
+          if w ~= side and w ~= agent_win and not vim.wo[w].diff then
+            helper = w
+          end
+        end
+        assert.truthy(helper)
+        local other = write('b.txt', { 'b' })
+        api.nvim_win_call(helper, function()
+          vim.cmd('edit ' .. vim.fn.fnameescape(other))
+        end)
+        diff.close('kept')
+        assert.same({ side, helper, agent_win }, api.nvim_tabpage_list_wins(0))
+        assert.eq(vim.fn.resolve(other), vim.fn.resolve(api.nvim_buf_get_name(api.nvim_win_get_buf(helper))))
+      end)
+
+      it("open_in = 'current': the agent opened from the proposal goes to the main editor window", function()
+        config.setup({ terminal = { layout = 'current', start_insert = false }, diff = { open_in = 'current' } })
+        local path = write('a.txt', { 'x' })
+        vim.cmd('edit ' .. vim.fn.fnameescape(path))
+        local file_buf = api.nvim_get_current_buf()
+        local main = api.nvim_get_current_win()
+        local calls = open({ id = 'pair', path = path, new_contents = 'y\n' })
+        local info = diff.get('pair')
+        local prop_win = api.nvim_get_current_win()
+        assert.eq(info.bufnr, api.nvim_win_get_buf(prop_win))
+        assert.eq(3, #api.nvim_tabpage_list_wins(0))
+        local buf = start_agent()
+        assert.eq(buf, api.nvim_win_get_buf(main), 'the main editor window')
+        assert.eq(info.bufnr, api.nvim_win_get_buf(prop_win))
+        assert.eq(3, #api.nvim_tabpage_list_wins(0))
+        assert.eq(file_buf, vim.w[main].agent_nvim_prev.buf)
+        diff.close('pair')
+        assert.same({}, calls)
+        assert.same({ main }, api.nvim_tabpage_list_wins(0))
+        assert.eq(buf, api.nvim_win_get_buf(main))
+        assert.truthy(terminal.close())
+        assert.eq(file_buf, api.nvim_win_get_buf(main))
+      end)
+    end)
   end)
 end)

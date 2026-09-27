@@ -13,8 +13,9 @@ recording is reproducible (see [demo/](demo/)). [MP4 version](demo/agent-nvim-de
 
 ## Features
 
-- The agent runs in a split, float or tab. `:Agent` toggles the terminal; the agent keeps running
-  while hidden. One agent runs at a time: starting another one asks before replacing it.
+- The agent runs in a split, float, tab or the current window. `:Agent` toggles the terminal; the
+  agent keeps running while hidden. One agent runs at a time: starting another one asks before
+  replacing it.
 - The agent automatically sees your current file and visual selection.
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
@@ -108,7 +109,7 @@ change, with their defaults:
 require('agent').setup({
   default_agent = 'claude',
   terminal = {
-    layout = 'split',       -- 'split' | 'float' | 'tab' | 'none'
+    layout = 'split',       -- 'split' | 'float' | 'tab' | 'current' | 'none'
     split_side = 'right',   -- 'right' | 'left' | 'below' | 'above'
     split_size = 0.4,       -- fraction of the editor width (or height)
   },

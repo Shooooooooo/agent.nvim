@@ -9,6 +9,9 @@
 --
 -- The scenario, for each agent:
 --   1. require('agent').setup() with the split terminal layout, then require('agent').open(<kind>)
+--      (E2E_LAYOUT=current: the 'current' layout. The editor is split first, a.txt | a.txt, the
+--      right window as wide as the split layout's, and the agent takes it over, so that the rest
+--      runs the same way; stop() must give that window a.txt back)
 --   2. wait for the agent's IDE connection to agent.nvim's provider
 --   3. selection tracking, driven with keys as a user would, checked on the wire (the last
 --      selection agent.nvim pushed) and in the agent's TUI (Gemini's TUI does not show it):
@@ -25,6 +28,8 @@
 -- OpenCode has no IDE diff (its client is receive-only), so (b) is skipped for it.
 local kind, root = arg[1], arg[2]
 assert(kind and root, 'usage: driver.lua <kind> <root>')
+local LAYOUT = (vim.env.E2E_LAYOUT or '') ~= '' and vim.env.E2E_LAYOUT or 'split'
+assert(LAYOUT == 'split' or LAYOUT == 'current', 'E2E_LAYOUT must be split or current, not ' .. LAYOUT)
 
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h:h')
 vim.opt.rtp:prepend(repo)
@@ -439,11 +444,11 @@ if not opts then
   return finish()
 end
 opts = vim.tbl_deep_extend('force', {
-  terminal = { layout = 'split', start_insert = false, auto_close = false },
+  terminal = { layout = LAYOUT, start_insert = false, auto_close = false },
   selection = { debounce_ms = 50 },
 }, opts)
 agent.setup(opts)
-check('setup() with the split terminal layout', require('agent.config').get().terminal.layout == 'split')
+check('setup() with the ' .. LAYOUT .. ' terminal layout', require('agent.config').get().terminal.layout == LAYOUT)
 
 vim.cmd.cd(ws)
 vim.cmd.edit(ws .. '/a.txt')
@@ -454,9 +459,26 @@ if R.before_open then
   a_buf = vim.fn.bufnr(ws .. '/a.txt')
   main_win = vim.api.nvim_get_current_win()
 end
+-- 'current': the agent takes over the current window; a.txt stays in main_win, on its left. That
+-- window is as wide as the split layout's (terminal.split_size of the 240 columns: 96): wider,
+-- Copilot's TUI shows a sidebar and cuts the '@a.txt:1-2' line the checks below read.
+local agent_win
+if LAYOUT == 'current' then
+  vim.cmd('rightbelow vsplit')
+  agent_win = vim.api.nvim_get_current_win()
+  local width = math.floor(vim.o.columns * require('agent.config').get().terminal.split_size)
+  vim.cmd(('vertical resize %d'):format(width))
+end
 
 local buf, oerr = agent.open(kind)
-if not check('open(): the agent runs in a terminal split', buf ~= nil and terminal.is_running()
+if LAYOUT == 'current' then
+  local prev = vim.w[agent_win].agent_nvim_prev
+  if not check('open(): the agent runs in the current window, in place of a.txt', buf ~= nil
+    and terminal.is_running() and terminal.name() == kind and vim.fn.win_findbuf(buf)[1] == agent_win
+    and #vim.api.nvim_list_wins() == 2 and type(prev) == 'table' and prev.buf == a_buf, oerr) then
+    return finish()
+  end
+elseif not check('open(): the agent runs in a terminal split', buf ~= nil and terminal.is_running()
   and terminal.name() == kind, oerr) then
   return finish()
 end
@@ -531,6 +553,11 @@ local function done()
   local lock_dir = R.lock_dir()
   local provider = require('agent.providers.' .. require('agent.agents').get(kind).provider)
   check('stop() stopped the agent', agent.stop())
+  if LAYOUT == 'current' then
+    check("stop(): the agent's window stays, with a.txt again", vim.api.nvim_win_is_valid(agent_win)
+      and vim.api.nvim_win_get_buf(agent_win) == a_buf and #vim.api.nvim_list_wins() == 2,
+      vim.api.nvim_win_is_valid(agent_win) and vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(agent_win)) or 'closed')
+  end
   check('stop(): its provider stopped', not provider.is_running())
   check('stop(): the lock/discovery dir is empty', #files_in(lock_dir) == 0,
     lock_dir .. ': ' .. table.concat(files_in(lock_dir), ', '))
@@ -661,9 +688,12 @@ if R.diff then
     local diff_term = here[1]
     if diff_term then
       local right = vim.api.nvim_win_get_position(diff_term)[2] + vim.api.nvim_win_get_width(diff_term) == vim.o.columns
-      check('(b) ... on the right, as wide as the terminal split', right
-        and vim.api.nvim_win_get_width(diff_term) == vim.api.nvim_win_get_width(term_win),
-        ('width %d vs %d'):format(vim.api.nvim_win_get_width(diff_term), vim.api.nvim_win_get_width(term_win)))
+      -- 'current': the agent's own window is no split to match: terminal.split_size of the width.
+      local want = LAYOUT == 'current' and math.floor(vim.o.columns * require('agent.config').get().terminal.split_size)
+        or vim.api.nvim_win_get_width(term_win)
+      check('(b) ... on the right, as wide as ' .. (LAYOUT == 'current' and 'terminal.split_size' or 'the terminal split'),
+        right and vim.api.nvim_win_get_width(diff_term) == want,
+        ('width %d vs %d'):format(vim.api.nvim_win_get_width(diff_term), want))
     end
     vim.wait(500)
     local aok, aerr = agent.diff_accept()

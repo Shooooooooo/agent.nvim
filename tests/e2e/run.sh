@@ -8,12 +8,13 @@
 #   tests/e2e/run.sh claude copilot       # only these
 #
 # For each agent, a headless Neovim runs tests/e2e/driver.lua: it calls require('agent').setup()
-# and require('agent').open(<agent>) (split layout), waits for the agent's IDE connection, selects
-# lines in the editor and checks that the agent got the selection, and submits a prompt. A scripted
-# model turn then (a) calls the $NVIM controller (exec_lua and open_file) and (b) proposes an edit
-# that goes through the IDE diff, which the driver accepts in Neovim. The driver checks the effects
-# in Neovim and on disk, stops the agent (its provider stops with it and removes its lock/discovery
-# file), tears down, and checks that no lock/discovery files or temp dirs are left.
+# and require('agent').open(<agent>) (split layout, or E2E_LAYOUT), waits for the agent's IDE
+# connection, selects lines in the editor and checks that the agent got the selection, and
+# submits a prompt. A scripted model turn then (a) calls the $NVIM controller (exec_lua and
+# open_file) and (b) proposes an edit that goes through the IDE diff, which the driver accepts in
+# Neovim. The driver checks the effects in Neovim and on disk, stops the agent (its provider stops
+# with it and removes its lock/discovery file), tears down, and checks that no lock/discovery files
+# or temp dirs are left.
 # This script then checks that no process started by the run is still alive.
 #
 # Isolation: nothing touches your real agent configs or accounts.
@@ -33,7 +34,8 @@
 #
 # Other variables: E2E_TMP (parent of the temp dir; default $TMPDIR or /tmp), E2E_KEEP=1 (keep
 # the temp dir with the logs: <agent>.driver.log, <agent>.model.jsonl, <agent>.tty.txt),
-# E2E_TIMEOUT (seconds per agent, default 300).
+# E2E_TIMEOUT (seconds per agent, default 300), E2E_LAYOUT (terminal.layout: split, the default,
+# or current).
 # Exit status: 0 when every selected agent passed or was skipped.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
@@ -86,7 +88,7 @@ for kind in "$@"; do
     XDG_CONFIG_HOME="$ROOT/xdg/config" XDG_DATA_HOME="$ROOT/xdg/data" \
     XDG_STATE_HOME="$ROOT/xdg/state" XDG_CACHE_HOME="$ROOT/xdg/cache" \
     E2E_CLAUDE_BIN="$CLAUDE_BIN" E2E_COPILOT_BIN="$COPILOT_BIN" E2E_OPENCODE_BIN="$OPENCODE_BIN" \
-    E2E_GEMINI_JS="$GEMINI_JS" \
+    E2E_GEMINI_JS="$GEMINI_JS" E2E_LAYOUT="${E2E_LAYOUT:-}" \
     perl -e 'alarm shift; exec @ARGV' "${E2E_TIMEOUT:-300}" \
     nvim --headless -u NONE -i NONE -n -l "$REPO/tests/e2e/driver.lua" "$kind" "$ROOT"
   rc=$?

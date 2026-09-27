@@ -298,7 +298,8 @@ function M.setup(opts)
     end,
   })
   -- Leaving the agent terminal (its window, or Terminal mode) shows the files it may have changed.
-  vim.api.nvim_create_autocmd({ 'WinLeave', 'TermLeave' }, {
+  -- BufLeave: with the 'current' layout, the window stays when the terminal is hidden in it.
+  vim.api.nvim_create_autocmd({ 'WinLeave', 'TermLeave', 'BufLeave' }, {
     group = state.augroup,
     callback = function(ev)
       if vim.b[ev.buf].agent_nvim_agent then
@@ -409,7 +410,8 @@ end
 
 ---Toggle the agent terminal: hide it when `name` runs in it and it is visible in this tab page (its
 ---windows in other tab pages, such as a diff's, stay), else open and focus it (replacing another
----running agent like M.open()).
+---running agent like M.open()). With the 'current' layout it is shown in the current window, and
+---hiding it there brings back the buffer that window showed before.
 ---@param name string|nil  agent name (default: the running agent, else config.default_agent)
 ---@param opts agent.OpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
@@ -419,7 +421,8 @@ end
 
 ---Hide the agent terminal; the agent keeps running. Where it is shown in the current tab page, only
 ---there: in a diff's tab page (config.diff.show_terminal) the diff's view of the agent closes and
----the terminal's own window stays. Otherwise in every tab page. See agent.terminal.close().
+---the terminal's own window stays. Otherwise in every tab page. A window the 'current' layout took
+---over is not closed: it shows its previous buffer again. See agent.terminal.close().
 ---@return boolean closed
 function M.close()
   ensure_setup()

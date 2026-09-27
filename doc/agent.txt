@@ -147,7 +147,9 @@ exited, with its terminal left open, is replaced without asking.
     Toggle the agent terminal: hide it when [name] runs in it and it is
     visible in this tab page (its windows in other tab pages stay),
     otherwise open it (starting [name] if needed, see |agent-replace|) and
-    focus it.
+    focus it. With the "current" layout it opens in the current window, and
+    hiding it there brings back the buffer that window showed
+    (|agent-layout-current|).
 
                                                                   *:AgentOpen*
 :AgentOpen [name]
@@ -158,15 +160,18 @@ exited, with its terminal left open, is replaced without asking.
 :AgentClose
     Hide the agent terminal in this tab page, or in every tab page when it
     is not shown in this one. The agent keeps running. In a diff tab page
-    only the diff's view of the agent closes (|agent-diff-terminal|).
+    only the diff's view of the agent closes (|agent-diff-terminal|). A
+    window the "current" layout gave the agent is not closed: it shows its
+    previous buffer again.
 
                                                                   *:AgentStop*
 :AgentStop
     Stop the agent: end its job, wipe its terminal and delete its temp files.
-    Its IDE server stops too, unless `auto_start` is on: its lock or
-    discovery file is removed and its open diffs are closed. The IDE server
-    also stops when the agent exits on its own. Quitting Neovim stops the
-    agent and every IDE server.
+    A window the "current" layout gave the agent is not closed: it shows
+    its previous buffer again. Its IDE server stops too, unless `auto_start`
+    is on: its lock or discovery file is removed and its open diffs are
+    closed. The IDE server also stops when the agent exits on its own.
+    Quitting Neovim stops the agent and every IDE server.
 
                                                             *:AgentDiffAccept*
 :AgentDiffAccept
@@ -222,8 +227,8 @@ require('agent').toggle({name}, {opts})
 
                                                                *agent.close()*
 require('agent').close()
-    Hide the agent terminal (|:AgentClose|). Returns true when a window was
-    closed.
+    Hide the agent terminal (|:AgentClose|). Returns true when it was hidden
+    in a window.
 
                                                                 *agent.stop()*
 require('agent').stop()
@@ -259,7 +264,11 @@ apply when an existing terminal is shown again; the others apply only when
 the agent is started.
 
     focus          Enter the terminal window (default true).
-    layout         "split", "float", "tab" or "none" for this window.
+    layout         "split", "float", "tab", "current" or "none" for this
+                   window. With "current" the terminal replaces the
+                   current window's buffer even with `focus = false`,
+                   which then only skips `terminal.start_insert`
+                   (|agent-layout-current|).
     args           Extra CLI arguments, after `cmd` and `agents.<name>.args`.
     cwd            Working directory of the agent (default: Neovim's cwd).
     env            Extra environment; a false value unsets the variable.
@@ -289,7 +298,7 @@ The defaults, from lua/agent/config.lua: >lua
       default_agent = 'claude',
       auto_start = false,        -- start every IDE server at setup()
       terminal = {
-        layout = 'split',        -- 'split'|'float'|'tab'|'none'
+        layout = 'split',        -- 'split'|'float'|'tab'|'current'|'none'
         split_side = 'right',    -- 'right'|'left'|'below'|'above'
         split_size = 0.4,        -- fraction of the width (or height)
         float = { width = 0.85, height = 0.85, border = 'rounded' },
@@ -345,10 +354,54 @@ auto_start (false)
     that uses it and stops when that agent stops (|:AgentStop|, a replace,
     or the agent exiting). See the note in |agent-copilot|.
 terminal.layout ("split")
-    "split", "float", "tab" or "none". "none" means the plugin does not start
-    agents: you run them yourself (combine it with `auto_start = true`).
-    With "tab", |:Agent| and |:AgentOpen| from a tab page that does not show
-    the terminal go to the terminal's own tab page, if it still has one.
+    "split", "float", "tab", "current" or "none". "none" means the plugin
+    does not start agents: you run them yourself (combine it with
+    `auto_start = true`). With "tab", |:Agent| and |:AgentOpen| from a tab
+    page that does not show the terminal go to the terminal's own tab page,
+    if it still has one. "current" is described below.
+    The layout of one call can be given to |agent.open()| and
+    |agent.toggle()| (|agent-open-opts|).
+
+                                                        *agent-layout-current*
+    "current" shows the agent in the current window, in place of its
+    buffer, as |:terminal| does. The window remembers that buffer and its
+    view (cursor, scroll) in |w:agent_nvim_prev|.
+    - Hiding the agent (|:Agent|, |:AgentClose|; it keeps running),
+      stopping it (|:AgentStop|, |agent-replace|) and its exit with
+      `terminal.auto_close` do not close that window, even when it is the
+      last one: it shows its buffer again, with its view. When that buffer
+      was deleted meanwhile, it shows the window's alternate buffer, else a
+      new empty buffer. A window you split off the agent's window (|:split|)
+      is one more view of the agent (|w:agent_nvim_view|): it closes, as
+      with the other layouts.
+    - Showing and hiding the agent leave the window's alternate file and
+      its |jumplist| alone: CTRL-^ goes where it went before the agent
+      came, never to the agent.
+                                                          *agent-window-yours*
+    - A window you show the agent in yourself (|:buffer|, or CTRL-^ with
+      the agent as its alternate file) remembers no buffer. Hiding the
+      agent does not close it either: it shows the window's alternate
+      buffer, else a new empty buffer. With the other layouts this holds
+      for such a window only when it is the only window of its tab page;
+      otherwise it closes, as the agent's own windows do.
+    - The current window is not used when 'winfixbuf' is set, or when it
+      is in diff mode (an agent.nvim diff or any other). The agent goes to
+      the main editor window of the tab page instead (the previous window,
+      else the largest window showing a file); when there is none, as in a
+      diff tab page, to a split on `terminal.split_side`, as with "split".
+      That split closes when the agent is hidden.
+    - When the agent is already shown in this tab page, |:Agent| hides it
+      and |:AgentOpen| focuses its window. When it is shown only in another
+      tab page, both show it in the current window here too.
+    - The window options the terminal needs (no 'number', no 'wrap', ...)
+      are set for the terminal buffer only: the window keeps yours.
+    - A finished terminal left open (`auto_close` off, or an agent that
+      failed at startup) stays in view, but not in Terminal mode: Neovim
+      would wipe it on the next key, and close the window. Hide it with
+      |:AgentClose| or |:AgentStop|.
+    - A terminal has the size of its largest window. In a diff tab page
+      the agent's window is `terminal.split_size` wide (or tall) and shows
+      the left part of a wider terminal (|agent-diff-terminal|).
 terminal.split_side ("right")
     "right", "left", "below" or "above".
 terminal.split_size (0.4)
@@ -362,7 +415,8 @@ terminal.start_insert (true)
 terminal.auto_close (true)
     Close the terminal when the agent exits. An agent that exits non-zero
     within 5 seconds keeps its terminal open, so startup errors stay
-    readable.
+    readable. With the "current" layout, the window shows its previous
+    buffer again (|agent-layout-current|).
 selection.track (true)
     Send the selection, the cursor and (Gemini) the open files to connected
     agents, when they change and when an agent connects (|agent-context|).
@@ -375,17 +429,23 @@ diff.open_in ("tab")
     original/proposal window pair below the main window; when the current
     tab page already shows a diff (another agent.nvim diff, |:diffsplit|,
     fugitive), the diff opens in a new tab page instead, since Neovim would
-    merge them into one multi-way diff.
+    merge them into one multi-way diff. When no window of the tab page
+    shows a file (the agent alone, as the "current" and "tab" layouts
+    often leave it), a window is split off for the pair. Unless you open a
+    file in it meanwhile, it closes with the diff, and the other windows
+    get their sizes back: the agent its full width.
 diff.show_terminal (true)
     Show the agent terminal in a diff's own tab page too, so that you can
     read or answer the agent's own prompt: original | proposal | agent. It
     goes on the `terminal.split_side` edge, as wide (or tall) as the
     terminal's own split (else `terminal.split_size`), so the agent's screen
-    does not reflow. Only with the "split" and "tab" layouts (a float would
-    cover the diff) and while there is an agent terminal. false gives the
-    diff the full width. With the "tab" layout the terminal keeps the full
-    width of its own tab page, and the diff's narrower window shows its left
-    part. See |agent-diff-terminal|.
+    does not reflow. Only with the "split", "tab" and "current" layouts (a
+    float would cover the diff) and while there is an agent terminal. false
+    gives the diff the full width. With "tab" and "current" the window is
+    `terminal.split_size` wide (or tall): the terminal keeps the size of its
+    own window while that window shows it (the full width of its tab page,
+    for "tab"), and the diff's smaller window shows its left part. See
+    |agent-diff-terminal|.
 diff.keymaps.accept ("<leader>aa")
 diff.keymaps.reject ("<leader>ad")
     Normal-mode keys, buffer-local in diff buffers. "" or false disables a
@@ -939,10 +999,10 @@ Reject: the reject key (<leader>ad), |:AgentDiffReject|, or closing the
   then closes the diff), and after Claude's edits in auto-accept mode
   (watched for 10 seconds from Claude's pre-edit diagnostics request).
 - Files an agent changes without a diff (its shell commands, auto-approved
-  edits) are reloaded when you leave the agent's terminal window or
-  Terminal mode, and when the agent exits. Only unmodified buffers with
-  'autoread' on (the default) are reloaded; buffers with unsaved changes
-  are left alone.
+  edits) are reloaded when you leave the agent's terminal (its window, its
+  buffer or Terminal mode), and when the agent exits. Only unmodified
+  buffers with 'autoread' on (the default) are reloaded; buffers with
+  unsaved changes are left alone.
 - After the decision the diff is closed. If the cursor was in the diff (its
   view of the agent included), it goes back to the window you were in when
   the diff opened (for example the agent's terminal, in Terminal mode).
@@ -952,15 +1012,20 @@ The agent in a diff tab page ~
 With `diff.show_terminal` (the default), a diff's own tab page also shows the
 agent terminal, on the `terminal.split_side` edge and as large as the
 terminal's own split, so the agent's screen does not reflow. It is one more
-window on the same terminal, for the "split" and "tab" layouts (not
-"float"):
+window on the same terminal, for the "split", "tab" and "current" layouts
+(not "float"):
+- With "tab", and with "current" in a window the agent took over, this
+  window is `terminal.split_size` wide (or tall) and shows the left part of
+  the wider terminal. A terminal has the size of its largest window: while
+  the agent is hidden from its own window, its screen shrinks to this one.
 - The cursor starts in the proposal, so `:w` accepts. Move to the agent's
   window to read its prompt or to answer there instead.
 - Closing the diff, however it ends, closes this window too. The agent keeps
   running in its own window.
 - |:AgentClose| there hides only this window, and |:Agent| hides it or,
-  with the "split" layout, shows it again. The agent's window in the other
-  tab page stays.
+  with the "split" and "current" layouts, shows it again (on the
+  `terminal.split_side` edge: the diff's windows are not given to the
+  agent). The agent's window in the other tab page stays.
 - Each diff tab page gets its own view of the agent.
 - If the agent exits, `terminal.auto_close` closes only the terminal's
   windows, never the diff's; the diff itself closes when the agent's IDE
@@ -1003,6 +1068,18 @@ b:agent_nvim_session    The agent terminal buffer: the launch id, also in
                                                         *b:agent_session_name*
 b:agent_session_name    The agent terminal buffer, when it runs Copilot: the
                         session name Copilot reported.
+                                                           *w:agent_nvim_prev*
+w:agent_nvim_prev       A window the "current" layout gave the agent: what
+                        it showed before (`buf`, `listed`, `alt`, `view`)
+                        and the agent's buffer (`term`). See
+                        |agent-layout-current|.
+                                                           *w:agent_nvim_view*
+w:agent_nvim_view       A window that is one more view of the agent
+                        terminal (the terminal's buffer number): one
+                        agent.nvim opened for it (a split, float or tab
+                        page), or one split off a window showing it.
+                        Hiding the agent closes it. See
+                        |agent-window-yours|.
                                                              *b:agent_diff_id*
 b:agent_diff_id         Diff proposal and scratch original buffers: the diff
                         id.

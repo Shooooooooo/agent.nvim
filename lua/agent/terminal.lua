@@ -6,14 +6,20 @@
 --- terminal: opening another agent stops the one it holds (agent.open() asks first).
 ---
 --- One terminal buffer, possibly several windows: besides its own window (the split, float or tab
---- page of the layout), a view that takes a tab page of its own, like a diff, can show it in one
---- more split (split_here()). Every window is just a view of the buffer, and this module keeps no
---- per-window state: "visible" means shown in the current tab page; toggle() and close() act on
+--- page of the layout, or the window the 'current' layout took over), a view that takes a tab page
+--- of its own, like a diff, can show it in one more split (split_here()). Every window is just a
+--- view of the buffer: "visible" means shown in the current tab page; toggle() and close() act on
 --- the windows of the current tab page (close(): on every window when there is none here); stop()
---- and auto_close close them all. Closing a window never stops the job (the buffer is 'bufhidden'
---- = hide). Neovim sizes a terminal to its largest window, so an extra split is made as large as
---- the terminal's own split (see split_config), and the agent's TUI does not reflow. Every window
---- opened here starts on the last line, so that it follows the output (see follow()).
+--- and auto_close hide it in them all. Hiding it never stops the job (the buffer is 'bufhidden' =
+--- hide). A window is hidden by closing it, except a window the 'current' layout took over: it
+--- remembers the buffer it showed before (w:agent_nvim_prev) and gets that buffer back, and is
+--- never closed (see take_window() and hide_window()). A window the user showed the terminal in
+--- (CTRL-^, :buffer) is not closed either, with the 'current' layout or when it is the only window
+--- of its tab page: it shows its alternate buffer (see keeps_window()). Showing or hiding the
+--- terminal never changes a window's alternate buffer or jumplist (see switch_buf()). Neovim sizes
+--- a terminal to its largest window, so an extra split is made as large as the terminal's own split
+--- (see split_config), and the agent's TUI does not reflow. Every window opened here starts on the
+--- last line, so that it follows the output (see follow()).
 local config = require('agent.config')
 local util = require('agent.util')
 
@@ -105,20 +111,214 @@ local function split_count(tab)
   return n
 end
 
----Close a window; when it is the last one, show another buffer in it instead.
+---The window variable of a window that the 'current' layout took over (see take_window()).
+local PREV_VAR = 'agent_nvim_prev'
+
+---@class agent.TermPrev  w:agent_nvim_prev
+---@field term integer        the terminal buffer the window was given
+---@field buf integer         the buffer it showed before
+---@field listed boolean      whether that buffer was listed then (unlisted since: it was deleted)
+---@field alt integer|nil     the window's alternate buffer then
+---@field view table|nil      winsaveview() of the window then
+
+---What `win` showed before the 'current' layout gave it terminal `term`, or nil.
 ---@param win integer
-local function hide_window(win)
+---@param term integer
+---@return agent.TermPrev|nil
+local function prev_of(win, term)
+  local ok, prev = pcall(function()
+    return vim.w[win][PREV_VAR]
+  end)
+  if ok and type(prev) == 'table' and prev.term == term then
+    return prev
+  end
+  return nil
+end
+
+---The window variable of a window that is one more view of terminal `term`: a window this module
+---opened for it (the layout's split, float or tab page, a split of the 'current' layout when it has
+---no window to take, split_here()'s), or a window split off one showing it (:split, see
+---ensure_autocmds()). Such a window closes when the terminal is hidden (hide_window()).
+local VIEW_VAR = 'agent_nvim_view'
+
+---@param win integer
+---@param term integer
+---@return boolean
+local function is_view(win, term)
+  local ok, v = pcall(function()
+    return vim.w[win][VIEW_VAR]
+  end)
+  return ok and v == term
+end
+
+---Show buffer `buf` in `win`, as :buffer does, but leave the window's alternate buffer (#) and its
+---jumplist alone: showing or hiding the agent is none of the user's navigation. (With the terminal
+---as a window's #, CTRL-^ would bring the agent back into a window that remembers no buffer.)
+---@param win integer
+---@param buf integer
+---@return boolean ok, string|nil err
+local function switch_buf(win, buf)
+  local ok, err
+  local wok, werr = pcall(vim.api.nvim_win_call, win, function()
+    -- :keepalt keepjumps buffer {buf}; its error ("Vim:E37: ...") without a Lua traceback.
+    local cmd = { cmd = 'buffer', args = { tostring(buf) }, mods = { keepalt = true, keepjumps = true } }
+    ok, err = pcall(vim.api.nvim_cmd, cmd, {})
+  end)
+  if not wok then
+    ok, err = false, werr
+  elseif ok and vim.api.nvim_win_get_buf(win) ~= buf then
+    ok, err = false, 'the window shows another buffer'
+  end
+  return ok == true, not ok and tostring(err) or nil
+end
+
+---The alternate buffer (#) of `win`, or -1.
+---@param win integer
+---@return integer
+local function alt_of(win)
+  return vim.api.nvim_win_call(win, function()
+    return vim.fn.bufnr('#')
+  end)
+end
+
+---Show terminal `term` in `win` in place of the buffer it shows, and remember that buffer (and the
+---view: cursor, scroll) in w:agent_nvim_prev, for hide_window().
+---@param win integer
+---@param term integer
+---@return boolean ok, string|nil err
+local function take_window(win, term)
+  local api = vim.api
+  local buf = api.nvim_win_get_buf(win)
+  local prev = {
+    term = term,
+    buf = buf,
+    listed = vim.bo[buf].buflisted,
+    view = api.nvim_win_call(win, vim.fn.winsaveview),
+  }
+  local alt = alt_of(win)
+  prev.alt = alt > 0 and alt or nil
+  local ok, err = switch_buf(win, term)
+  if not ok then
+    return false, err
+  end
+  vim.w[win][PREV_VAR] = prev
+  return true, nil
+end
+
+---A buffer that can come back into a window after the terminal: valid, still listed (unless it
+---never was: :bdelete unlists), and not the terminal.
+---@param buf integer|nil
+---@param term integer
+---@param listed boolean|nil  it was listed when remembered
+---@return boolean
+local function can_restore(buf, term, listed)
+  return type(buf) == 'number' and buf > 0 and buf ~= term and vim.api.nvim_buf_is_valid(buf)
+    and (listed == false or vim.bo[buf].buflisted)
+end
+
+---Show another buffer than terminal `term` in `win`: the first of `bufs` that can come back
+---(can_restore(), listed), else a new empty buffer (as :enew would). The window's alternate buffer
+---stays as it is (switch_buf()).
+---@param win integer
+---@param term integer
+---@param bufs integer[]
+---@return boolean ok
+local function show_other(win, term, bufs)
+  for _, b in ipairs(bufs) do
+    if can_restore(b, term, true) and switch_buf(win, b) then
+      return true
+    end
+  end
+  -- Gone, or it cannot come back (e.g. 'winfixbuf' set since).
+  local empty = vim.api.nvim_create_buf(true, false)
+  if switch_buf(win, empty) then
+    return true
+  end
+  pcall(vim.api.nvim_buf_delete, empty, { force = true })
+  return false
+end
+
+---Give a window that the 'current' layout took over for terminal `term` the buffer it showed
+---before, with its view; when that buffer is gone, the window's alternate buffer (now, else when it
+---was taken over); else a new empty buffer. The window is never closed.
+---@param win integer
+---@param term integer
+---@return boolean restored  false when `win` was not taken over for `term`
+local function restore_window(win, term)
+  local prev = prev_of(win, term)
+  if not prev then
+    return false
+  end
+  vim.w[win][PREV_VAR] = nil
+  if can_restore(prev.buf, term, prev.listed) and switch_buf(win, prev.buf) then
+    if prev.view then
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.fn.winrestview(prev.view)
+      end)
+    end
+    return true
+  end
+  local bufs = vim.tbl_filter(function(b)
+    return b ~= prev.buf
+  end, { alt_of(win), prev.alt })
+  return show_other(win, term, bufs)
+end
+
+---True when hiding terminal `term` (started with `layout`) keeps `win` and gives it another
+---buffer, rather than closing it: a window the 'current' layout took over (w:agent_nvim_prev), or a
+---window the user showed the agent in (CTRL-^, :buffer: neither taken over nor a view, see
+---VIEW_VAR) when `layout` is 'current' or it is the only (non-floating) window of its tab page.
+---@param win integer
+---@param term integer
+---@param layout string|nil
+---@return boolean
+local function keeps_window(win, term, layout)
+  if prev_of(win, term) then
+    return true
+  end
+  if is_view(win, term) or is_float(win) then
+    return false
+  end
+  return layout == 'current' or split_count(vim.api.nvim_win_get_tabpage(win)) == 1
+end
+
+---Hide terminal `term` in a window: a window the 'current' layout took over gets back the buffer it
+---showed before (restore_window()); a window the user showed the agent in shows its alternate
+---buffer, else a new empty buffer, when keeps_window() says so; any other window is closed, and
+---when it is the last one, it shows another buffer instead.
+---@param win integer
+---@param term integer
+---@param layout string|nil  the terminal's layout
+local function hide_window(win, term, layout)
   if not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  if restore_window(win, term) then
+    return
+  end
+  if keeps_window(win, term, layout) and show_other(win, term, { alt_of(win) }) then
     return
   end
   if pcall(vim.api.nvim_win_close, win, true) then
     return
   end
-  local alt = vim.fn.bufnr('#')
-  if alt <= 0 or alt == vim.api.nvim_win_get_buf(win) or not vim.api.nvim_buf_is_valid(alt) then
-    alt = vim.api.nvim_create_buf(true, false)
+  show_other(win, term, { alt_of(win) })
+end
+
+---Hide terminal `t` in windows `wins`: its views first, so that a window kept only as the last
+---one of its tab page (keeps_window()) is seen as such.
+---@param t agent.Term
+---@param wins integer[]
+local function hide_windows(t, wins)
+  local views, others = {}, {}
+  for _, w in ipairs(wins) do
+    local view = vim.api.nvim_win_is_valid(w) and (is_view(w, t.bufnr) or is_float(w))
+    local list = view and views or others
+    list[#list + 1] = w
   end
-  pcall(vim.api.nvim_win_set_buf, win, alt)
+  for _, w in ipairs(vim.list_extend(views, others)) do
+    hide_window(w, t.bufnr, t.layout)
+  end
 end
 
 ---@param spec agent.LaunchSpec|nil
@@ -147,13 +347,11 @@ end
 ---@param t agent.Term
 local function hide_all(t)
   if buf_valid(t) then
-    for _, w in ipairs(windows_of(t.bufnr)) do
-      hide_window(w)
-    end
+    hide_windows(t, windows_of(t.bufnr))
   end
 end
 
----Forget a terminal: close its windows and wipe its buffer.
+---Forget a terminal: hide it in its windows (hide_window()) and wipe its buffer.
 ---@param t agent.Term
 local function discard(t)
   cleanup_term(t)
@@ -176,6 +374,33 @@ local function ensure_autocmds()
     callback = function()
       if current then
         cleanup_term(current)
+      end
+    end,
+  })
+  -- A window split off a window on the terminal (:split, CTRL-W v, :tab split) starts as one more
+  -- view of it (VIEW_VAR), and stops being one when it shows another buffer (:sbuffer from the
+  -- terminal's window starts on the terminal too, then shows its own buffer).
+  vim.api.nvim_create_autocmd('WinNew', {
+    group = state.augroup,
+    callback = function()
+      local t = current
+      if t and buf_valid(t) and vim.api.nvim_get_current_buf() == t.bufnr then
+        vim.w[VIEW_VAR] = t.bufnr
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWinEnter', {
+    group = state.augroup,
+    callback = function(ev)
+      local view = vim.w[VIEW_VAR]
+      if view ~= nil and view ~= ev.buf then
+        vim.w[VIEW_VAR] = nil
+      end
+      -- A window the 'current' layout took over that now shows another buffer (the user left the
+      -- terminal with :edit, :buffer, ...) is the user's again: forget what it showed before.
+      local prev = vim.w[PREV_VAR]
+      if type(prev) == 'table' and prev.term ~= ev.buf then
+        vim.w[PREV_VAR] = nil
       end
     end,
   })
@@ -214,9 +439,11 @@ local function default_launcher(name, opts)
 end
 
 ---@param win integer
----@param layout string
+---@param layout string  'current': a window taken over (take_window()), which gets the user's buffer
+---  back later: the options are set for the terminal buffer only (:setlocal), so that the window's
+---  own values (for the buffers it shows next) stay the user's
 local function style_window(win, layout)
-  local wo = vim.wo[win]
+  local wo = layout == 'current' and vim.wo[win][0] or vim.wo[win]
   wo.number = false
   wo.relativenumber = false
   wo.signcolumn = 'no'
@@ -248,7 +475,8 @@ end
 ---the user resized one), else config.terminal.split_size of the editor. Neovim sizes a terminal
 ---to its largest window: a window of the same size keeps the agent's TUI from reflowing (or from
 ---being cut off). A window alone in its tab page (the 'tab' layout) is not a split and is not
----matched.
+---matched, and neither is a window the 'current' layout took over (it has the user's size, which
+---can be most of the editor): as for 'tab', the split then shows part of a wider terminal.
 ---@param buf integer
 ---@param side string  'right'|'left'|'below'|'above'
 ---@return table
@@ -257,7 +485,7 @@ local function split_config(buf, side)
   local vertical = side ~= 'above' and side ~= 'below'
   local size
   for _, w in ipairs(windows_of(buf)) do
-    if not is_float(w) and split_count(vim.api.nvim_win_get_tabpage(w)) > 1 then
+    if not is_float(w) and not prev_of(w, buf) and split_count(vim.api.nvim_win_get_tabpage(w)) > 1 then
       local width = vim.api.nvim_win_get_width(w)
       -- A split along the same kind of edge: narrower than the editor for left/right, as wide
       -- as the editor for above/below.
@@ -277,8 +505,43 @@ local function split_config(buf, side)
   return wcfg
 end
 
+---True when the 'current' layout may show the terminal in `win` in place of its buffer: not when
+---'winfixbuf' pins its buffer, and not in a diff window (an agent.nvim diff's original or proposal,
+---which would break the diff, or any window in diff mode, which would diff the terminal).
+---@param win integer
+---@return boolean
+local function can_take(win)
+  if not vim.api.nvim_win_is_valid(win) then
+    return false
+  end
+  local wo = vim.wo[win]
+  if wo.winfixbuf or wo.diff then
+    return false
+  end
+  return vim.b[vim.api.nvim_win_get_buf(win)].agent_diff_id == nil
+end
+
+---The window the 'current' layout shows the terminal in: the current window, else (see can_take())
+---the main editor window of the current tab page (agent.editor.context.main_window(): the previous
+---window, else the largest one showing a file). nil when there is none: a split is opened instead.
+---@return integer|nil
+local function current_target()
+  local cur = vim.api.nvim_get_current_win()
+  if can_take(cur) then
+    return cur
+  end
+  local ok, main = pcall(function()
+    return require('agent.editor.context').main_window({ create = false })
+  end)
+  if ok and type(main) == 'number' and can_take(main) then
+    return main
+  end
+  return nil
+end
+
 ---Open a window for `buf` without entering it (except for tabs, which are left again when needed),
----following the output.
+---following the output. The 'current' layout takes over a window instead (current_target()); with
+---none to take, it opens a split like the 'split' layout.
 ---@param buf integer
 ---@param layout string
 ---@param name string
@@ -286,7 +549,12 @@ end
 local function open_window(buf, layout, name)
   local c = tcfg()
   local ok, win
-  if layout == 'float' then
+  local target = layout == 'current' and current_target() or nil
+  if target then
+    local err
+    ok, err = take_window(target, buf)
+    win = ok and target or err
+  elseif layout == 'float' then
     local f = c.float or {}
     local lines = vim.o.lines - vim.o.cmdheight
     local width = math.max(20, math.min(vim.o.columns - 2, math.floor(vim.o.columns * (f.width or 0.85))))
@@ -317,7 +585,10 @@ local function open_window(buf, layout, name)
   if not ok then
     return nil, tostring(win)
   end
-  style_window(win, layout)
+  if not target then
+    vim.w[win][VIEW_VAR] = buf
+  end
+  style_window(win, target and 'current' or (layout == 'current' and 'split' or layout))
   follow(win)
   return win, nil
 end
@@ -327,6 +598,20 @@ local function enter(win)
   vim.api.nvim_set_current_win(win)
   if tcfg().start_insert then
     vim.cmd.startinsert()
+  end
+end
+
+---Neovim wipes a finished terminal on the next key typed in Terminal mode, and so closes the window
+---it is in (unless it is the last one). A window that hiding the terminal keeps (keeps_window():
+---one the 'current' layout took over, say) is never closed: a finished terminal there is not left
+---in Terminal mode (:AgentClose or :AgentStop hide it).
+---@param t agent.Term
+local function leave_finished(t)
+  local api = vim.api
+  if t.exited and current == t and buf_valid(t) and api.nvim_get_current_buf() == t.bufnr
+    and keeps_window(api.nvim_get_current_win(), t.bufnr, t.layout)
+    and api.nvim_get_mode().mode == 't' then
+    vim.cmd('stopinsert')
   end
 end
 
@@ -374,6 +659,7 @@ local function on_exit(t, code)
       discard(t)
     end
   end
+  leave_finished(t)
 end
 
 ---@param spec agent.LaunchSpec
@@ -477,7 +763,7 @@ local function start(name, opts)
     return vim.fn.jobstart(argv, job_opts)
   end)
   if not jok or type(job) ~= 'number' or job <= 0 then
-    hide_window(win)
+    hide_window(win, buf, layout)
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     cleanup_spec(spec)
     local why = not jok and tostring(job) or (job == -1 and 'not executable' or 'invalid arguments')
@@ -491,6 +777,13 @@ local function start(name, opts)
   current = t
   vim.b[buf].agent_nvim_agent = name
   vim.b[buf].agent_nvim_session = spec.session_id
+  vim.api.nvim_create_autocmd('TermEnter', {
+    group = state.augroup,
+    buffer = buf,
+    callback = function()
+      leave_finished(t)
+    end,
+  })
 
   if opts.focus ~= false then
     enter(win)
@@ -503,7 +796,8 @@ end
 
 ---Show a running terminal (opening a window if hidden) and focus it unless `focus == false`.
 ---With the 'tab' layout, from another tab page (a diff's, for one), that is its own tab page when
----it has one: a tab page with the terminal as its only (non-floating) window.
+---it has one: a tab page with the terminal as its only (non-floating) window. With the 'current'
+---layout, a terminal shown in another tab page only is shown in the current window too.
 ---@param t agent.Term
 ---@param opts table
 ---@return integer|nil bufnr, string|nil err
@@ -534,15 +828,18 @@ local function show(t, opts)
 end
 
 ---@class agent.TermOpenOpts
----@field focus? boolean      Enter the terminal window (default true)
----@field layout? 'split'|'float'|'tab'|'none'  Override config.terminal.layout
+---@field focus? boolean      Enter the terminal window (default true). With the 'current' layout the
+---                           terminal comes into the current window anyway (unless it falls back to
+---                           another one): false leaves the cursor there, without start_insert
+---@field layout? 'split'|'float'|'tab'|'current'|'none'  Override config.terminal.layout
 ---@field args? string[]      Per-launch user args, passed to the launcher
 ---@field cwd? string         Passed to the launcher
 ---@field launch? fun(name: string, opts: table): agent.LaunchSpec|nil, string|nil  Override the launcher
 ---@field silent? boolean     Do not notify errors (they are still returned)
 
----Stop the agent's job and forget its terminal: its windows close now, its temp files are removed,
----and its buffer is wiped once the job has exited. A finished terminal left open is wiped.
+---Stop the agent's job and forget its terminal: its windows close now (a window the 'current'
+---layout took over gets its previous buffer back instead), its temp files are removed, and its
+---buffer is wiped once the job has exited. A finished terminal left open is wiped.
 ---@return boolean stopped  false when there was no terminal
 function M.stop()
   local t = current
@@ -584,8 +881,9 @@ end
 ---Hide the terminal; the agent keeps running. When it is shown in the current tab page, only its
 ---windows there close: inside a diff's tab page, the diff's view of the agent goes and the
 ---terminal's own window stays. Otherwise its windows in every tab page close (e.g. its own tab
----page, seen from another).
----@return boolean closed  true when a window was closed
+---page, seen from another). A window the 'current' layout took over is not closed: it gets back
+---the buffer it showed before (see hide_window()).
+---@return boolean closed  true when it was hidden in a window
 function M.close()
   local t = current
   if not buf_valid(t) then
@@ -595,9 +893,7 @@ function M.close()
   if #wins == 0 then
     wins = windows_of(t.bufnr)
   end
-  for _, w in ipairs(wins) do
-    hide_window(w)
-  end
+  hide_windows(t, wins)
   return #wins > 0
 end
 
@@ -605,9 +901,11 @@ end
 ---along the config.terminal.split_side edge, as large as the terminal's own split (see
 ---split_config: the agent's TUI keeps its size), following the output. For a view that takes a tab
 ---page of its own, like a diff (config.diff.show_terminal), so that the agent stays in sight. Only
----for the 'split' and 'tab' layouts: a float would cover the view, and 'none' has no terminal. The
----window is one more view of the buffer: closing it (or its tab page) hides nothing else and never
----stops the agent; stop() and auto_close close it with the other windows of the terminal.
+---for the 'split', 'tab' and 'current' layouts: a float would cover the view, and 'none' has no
+---terminal. With 'tab' and 'current' the terminal's own window is (usually) no split to match, so
+---this one gets config.terminal.split_size, and shows part of a larger terminal. The window is one
+---more view of the buffer: closing it (or its tab page) hides nothing else and never stops the
+---agent; stop() and auto_close close it with the other windows of the terminal.
 ---@return integer|nil win, string|nil why  nil when there is no agent terminal (running, or
 ---  finished and left open), the layout is 'float' or 'none', the terminal is already shown in
 ---  this tab page, or the window cannot be opened
@@ -616,7 +914,7 @@ function M.split_here()
   if not buf_valid(t) then
     return nil, 'no agent terminal'
   end
-  if t.layout ~= 'split' and t.layout ~= 'tab' then
+  if t.layout ~= 'split' and t.layout ~= 'tab' and t.layout ~= 'current' then
     return nil, ('the terminal layout is %q'):format(t.layout)
   end
   if #windows_of(t.bufnr, true) > 0 then
@@ -626,6 +924,7 @@ function M.split_here()
   if not ok then
     return nil, tostring(win)
   end
+  vim.w[win][VIEW_VAR] = t.bufnr
   style_window(win, 'split')
   follow(win)
   return win, nil
@@ -639,9 +938,7 @@ end
 function M.toggle(name, opts)
   local t = current
   if t and t.name == name and alive(t) and buf_valid(t) and #windows_of(t.bufnr, true) > 0 then
-    for _, w in ipairs(windows_of(t.bufnr, true)) do
-      hide_window(w)
-    end
+    hide_windows(t, windows_of(t.bufnr, true))
     return t.bufnr, nil
   end
   return M.open(name, opts)

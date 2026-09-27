@@ -23,7 +23,8 @@ M.defaults = {
   auto_start = false,
 
   terminal = {
-    ---@type 'split'|'float'|'tab'|'none'
+    ---@type 'split'|'float'|'tab'|'current'|'none'  'current': in the current window, in place of its
+    --- buffer (as :terminal does), which comes back when the terminal is hidden or stops
     layout = 'split',
     ---@type 'right'|'left'|'below'|'above'
     split_side = 'right',
@@ -32,7 +33,8 @@ M.defaults = {
     float = { width = 0.85, height = 0.85, border = 'rounded' },
     ---@type boolean  Enter terminal-insert mode when the terminal is focused
     start_insert = true,
-    ---@type boolean  Close the terminal window when the agent process exits
+    ---@type boolean  Close the terminal window when the agent process exits (a window the 'current'
+    --- layout took over is not closed: it shows its previous buffer again)
     auto_close = true,
   },
 
@@ -48,7 +50,8 @@ M.defaults = {
     open_in = 'tab',
     ---@type boolean  In a diff's own tab page, show the agent terminal too (original | proposed | agent),
     --- on terminal.split_side and as large as the terminal's split, so the agent's TUI does not reflow.
-    --- Only with the 'split' and 'tab' terminal layouts, and only when there is an agent terminal.
+    --- Only with the 'split', 'tab' and 'current' terminal layouts, and only when there is an agent
+    --- terminal. With 'tab' and 'current' it is terminal.split_size wide (or tall).
     show_terminal = true,
     keymaps = {
       accept = '<leader>aa',
@@ -119,8 +122,8 @@ function M.validate(opts)
     vim.validate('auto_start', opts.auto_start, 'boolean')
     vim.validate('terminal', opts.terminal, 'table')
     vim.validate('terminal.layout', opts.terminal.layout, function(v)
-      return v == 'split' or v == 'float' or v == 'tab' or v == 'none'
-    end, "one of 'split','float','tab','none'")
+      return v == 'split' or v == 'float' or v == 'tab' or v == 'current' or v == 'none'
+    end, "one of 'split','float','tab','current','none'")
     vim.validate('terminal.split_size', opts.terminal.split_size, function(v)
       return type(v) == 'number' and v > 0 and v < 1
     end, 'a number between 0 and 1')
