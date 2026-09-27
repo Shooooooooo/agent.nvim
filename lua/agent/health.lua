@@ -86,8 +86,8 @@ local function check_providers(h)
       h.ok(('%s: running, %d client(s), %s%s'):format(name, s.clients or 0, tostring(s.address),
         s.lock and (', ' .. s.lock) or ''))
     else
-      h.info(name .. ': not running (starts with the first agent that uses it'
-        .. (cfg.auto_start and '; auto_start is on' or '') .. ')')
+      h.info(name .. ': not running (' .. (cfg.auto_start and 'auto_start is on: setup() starts it'
+        or 'it runs while an agent that uses it runs') .. ')')
     end
   end
 

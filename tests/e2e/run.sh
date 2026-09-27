@@ -12,7 +12,8 @@
 # lines in the editor and checks that the agent got the selection, and submits a prompt. A scripted
 # model turn then (a) calls the $NVIM controller (exec_lua and open_file) and (b) proposes an edit
 # that goes through the IDE diff, which the driver accepts in Neovim. The driver checks the effects
-# in Neovim and on disk, tears down, and checks that no lock/discovery files or temp dirs are left.
+# in Neovim and on disk, stops the agent (its provider stops with it and removes its lock/discovery
+# file), tears down, and checks that no lock/discovery files or temp dirs are left.
 # This script then checks that no process started by the run is still alive.
 #
 # Isolation: nothing touches your real agent configs or accounts.

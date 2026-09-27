@@ -1,11 +1,14 @@
----@mod agent agent.nvim: coding-agent CLIs in Neovim terminals, with IDE integration
+---@mod agent agent.nvim: a coding-agent CLI in a Neovim terminal, with IDE integration
 ---
 --- setup() wires the modules together:
----  * agent.terminal runs one terminal per agent. Its launcher (below) starts the agent's IDE
----    provider on first use, asks it for launch info and builds the launch spec with
----    agent.agents.build_launch (which also registers the $NVIM controller MCP server).
+---  * agent.terminal runs one agent at a time. Its launcher (below) starts the agent's IDE provider,
+---    asks it for launch info and builds the launch spec with agent.agents.build_launch (which also
+---    registers the $NVIM controller MCP server). Starting another agent asks before it replaces
+---    the running one. When the agent stops (M.stop(), a replace, or its process exits), its
+---    provider stops too, unless config.auto_start keeps every provider running for agents started
+---    outside Neovim.
 ---  * agent.editor.selection is forwarded to every running provider (config.selection.track).
----  * VimLeavePre stops providers and terminals and removes temp files.
+---  * VimLeavePre stops the agent and every provider and removes temp files.
 ---
 --- Commands are declared in plugin/agent.lua and implemented here (M._command). They call
 --- setup({}) lazily when the user never called setup().
@@ -31,6 +34,12 @@ local state = {
 
 local function scoped()
   return log.scope('init')
+end
+
+---@param msg string
+---@param level integer|nil
+local function notify(msg, level)
+  vim.notify('agent.nvim: ' .. msg, level or vim.log.levels.INFO)
 end
 
 ---@param name string
@@ -142,6 +151,56 @@ local function reload_changed_buffers()
   end
 end
 
+---Why the agent's CLI cannot be started (empty command, executable not found), or nil.
+---@param def agent.AgentDef
+---@return string|nil err
+local function cli_error(def)
+  local exe = type(def.cmd) == 'table' and def.cmd[1] or nil
+  if type(exe) ~= 'string' or exe == '' then
+    return def.name .. ': empty command'
+  end
+  if vim.fn.executable(exe) ~= 1 then
+    return ("%s: executable '%s' not found"):format(def.name, exe)
+  end
+  return nil
+end
+
+---Stop the provider of agent `name` (its IDE server, lock and discovery files; pending diffs are
+---closed) when the agent has stopped. Kept when config.auto_start is on (agents started outside
+---Neovim may use it), and when the agent now in the terminal uses it.
+---@param name string
+local function stop_provider_of(name)
+  if config.get().auto_start then
+    return
+  end
+  local agents = require('agent.agents')
+  local def = agents.get(name)
+  local P = def and loaded_provider(def.provider)
+  if not P or not P.is_running() then
+    return
+  end
+  local cur = terminal.is_running() and agents.get(terminal.name())
+  if cur and cur.provider == def.provider then
+    return
+  end
+  local ok, err = pcall(P.stop)
+  if not ok then
+    scoped().error('stopping provider %s failed: %s', def.provider, tostring(err))
+  end
+end
+
+---Stop the agent in the terminal (running, or finished with its terminal left open) and its provider.
+---@return string|nil name  the agent that was stopped
+local function stop_agent()
+  local name = terminal.name()
+  if not name then
+    return nil
+  end
+  terminal.stop()
+  stop_provider_of(name)
+  return name
+end
+
 ---The terminal launcher: start the agent's provider, get its launch info, build the spec.
 ---@param name string
 ---@param open_opts agent.OpenOpts
@@ -155,12 +214,9 @@ local function launcher(name, open_opts)
   local cfg = config.get()
   open_opts = open_opts or {}
   -- Checked here too (terminal.lua checks again), so a missing CLI never starts a provider.
-  local exe = type(def.cmd) == 'table' and def.cmd[1] or nil
-  if type(exe) ~= 'string' or exe == '' then
-    return nil, name .. ': empty command'
-  end
-  if vim.fn.executable(exe) ~= 1 then
-    return nil, ("%s: executable '%s' not found"):format(name, exe)
+  local cerr = cli_error(def)
+  if cerr then
+    return nil, cerr
   end
   local cwd = util.abspath(open_opts.cwd or vim.fn.getcwd())
   local env = vim.tbl_extend('force', {}, def.env or {}, open_opts.env or {})
@@ -197,6 +253,8 @@ local function launcher(name, open_opts)
     auto_approve = open_opts.auto_approve,
     on_exit = function(code)
       scoped().debug('%s exited with code %d', name, code)
+      -- Also after a stop or a replace (then the provider is already stopped, or in use again).
+      stop_provider_of(name)
       vim.schedule(reload_changed_buffers)
     end,
   })
@@ -239,7 +297,7 @@ function M.setup(opts)
       M.teardown()
     end,
   })
-  -- Leaving an agent's terminal (its window, or Terminal mode) shows the files it may have changed.
+  -- Leaving the agent terminal (its window, or Terminal mode) shows the files it may have changed.
   vim.api.nvim_create_autocmd({ 'WinLeave', 'TermLeave' }, {
     group = state.augroup,
     callback = function(ev)
@@ -273,11 +331,11 @@ local function ensure_setup()
   end
 end
 
----@param name string|nil
+---@param name string|nil  default: the running agent, else config.default_agent
 ---@return string|nil name, string|nil err
 local function resolve(name)
   if name == nil or name == '' then
-    name = terminal.last_focused() or config.get().default_agent
+    name = terminal.is_running() and terminal.name() or config.get().default_agent
   end
   if not require('agent.agents').get(name) then
     return nil, ('unknown agent %q'):format(tostring(name))
@@ -289,61 +347,96 @@ end
 ---@field env? table<string, string|false>  extra environment for this launch (false = unset)
 ---@field mcp? boolean          register the $NVIM controller for this launch (default: config)
 ---@field auto_approve? boolean pre-approve the controller's tools (default: agents.<name>.auto_approve)
+---@field confirm? boolean      ask before replacing another running agent (default true); false
+---                             replaces it without asking
 
----Open (start or show) an agent terminal.
----@param name string|nil  agent name (default: the last focused agent, else config.default_agent)
+---Before `name` starts: when another agent is in the terminal, stop it (and its provider). A running
+---one is replaced only when the user confirms (unless opts.confirm == false) and when `name`'s CLI
+---can start; a finished one is just wiped.
+---@param name string
+---@param opts agent.OpenOpts
+---@return boolean proceed, string|nil err  proceed = false, err = nil: the user declined
+local function replace(name, opts)
+  local cur = terminal.name()
+  if not cur or cur == name then
+    return true, nil
+  end
+  if terminal.is_running() then
+    local def = require('agent.agents').get(name)
+    local cerr = not opts.launch and def and cli_error(def)
+    if cerr then
+      return false, cerr
+    end
+    if opts.confirm ~= false
+      and vim.fn.confirm(('Stop %s and start %s?'):format(cur, name), '&Yes\n&No', 2) ~= 1 then
+      return false, nil
+    end
+  end
+  stop_agent()
+  return true, nil
+end
+
+---Resolve `name`, make room for it (replace()), then run fn(name, opts): terminal.open or terminal.toggle.
+---@param fn fun(name: string, opts: agent.OpenOpts): integer|nil, string|nil
+---@param name string|nil
+---@param opts agent.OpenOpts|nil
+---@return integer|nil bufnr, string|nil err
+local function with_agent(fn, name, opts)
+  ensure_setup()
+  opts = opts or {}
+  local n, err = resolve(name)
+  if not n then
+    return nil, err
+  end
+  local ok, rerr = replace(n, opts)
+  if not ok then
+    if rerr and not opts.silent then
+      notify(rerr, vim.log.levels.ERROR)
+    end
+    return nil, rerr
+  end
+  return fn(n, opts)
+end
+
+---Open (start or show) the agent terminal. Starting an agent while another one runs asks
+---(vim.fn.confirm) whether to stop that one; declined, nothing changes and nil, nil is returned.
+---@param name string|nil  agent name (default: the running agent, else config.default_agent)
 ---@param opts agent.OpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
 function M.open(name, opts)
-  ensure_setup()
-  local n, err = resolve(name)
-  if not n then
-    return nil, err
-  end
-  return terminal.open(n, opts)
+  return with_agent(terminal.open, name, opts)
 end
 
----Toggle an agent terminal: hide it when visible in this tab, else open and focus it.
----@param name string|nil
+---Toggle the agent terminal: hide it when `name` runs in it and it is visible in this tab, else
+---open and focus it (replacing another running agent like M.open()).
+---@param name string|nil  agent name (default: the running agent, else config.default_agent)
 ---@param opts agent.OpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
 function M.toggle(name, opts)
-  ensure_setup()
-  local n, err = resolve(name)
-  if not n then
-    return nil, err
-  end
-  return terminal.toggle(n, opts)
+  return with_agent(terminal.toggle, name, opts)
 end
 
----Hide an agent's terminal windows; the agent keeps running.
----@param name string|nil
+---Hide the agent terminal; the agent keeps running.
 ---@return boolean closed
-function M.close(name)
+function M.close()
   ensure_setup()
-  local n = resolve(name)
-  return n ~= nil and terminal.close(n) or false
+  return terminal.close()
 end
 
----Stop an agent: end its job, wipe its terminal and delete its temp files. Providers keep running
----(agents reconnect to the same port/socket); M.teardown() stops everything.
----@param name string|nil  default: the last focused running agent
----@return boolean stopped
-function M.stop(name)
+---Stop the agent: end its job, wipe its terminal, delete its temp files, and stop its provider
+---(IDE server, lock and discovery files; pending diffs are closed) unless config.auto_start is on.
+---The Claude provider keeps its port and token for the next start.
+---@return boolean stopped  false when there was no agent
+function M.stop()
   ensure_setup()
-  if name == nil or name == '' then
-    name = terminal.last_focused()
-    if not name then
-      return false
-    end
-  end
-  return terminal.stop(name)
+  return stop_agent() ~= nil
 end
 
----Stop every agent, every provider (their lock and discovery files are removed), selection
----tracking, and delete this Neovim's agent.nvim temp directory. Runs on VimLeavePre.
+---Stop the agent, every provider (their lock and discovery files are removed, even with
+---config.auto_start), selection tracking, and delete this Neovim's agent.nvim temp directory.
+---Runs on VimLeavePre.
 function M.teardown()
-  pcall(terminal.stop_all)
+  pcall(terminal.stop)
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
     if P and P.stop then
@@ -363,36 +456,45 @@ end
 -- Status, MCP config, diffs
 -- ---------------------------------------------------------------------------
 
+---@class agent.AgentStatus
+---@field name string
+---@field kind string|nil
+---@field provider string|nil
+---@field running boolean      false: it exited and its terminal was left open
+---@field visible boolean      shown in the current tab page
+---@field pid integer|nil
+---@field session_id string|nil
+---@field cwd string|nil
+---@field exit_code integer|nil
+
 ---@class agent.Status
 ---@field setup boolean
 ---@field servername string
----@field last_focused string|nil
----@field agents table<string, { kind: string, provider: string, running: boolean, visible: boolean, pid: integer|nil, session_id: string|nil, cwd: string|nil, exit_code: integer|nil }>
+---@field agent agent.AgentStatus|nil  the agent in the terminal, nil when there is none
 ---@field providers table<string, table>  provider status() plus `enabled`
 
----State of every configured agent and provider.
+---State of the agent and of every provider.
 ---@return agent.Status
 function M.status()
-  local agents = require('agent.agents')
   local out = {
     setup = state.setup_done,
     servername = vim.v.servername,
-    last_focused = terminal.last_focused(),
-    agents = {},
+    agent = nil,
     providers = {},
   }
-  for _, name in ipairs(agents.list()) do
-    local def = agents.get(name)
-    local info = terminal.info(name)
-    out.agents[name] = {
-      kind = def.kind,
-      provider = def.provider,
-      running = info ~= nil and info.running or false,
-      visible = terminal.is_visible(name),
-      pid = info and info.pid,
-      session_id = info and info.session_id,
-      cwd = info and info.cwd,
-      exit_code = info and info.exit_code,
+  local info = terminal.info()
+  if info then
+    local def = require('agent.agents').get(info.name)
+    out.agent = {
+      name = info.name,
+      kind = def and def.kind,
+      provider = def and def.provider,
+      running = info.running,
+      visible = terminal.is_visible(),
+      pid = info.pid,
+      session_id = info.session_id,
+      cwd = info.cwd,
+      exit_code = info.exit_code,
     }
   end
   for _, name in ipairs(M.PROVIDERS) do
@@ -478,12 +580,6 @@ local MCP_HINTS = {
   opencode = 'OpenCode: merge this into opencode.json.',
 }
 
----@param msg string
----@param level integer|nil
-local function notify(msg, level)
-  vim.notify('agent.nvim: ' .. msg, level or vim.log.levels.INFO)
-end
-
 ---@param lines string[]
 local function echo(lines)
   local chunks = {}
@@ -496,19 +592,17 @@ end
 ---@return string[]
 local function status_lines()
   local s = M.status()
-  local lines = { 'agent.nvim  (server ' .. (s.servername ~= '' and s.servername or 'none') .. ')', 'Agents:' }
-  local names = vim.tbl_keys(s.agents)
-  table.sort(names)
-  for _, name in ipairs(names) do
-    local a = s.agents[name]
-    local line = ('  %-10s %s'):format(name, a.running and ('running (pid ' .. tostring(a.pid) .. ')') or 'stopped')
-    if a.running and a.visible then
+  local lines = { 'agent.nvim  (server ' .. (s.servername ~= '' and s.servername or 'none') .. ')', 'Agent:' }
+  local a = s.agent
+  if a then
+    local line = ('  %-10s %s'):format(a.name, a.running and ('running (pid ' .. tostring(a.pid) .. ')')
+      or ('exited' .. (a.exit_code and (' with code ' .. a.exit_code) or '')))
+    if a.visible then
       line = line .. ', visible'
     end
-    if name == s.last_focused then
-      line = line .. ', last focused'
-    end
-    lines[#lines + 1] = line .. '  [provider ' .. a.provider .. ']'
+    lines[#lines + 1] = line .. (a.provider and ('  [provider ' .. a.provider .. ']') or '')
+  else
+    lines[#lines + 1] = '  none (default: ' .. config.get().default_agent .. ')'
   end
   lines[#lines + 1] = 'Providers:'
   for _, name in ipairs(M.PROVIDERS) do
@@ -558,25 +652,13 @@ function commands.AgentOpen(o)
   report(buf ~= nil, err)
 end
 
-function commands.AgentClose(o)
-  local n, err = resolve(arg1(o))
-  if not n then
-    return report(false, err)
-  end
-  M.close(n)
+function commands.AgentClose()
+  M.close()
 end
 
-function commands.AgentStop(o)
-  if o.bang then
-    M.teardown()
-    return notify('stopped all agents and providers')
-  end
-  local name = arg1(o)
-  if name and not require('agent.agents').get(name) then
-    return report(false, ('unknown agent %q'):format(name))
-  end
-  if not M.stop(name) then
-    notify(name and (name .. ' is not running') or 'no agent is running', vim.log.levels.WARN)
+function commands.AgentStop()
+  if not M.stop() then
+    notify('no agent is running', vim.log.levels.WARN)
   end
 end
 

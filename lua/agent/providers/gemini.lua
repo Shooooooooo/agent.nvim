@@ -1052,11 +1052,16 @@ function M.before_spawn(spec)
   end
 end
 
----Type `/ide enable` into a gemini terminal (Gemini then persists ide.enabled=true itself).
----@param name string|nil  terminal name (default: the most recently focused agent)
+---Type `/ide enable` into the agent terminal when it runs Gemini (Gemini then persists
+---ide.enabled=true itself).
 ---@return boolean ok, string|nil err
-function M.enable_ide_mode(name)
-  return require('agent.terminal').send(name, '/ide enable', { submit = true })
+function M.enable_ide_mode()
+  local term = require('agent.terminal')
+  local def = term.is_running() and require('agent.agents').get(term.name())
+  if not def or def.kind ~= 'gemini' then
+    return false, 'gemini is not running'
+  end
+  return term.send('/ide enable', { submit = true })
 end
 
 ---@return { running: boolean, clients: integer, streams: integer, address: string|nil, lock: string|nil, port: integer|nil, workspaces: string[], diffs: integer, ide_enabled: boolean }

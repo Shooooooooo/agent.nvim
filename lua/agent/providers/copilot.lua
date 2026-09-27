@@ -370,19 +370,17 @@ end
 -- Sessions
 -- ---------------------------------------------------------------------------
 
----The agent terminal (agent.terminal) that runs this session's CLI, if any.
+---The agent terminal (agent.terminal), when it runs this session's CLI (not one started outside).
 ---@param s agent.mcp.Session
 ---@return string|nil name, integer|nil bufnr
 local function terminal_of(s)
   local term = package.loaded['agent.terminal']
-  if not term then
+  local info = term and term.info()
+  if not info or not info.running or not info.pid then
     return nil
   end
-  for _, pid in ipairs({ s.info.copilot_parent_pid, s.info.copilot_pid }) do
-    local name = term.find_by_pid(pid)
-    if name then
-      return name, term.bufnr(name)
-    end
+  if s.info.copilot_parent_pid == info.pid or s.info.copilot_pid == info.pid then
+    return info.name, term.bufnr()
   end
   return nil
 end

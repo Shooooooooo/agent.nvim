@@ -19,7 +19,8 @@
 --   4. submit a prompt; the scripted model then
 --      (a) calls the $NVIM controller: exec_lua (sets vim.g.agent_e2e) and open_file (notes.txt)
 --      (b) edits a.txt (world -> neovim) through the IDE diff, which this driver accepts
---   5. check the effects in Neovim and on disk, tear down, check that no files are left
+--   5. check the effects in Neovim and on disk; stop() the agent, which also stops its provider
+--      (its lock/discovery file goes), tear down, check that no files are left
 -- OpenCode has no IDE diff (its client is receive-only), so (b) is skipped for it.
 local kind, root = arg[1], arg[2]
 assert(kind and root, 'usage: driver.lua <kind> <root>')
@@ -454,7 +455,8 @@ if R.before_open then
 end
 
 local buf, oerr = agent.open(kind)
-if not check('open(): the agent runs in a terminal split', buf ~= nil and terminal.is_running(kind), oerr) then
+if not check('open(): the agent runs in a terminal split', buf ~= nil and terminal.is_running()
+  and terminal.name() == kind, oerr) then
   return finish()
 end
 local function tty()
@@ -474,10 +476,10 @@ local function wait_until(ms, cond, what)
       if not answered[i] and tty():find(p[1], 1, true) then
         answered[i] = true
         out('answering TUI prompt: ' .. p[1])
-        terminal.send(kind, p[2], { bracketed = false })
+        terminal.send(p[2], { bracketed = false })
       end
     end
-    if not terminal.is_running(kind) then
+    if not terminal.is_running() then
       out('the agent exited')
       break
     end
@@ -517,24 +519,31 @@ local function done()
   writef(root .. '/' .. kind .. '.tty.txt', tty())
   -- Every process of the agent (its CLI, the $NVIM controllers, MCP servers, workers) and the fake
   -- endpoint must be gone after the teardown. run.sh checks these pids again after we exit.
-  local info = terminal.info(kind)
+  local info = terminal.info()
   local pids = info and info.pid and descendants(info.pid) or {}
   if fake and fake.pid then
     pids[#pids + 1] = fake.pid
   end
   writef(root .. '/' .. kind .. '.pids', table.concat(vim.tbl_map(tostring, pids), '\n') .. '\n')
   out('processes to reap: ' .. table.concat(vim.tbl_map(tostring, pids), ' '))
-  -- Teardown: every agent and provider stops and removes its files.
+  -- stop(): the agent stops, and so does its provider (auto_start is off): its lock/discovery file goes.
   local lock_dir = R.lock_dir()
+  local provider = require('agent.providers.' .. require('agent.agents').get(kind).provider)
+  check('stop() stopped the agent', agent.stop())
+  check('stop(): its provider stopped', not provider.is_running())
+  check('stop(): the lock/discovery dir is empty', #files_in(lock_dir) == 0,
+    lock_dir .. ': ' .. table.concat(files_in(lock_dir), ', '))
+  -- Teardown: every provider stops and removes its files.
   agent.teardown()
   if fake then
     fake:kill(15)
     fake:wait(5000)
   end
-  vim.wait(10000, function()
-    return #terminal.running() == 0
-  end, 50)
-  check('teardown: the agent terminal job is gone', #terminal.running() == 0)
+  local gone = function()
+    return not terminal.is_running() and not vim.api.nvim_buf_is_valid(buf)
+  end
+  vim.wait(10000, gone, 50)
+  check('teardown: the agent terminal job is gone', gone())
   check('teardown: every process of the agent exited', vim.wait(15000, function()
     for _, p in ipairs(pids) do
       if alive(p) then
@@ -609,7 +618,7 @@ end, 'the cursor only at the agent'))
 
 -- 4. Prompt
 vim.wait(1000)
-terminal.send(kind, PROMPT, { submit = true, submit_delay_ms = 400 })
+terminal.send(PROMPT, { submit = true, submit_delay_ms = 400 })
 
 -- (a) the $NVIM controller
 check('(a) exec_lua ran in this Neovim (vim.g.agent_e2e set)', wait_until(90000, function()

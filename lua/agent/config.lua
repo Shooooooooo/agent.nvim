@@ -15,10 +15,11 @@ M.defaults = {
   ---@type string|nil  Optional file path; logs are appended there in addition to vim.notify (warn+)
   log_file = nil,
 
-  ---@type string  Agent used by :Agent without an argument
+  ---@type string  Agent that :Agent and :AgentOpen start without an argument when no agent is running
   default_agent = 'claude',
 
-  ---@type boolean  Start every enabled provider at setup(), so agents launched outside Neovim can connect with /ide
+  ---@type boolean  Start every enabled provider at setup() and keep it running when the agent stops, so agents
+  --- launched outside Neovim can connect with /ide. Otherwise a provider runs while the agent that uses it runs.
   auto_start = false,
 
   terminal = {

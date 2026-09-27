@@ -36,7 +36,6 @@ M.DEFAULT_NOTIFY_DELAY_MS = 600
 M.DEFAULT_PORT_RANGE = { min = 10000, max = 65535 }
 
 local SCHEMA = 'http://json-schema.org/draft-07/schema#'
-local MAX_JOB_FOLDERS = 32
 local LOOPBACK = { 'localhost', '127.0.0.1', '::1' }
 
 local state = {
@@ -46,7 +45,7 @@ local state = {
   srv = nil, ---@type agent.mcp.Server|nil
   lock_path = nil, ---@type string|nil
   lock_json = nil, ---@type string|nil
-  job_folders = {}, ---@type string[]  realpaths (and literal paths) of launched agents' cwds
+  job_folders = {}, ---@type string[]  the launched agent's cwd: literal path and realpath
   diffs = {}, ---@type table<string, table>  tab_name -> pending openDiff
   last_selection = nil, ---@type agent.Selection|nil
   group = nil, ---@type integer|nil
@@ -196,7 +195,7 @@ end
 -- ---------------------------------------------------------------------------
 
 ---Folders for the lock's workspaceFolders: the literal cwd, its realpath, the LSP workspace folders,
----then the cwds of agents we launched (OpenCode compares its physical cwd without realpath, §2.3).
+---then the cwd of the agent we launched (OpenCode compares its physical cwd without realpath, §2.3).
 ---@return string[]
 local function workspace_folders()
   local out, seen = {}, {}
@@ -284,21 +283,21 @@ local function remove_stale_locks(dir)
   end
 end
 
+---Set the launched agent's cwd (literal path and realpath). One agent runs at a time: a new
+---launch replaces the previous agent's folder.
 ---@param cwd string|nil
-local function add_job_folder(cwd)
+local function set_job_folder(cwd)
   if type(cwd) ~= 'string' or cwd == '' then
     return
   end
-  local changed = false
+  local folders = {}
   for _, p in ipairs({ util.abspath(cwd), util.realpath(cwd) }) do
-    if not vim.tbl_contains(state.job_folders, p) then
-      table.insert(state.job_folders, p)
-      changed = true
+    if not vim.tbl_contains(folders, p) then
+      folders[#folders + 1] = p
     end
   end
-  while #state.job_folders > MAX_JOB_FOLDERS do
-    table.remove(state.job_folders, 1)
-  end
+  local changed = not vim.deep_equal(folders, state.job_folders)
+  state.job_folders = folders
   if changed and state.ws then
     local ok, err = write_lock()
     if not ok then
@@ -1044,8 +1043,8 @@ function M.start()
     lopts.port = state.port
     server, err = websocket.listen(lopts)
     if not server then
-      log.warn('could not listen on port %d again (%s): running agents must reconnect with /ide',
-        state.port, tostring(err))
+      log.warn('could not listen on port %d again (%s): agents started outside agent.nvim must '
+        .. 'reconnect with /ide', state.port, tostring(err))
     end
   end
   if not server then
@@ -1118,8 +1117,8 @@ function M.env(kind)
   return env
 end
 
----Launch info for agents.build_launch (opts.ide). Starts the server if needed and adds the job's
----cwd to the lock's workspaceFolders.
+---Launch info for agents.build_launch (opts.ide). Starts the server if needed and puts the job's
+---cwd in the lock's workspaceFolders (in place of the previous agent's).
 ---@param o { cwd?: string }|nil
 ---@return { port: integer, token: string, lock: string }|nil info, string|nil err
 function M.launch_info(o)
@@ -1128,7 +1127,7 @@ function M.launch_info(o)
     return nil, err
   end
   if o and o.cwd then
-    add_job_folder(o.cwd)
+    set_job_folder(o.cwd)
   end
   return { port = state.port, token = state.token, lock = state.lock_path }
 end
@@ -1141,7 +1140,7 @@ function M.before_spawn(spec)
     return
   end
   if spec and spec.cwd then
-    add_job_folder(spec.cwd)
+    set_job_folder(spec.cwd)
   end
   local ok, err = write_lock(true)
   if not ok then

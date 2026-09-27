@@ -1,8 +1,8 @@
 *agent.txt*  Coding-agent CLIs in Neovim, with IDE integration
 
                                                                   *agent.nvim*
-agent.nvim runs coding-agent CLIs in a Neovim terminal, and Neovim itself
-hosts the IDE integration server each CLI expects from VS Code. It works like
+agent.nvim runs a coding-agent CLI in a Neovim terminal, and Neovim itself
+hosts the IDE integration server the CLI expects from VS Code. It works like
 coder/claudecode.nvim, but for Claude Code, OpenCode, GitHub Copilot CLI and
 Gemini CLI. It also ships the $NVIM controller, an MCP server through which
 the agent can drive the Neovim it runs in.
@@ -28,8 +28,8 @@ CONTENTS                                                      *agent-contents*
 ==============================================================================
 1. Introduction                                                  *agent-intro*
 
-Each agent CLI runs in a Neovim terminal, and Neovim serves the IDE protocol
-the CLI connects to:
+The agent CLI runs in a Neovim terminal, one agent at a time, and Neovim
+serves the IDE protocol the CLI connects to:
 
   Agent          IDE protocol served by Neovim ~
   Claude Code    Claude IDE protocol: MCP over WebSocket on 127.0.0.1, lock
@@ -45,7 +45,7 @@ selection (|agent-context|), proposed edits open as a diff in Neovim for you
 to accept or reject, and the agent can read your diagnostics.
 
 The $NVIM controller (|agent-nvim-mcp|) is a stdio MCP server that agent.nvim
-registers for each agent it launches, without editing your agent config files.
+registers when it launches an agent, without editing your agent config files.
 Through it the agent can read and edit buffers, open files, query diagnostics,
 run Ex commands, evaluate Vimscript and run Lua in your Neovim.
 
@@ -111,7 +111,8 @@ runs, if setup() has not been called yet.
    whether anything blocks the IDE connection or the $NVIM controller.
 2. Run |:Agent| to open the default agent (claude) in a split on the right,
    or `:Agent copilot`, `:Agent gemini` or `:Agent opencode`. The IDE server
-   starts on first use, and the agent connects to it by itself.
+   starts with the agent, and the agent connects to it by itself. One agent
+   runs at a time: starting another one asks first (|agent-replace|).
 3. Select lines and switch to the agent window straight from Visual mode
    (<C-w>l, then `i` to type): the agent keeps the selection. Leaving Visual
    mode in the file (<Esc>) drops it, and the agent then sees just the
@@ -128,30 +129,40 @@ run |:AgentGeminiSetup| once. See |agent-gemini|.
 ==============================================================================
 5. Commands                                                   *agent-commands*
 
-[name] defaults to the most recently focused running agent, and then to
-`default_agent`. The commands complete agent names.
+One agent runs at a time. [name] defaults to the running agent, and then to
+`default_agent`. |:Agent|, |:AgentOpen| and |:AgentMcpConfig| complete agent
+names.
+
+                                                               *agent-replace*
+Starting an agent while a different one runs, hidden or visible, asks first,
+for example "Stop claude and start copilot?". Yes stops the running agent as
+|:AgentStop| does, then starts the new one. No (the default) or <Esc> changes
+nothing. If the new agent's executable is not found, the error is shown
+before the question and the running agent is kept. An agent that has already
+exited, with its terminal left open, is replaced without asking.
 
                                                                       *:Agent*
 :Agent [name]
-    Toggle an agent terminal: hide it when it is visible in this tab page,
-    otherwise open it (starting the agent if needed) and focus it.
+    Toggle the agent terminal: hide it when [name] runs in it and it is
+    visible in this tab page, otherwise open it (starting [name] if needed,
+    see |agent-replace|) and focus it.
 
                                                                   *:AgentOpen*
 :AgentOpen [name]
-    Open (start or show) an agent terminal and focus it.
+    Open (start or show) the agent terminal and focus it. Starting [name]
+    replaces a different running agent as described in |agent-replace|.
 
                                                                  *:AgentClose*
-:AgentClose [name]
-    Hide the agent's terminal windows. The agent keeps running.
+:AgentClose
+    Hide the agent terminal in every tab page. The agent keeps running.
 
                                                                   *:AgentStop*
-:AgentStop [name]
+:AgentStop
     Stop the agent: end its job, wipe its terminal and delete its temp files.
-    Its IDE server keeps running, so agents started later reuse it.
-                                                                 *:AgentStop!*
-:AgentStop!
-    Stop every agent and every IDE server. Lock and discovery files are
-    removed. This also runs on |VimLeavePre|.
+    Its IDE server stops too, unless `auto_start` is on: its lock or
+    discovery file is removed and its open diffs are closed. The IDE server
+    also stops when the agent exits on its own. Quitting Neovim stops the
+    agent and every IDE server.
 
                                                             *:AgentDiffAccept*
 :AgentDiffAccept
@@ -164,8 +175,9 @@ run |:AgentGeminiSetup| once. See |agent-gemini|.
 
                                                                 *:AgentStatus*
 :AgentStatus
-    Show the agents (running, pid, visible, last focused) and the IDE servers
-    (clients, address, lock file).
+    Show the agent (running with its pid, or exited with its code; whether
+    it is visible; its IDE server), or the default agent when there is none,
+    and the IDE servers (clients, address, lock file).
 
                                                              *:AgentMcpConfig*
 :AgentMcpConfig [agent]
@@ -194,28 +206,38 @@ require('agent').setup({opts})
 
                                                                 *agent.open()*
 require('agent').open({name}, {opts})
-    Start or show an agent terminal. Returns the buffer number, or nil and an
-    error. {opts} is described in |agent-open-opts|.
+    Like |:AgentOpen|. Both arguments are optional; {name} defaults as
+    [name] does (|agent-commands|). Starting {name} while a different agent
+    runs asks first (|agent-replace|), unless {opts}.confirm is false.
+    Returns the buffer number, or nil and an error; nil and nil when the
+    question was answered No. {opts} is described in |agent-open-opts|.
 
                                                               *agent.toggle()*
 require('agent').toggle({name}, {opts})
-    Like |:Agent|.
+    Like |:Agent|. Arguments and return values as for |agent.open()|.
 
                                                                *agent.close()*
-require('agent').close({name})
-    Hide the agent's windows.
+require('agent').close()
+    Hide the agent terminal (|:AgentClose|). Returns true when a window was
+    closed.
 
                                                                 *agent.stop()*
-require('agent').stop({name})
-    Stop one agent (|:AgentStop|).
+require('agent').stop()
+    Stop the agent, and its IDE server unless `auto_start` is on
+    (|:AgentStop|). Returns false when there was no agent.
 
                                                             *agent.teardown()*
 require('agent').teardown()
-    Stop every agent and IDE server (|:AgentStop!|).
+    Stop the agent and every IDE server, even with `auto_start`, and delete
+    this Neovim's agent.nvim temp directory. This runs on |VimLeavePre|.
 
                                                               *agent.status()*
 require('agent').status()
-    Table with `servername`, `last_focused`, `agents` and `providers`.
+    Table with `setup`, `servername`, `agent` and `providers`. `agent` is
+    nil when there is no agent, else a table with `name`, `kind`,
+    `provider`, `running` (false when it exited and its terminal was left
+    open), `visible`, `pid`, `session_id`, `cwd` and `exit_code`.
+    `providers` maps each IDE server to its status.
 
                                                           *agent.mcp_config()*
 require('agent').mcp_config({name})
@@ -241,9 +263,15 @@ the agent is started.
     auto_approve   Pre-approve the controller's tools for this launch
                    (default: `agents.<name>.auto_approve`).
     silent         Do not notify errors (they are still returned).
+    confirm        Ask before replacing a different running agent
+                   (|agent-replace|; default true). With false it is
+                   replaced without asking. Scripts should pass false: in a
+                   headless Neovim the question can be answered No without
+                   waiting.
 >lua
     require('agent').open('claude', { args = { '--model', 'opus' } })
-    require('agent').open('copilot', { cwd = '~/src/x', layout = 'float' })
+    require('agent').open('copilot', { cwd = '~/src/x', layout = 'float',
+      confirm = false })
 <
 ==============================================================================
 7. Configuration                                                *agent-config*
@@ -301,11 +329,15 @@ log_file (nil)
     File that log lines at `log_level` and above are appended to. Use an
     absolute path.
 default_agent ("claude")
-    Agent used when a command gets no name and no agent has been focused.
+    Agent that |:Agent|, |:AgentOpen| and |agent.open()| start when they get
+    no name and no agent is running. |:AgentMcpConfig| without a name also
+    uses it.
 auto_start (false)
-    Start every enabled IDE server at setup(), so agents you start yourself
-    (in a |:terminal| or elsewhere) can connect. See the note in
-    |agent-copilot|.
+    Start every enabled IDE server at setup() and keep it running when the
+    agent stops, so agents you start yourself (in a |:terminal| or
+    elsewhere) can connect. Without it, an IDE server starts with the agent
+    that uses it and stops when that agent stops (|:AgentStop|, a replace,
+    or the agent exiting). See the note in |agent-copilot|.
 terminal.layout ("split")
     "split", "float", "tab" or "none". "none" means the plugin does not start
     agents: you run them yourself (combine it with `auto_start = true`).
@@ -333,7 +365,7 @@ selection.debounce_ms (100)
 diff.open_in ("tab")
     "tab" opens diffs in a new tab page. "current" opens an
     original/proposal window pair below the main window; when the current
-    tab page already shows a diff (another agent diff, |:diffsplit|,
+    tab page already shows a diff (another agent.nvim diff, |:diffsplit|,
     fugitive), the diff opens in a new tab page instead, since Neovim would
     merge them into one multi-way diff.
 diff.keymaps.accept ("<leader>aa")
@@ -449,9 +481,9 @@ Any extra entry under `agents` becomes an agent. It needs `cmd` and
                                                                *agent-context*
 What the agent sees ~
 There is nothing to send by hand: agent.nvim reports the file you are in and
-your visual selection to every connected agent as they change
-(`selection.track`). While the agent's terminal has focus, the last file you
-were in stays the current one.
+your visual selection to the agent as they change (`selection.track`).
+While the agent's terminal has focus, the last file you were in stays the
+current one.
 
 Select lines, then switch to the agent window straight from Visual mode, for
 example with <C-w>l. Where the focus is 50 ms after you leave Visual mode
@@ -489,12 +521,13 @@ How it connects ~
 Neovim listens for WebSocket connections on 127.0.0.1, on a random port in
 `providers.claude.port_range`. It writes ~/.claude/ide/<port>.lock (mode
 0600) with a random token and its workspace folders: the cwd, LSP workspace
-folders, and every agent's launch directory. Claude is launched with
-CLAUDE_CODE_SSE_PORT=<port>, FORCE_CODE_TERMINAL=true,
+folders, and the launch directory of the last Claude or OpenCode it started.
+Claude is launched with CLAUDE_CODE_SSE_PORT=<port>, FORCE_CODE_TERMINAL=true,
 ENABLE_IDE_INTEGRATION=true, CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=true, and the
 loopback addresses added to no_proxy/NO_PROXY. It connects at startup. The
-port and token stay the same for the whole Neovim session, so Claude
-reconnects on its own after a dropped connection.
+port and token stay the same for the whole Neovim session, also when the
+server stops with the agent and starts again, so Claude reconnects on its own
+after a dropped connection.
 
 What works ~
 - Selection: Claude shows the selection ("2 lines selected") and attaches it
@@ -619,10 +652,10 @@ A lock is never rewritten, so a change applies only to folders locked
 afterwards.
 
 Limitations ~
-- The server starts with the first Copilot launch (or at setup() with
-  `auto_start`) and keeps its lock for Neovim's cwd until |:AgentStop!| or
-  exit. Meanwhile any copilot started in that folder, even outside Neovim,
-  connects to this Neovim. VS Code behaves the same way.
+- The server starts with Copilot (or at setup() with `auto_start`) and keeps
+  its lock for Neovim's cwd until Copilot stops (with `auto_start`, until
+  Neovim exits). Meanwhile any copilot started in that folder, even outside
+  Neovim, connects to this Neovim. VS Code behaves the same way.
 - When several IDEs serve the same folder, Copilot takes the first lock it
   finds. Use /ide in Copilot to choose.
 - ide.autoConnect = false in $COPILOT_HOME/settings.json turns auto-connect
@@ -639,9 +672,10 @@ Neovim serves MCP over HTTP on 127.0.0.1:<port>/mcp and checks the
 Authorization: Bearer token and the Host and Origin headers. It writes the
 discovery file $TMPDIR/gemini/ide/gemini-ide-server-<nvim pid>-<port>.json
 (mode 0600) with ideInfo { name = "neovim", displayName = "Neovim" } and a
-workspacePath that contains every Gemini launch directory. Gemini is launched
-with GEMINI_CLI_IDE_PID, GEMINI_CLI_IDE_SERVER_PORT, GEMINI_CLI_IDE_AUTH_TOKEN
-and GEMINI_CLI_IDE_WORKSPACE_PATH (the launch directory) set. These override
+workspacePath that contains Neovim's cwd and each directory Gemini was
+launched in since the server started. Gemini is launched with
+GEMINI_CLI_IDE_PID, GEMINI_CLI_IDE_SERVER_PORT, GEMINI_CLI_IDE_AUTH_TOKEN and
+GEMINI_CLI_IDE_WORKSPACE_PATH (the launch directory) set. These override
 values inherited from a VS Code terminal. When the Gemini IDE server is
 disabled or not running, inherited GEMINI_CLI_IDE_* variables are set to ""
 for the job (Gemini treats that as unset), unless `agents.<name>.env` sets
@@ -817,12 +851,12 @@ It then says where the fragment goes:
 - OpenCode: merge it into opencode.json
 
 Outside a Neovim terminal the server lists no tools. For the IDE connection
-of an agent you start yourself, set `auto_start = true` (or start the agent
-once with the plugin). Then:
+of an agent you start yourself, set `auto_start = true`. Without it, an IDE
+server runs only while the agent agent.nvim started uses it. Then:
 - Claude: run /ide.
 - OpenCode connects on its own when started inside one of the lock's
   folders; Copilot when started in exactly one of them (Neovim's cwd, or a
-  folder an agent was launched in).
+  folder agent.nvim launched Copilot in).
 - Gemini connects at startup once IDE mode is enabled. Set
   `providers.gemini.export_env = true` so it picks this Neovim
   deterministically.
@@ -900,11 +934,13 @@ User autocommands (|User|), with data in `ev.data`:
 
                                                            *AgentTerminalOpen*
 AgentTerminalOpen
-    An agent was started in a terminal. Data: name, bufnr, job, pid,
+    The agent was started in the terminal. Data: name, bufnr, job, pid,
     session_id.
                                                            *AgentTerminalExit*
 AgentTerminalExit
-    An agent's job exited. Data: name, code, bufnr, session_id.
+    The agent's job exited. Data: name, code, bufnr, session_id. After a
+    replace (|agent-replace|), the old agent's AgentTerminalExit can come
+    after the new agent's AgentTerminalOpen.
                                                             *AgentSessionName*
 AgentSessionName
     Copilot reported a session name. Data: provider ("copilot"), name,
@@ -919,13 +955,13 @@ AgentSessionName
 <
                                                              *agent-variables*
                                                           *b:agent_nvim_agent*
-b:agent_nvim_agent      Agent terminal buffers: the agent name.
+b:agent_nvim_agent      The agent terminal buffer: the agent name.
                                                         *b:agent_nvim_session*
-b:agent_nvim_session    Agent terminal buffers: the launch id, also in the
-                        agent's environment as $AGENT_NVIM_SESSION.
+b:agent_nvim_session    The agent terminal buffer: the launch id, also in
+                        the agent's environment as $AGENT_NVIM_SESSION.
                                                         *b:agent_session_name*
-b:agent_session_name    Copilot terminal buffers: the session name Copilot
-                        reported.
+b:agent_session_name    The agent terminal buffer, when it runs Copilot: the
+                        session name Copilot reported.
                                                              *b:agent_diff_id*
 b:agent_diff_id         Diff proposal and scratch original buffers: the diff
                         id.
@@ -954,10 +990,14 @@ Only warnings and errors are shown. For details: >lua
       log_file = vim.fn.stdpath('log') .. '/agent.log',
     })
 <
-An agent's terminal closes at once ~
+The agent's terminal closes at once ~
     An agent that exits non-zero within 5 seconds keeps its terminal open, so
     you can read the error. "executable '<cmd>' not found" means cmd[1] is
     not on $PATH.
+An agent you started yourself loses the IDE connection ~
+    Without `auto_start`, an IDE server stops when the agent agent.nvim
+    started stops (|:AgentStop|, a replace, or its exit). Set
+    `auto_start = true` to keep every IDE server running.
 Claude does not connect ~
     Check CLAUDE_CODE_AUTO_CONNECT_IDE (the health check warns), then run
     /ide in Claude. With `providers.claude.lock_dir` set, check that the
@@ -1041,8 +1081,10 @@ The live end-to-end test runs the real agent CLIs and is not part of
 For each agent a headless Neovim opens the agent, waits for the IDE
 connection, selects two lines, checks that the agent received them and
 submits a prompt. A scripted model turn then calls the $NVIM controller and
-proposes an edit, which the driver accepts in the Neovim diff. Everything is
-isolated:
+proposes an edit, which the driver accepts in the Neovim diff. Then the
+driver stops the agent with |agent.stop()| and checks that its IDE server
+stopped and removed its lock or discovery file, tears down, and checks that
+no process, lock or temp directory is left. Everything is isolated:
 - HOME, the XDG directories, CLAUDE_CONFIG_DIR, COPILOT_HOME and
   GEMINI_CLI_HOME point to a temp directory, and the environment is rebuilt
   with env -i.

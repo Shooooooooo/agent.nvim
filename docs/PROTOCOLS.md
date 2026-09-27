@@ -54,6 +54,11 @@ IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable 
   `~/.claude/ide` is chmod'ed to 0700 when it is ours. `~/.copilot/ide` and `<tmpdir>/gemini/ide`
   are shared with the CLIs and used with the mode they have (Copilot creates its directory 0755,
   so other users can list, not read, the lock names).
+- **Server lifetime.** agent.nvim runs one agent at a time. A provider starts when an agent that
+  uses it is launched (or at `setup()` with `auto_start`). When that agent stops (`:AgentStop`,
+  a replace by another agent, or the process exiting), its provider stops too, unless
+  `auto_start` is on; then every provider keeps running for agents started outside Neovim.
+  `teardown()` and `VimLeavePre` stop every provider.
 - **Environment for jobs.** `jobstart(..., { env = ... })` only extends the environment.
   Unsetting a variable needs `clear_env = true` with a copy of `vim.fn.environ()`. That copy
   **must not contain `NVIM`**: `environ()` holds the `NVIM` this Neovim inherited (nested
@@ -84,9 +89,9 @@ Claude Code).
   - `pid` is Neovim's pid. Claude deletes locks whose pid is dead, and also deletes locks it cannot
     read, so writes must be atomic.
   - `workspaceFolders` holds `getcwd()`, the LSP workspace folders, the realpath of the cwd, and
-    the cwd (literal and realpath) of every agent launched. OpenCode compares against its
-    **physical** cwd and never resolves symlinks. Without the realpath entry, a symlinked cwd
-    never matches.
+    the cwd (literal and realpath) of the last Claude or OpenCode launched; each launch replaces
+    the previous one's. OpenCode compares against its **physical** cwd and never resolves
+    symlinks. Without the realpath entry, a symlinked cwd never matches.
 - **Directory.** Always `~/.claude/ide` (0700). Claude 2.1.283 scans `$CLAUDE_CONFIG_DIR/ide`
   (default `~/.claude/ide`), and also `~/.claude/ide` whenever `CLAUDE_CONFIG_DIR` is set.
   OpenCode scans only `~/.claude/ide` and ignores `CLAUDE_CONFIG_DIR`.
@@ -106,7 +111,7 @@ Claude Code).
   - It does not check the pid, so stale locks can win.
   - agent.nvim therefore sets both variables to `""` for OpenCode, and rewrites the lock right
     before spawning it (`before_spawn`), so that this Neovim's lock is the newest.
-- **Lifetime.** The lock is written after the socket is listening and before any agent starts.
+- **Lifetime.** The lock is written after the socket is listening and before the agent starts.
   It is rewritten on `DirChanged`, `LspAttach` and `LspDetach`, keeping the same port and token. At
   start the server removes stale locks: `ideName` `Neovim` and a dead pid. Other IDEs' locks are
   left alone.
@@ -436,8 +441,8 @@ to 0.63-nightly.
   - Parts are written verbatim. Gemini URI-decodes both each part and its own cwd before
     comparing them, so escaping `%` as `%25` would break a directory such as `a%20b`. Paths
     containing `:` (the delimiter) are skipped.
-  - `workspacePath` holds every gemini job's cwd and Neovim's global cwd. `DirChanged` adds the
-    new cwd.
+  - `workspacePath` holds Neovim's global cwd and the cwd of each gemini job launched since the
+    server started. `DirChanged` adds the new cwd.
 - **How the CLI chooses.** It sorts the files: pid equal to `GEMINI_CLI_IDE_PID` first, then live
   pids, then higher pids. It reads only files owned by its uid, and keeps those whose
   `workspacePath` contains the realpath of its cwd.
@@ -569,7 +574,7 @@ supported.
 - The registration is written per launch into `stdpath('run')/agent.nvim/<pid>/sessions/<uuid>/`
   (0700; files 0600). That directory is deleted when the job exits and on `VimLeavePre`.
 - User config files are never edited.
-- `AGENT_NVIM_SESSION=<uuid>` is set in every agent's environment.
+- `AGENT_NVIM_SESSION=<uuid>` (a new one per launch) is set in the agent's environment.
 
 | | Claude Code | Copilot CLI | Gemini CLI | OpenCode |
 |---|---|---|---|---|

@@ -1,5 +1,6 @@
 -- Integration of agent.nvim: plugin/agent.lua, setup(), the launcher wiring for every agent kind
--- (with the fake agent CLI), selection forwarding, teardown.
+-- (with the fake agent CLI), one agent at a time (replace, stop, provider lifecycle), selection
+-- forwarding, teardown.
 local util = require('agent.util')
 local uv = vim.uv
 
@@ -98,8 +99,8 @@ local function edit_in_main(path)
   return vim.api.nvim_get_current_buf()
 end
 
-local function term_win(name)
-  local buf = require('agent.terminal').bufnr(name)
+local function term_win()
+  local buf = require('agent.terminal').bufnr()
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if vim.api.nvim_win_get_buf(w) == buf then
       return w
@@ -110,6 +111,22 @@ end
 local function pid_alive(pid)
   local ok, ret = pcall(uv.kill, pid, 0)
   return ok and ret == 0
+end
+
+-- Every agent job a test started (a stopped agent is forgotten before its job has exited).
+local pids = {}
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'AgentTerminalOpen',
+  callback = function(ev)
+    pids[#pids + 1] = ev.data.pid
+  end,
+})
+
+local function wait_exited(pid)
+  wait_for(function()
+    return not pid_alive(pid)
+  end, 5000, 'pid ' .. tostring(pid) .. ' exited')
+  vim.wait(50) -- the job's on_exit runs after the process is reaped
 end
 
 -- Runs first: nothing has called setup() in this process yet.
@@ -124,7 +141,11 @@ describe('plugin/agent.lua', function()
       'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' }) do
       assert.truthy(cmds[c], ':' .. c .. ' exists')
     end
-    assert.truthy(cmds.AgentStop.bang)
+    assert.falsy(cmds.AgentStop.bang)
+    assert.eq('0', cmds.AgentStop.nargs)
+    assert.eq('0', cmds.AgentClose.nargs)
+    assert.eq('?', cmds.Agent.nargs)
+    assert.eq('?', cmds.AgentOpen.nargs)
     assert.falsy(agent._state.setup_done, 'defining commands does not call setup()')
     -- The load guard: sourcing again is a no-op.
     vim.cmd.runtime('plugin/agent.lua')
@@ -145,7 +166,10 @@ describe('plugin/agent.lua', function()
     assert.truthy(agent._state.setup_done)
     assert.eq('claude', require('agent.config').get().default_agent)
     assert.same({ 'claude', 'copilot' }, vim.fn.getcompletion('Agent c', 'cmdline'))
-    assert.same({ 'gemini' }, vim.fn.getcompletion('AgentStop g', 'cmdline'))
+    assert.same({ 'gemini' }, vim.fn.getcompletion('AgentOpen g', 'cmdline'))
+    -- :AgentClose and :AgentStop take no name, so they complete nothing.
+    assert.same({}, vim.fn.getcompletion('AgentClose ', 'cmdline'))
+    assert.same({}, vim.fn.getcompletion('AgentStop c', 'cmdline'))
     -- Nothing was started.
     for _, s in pairs(agent.status().providers) do
       assert.falsy(s.running)
@@ -177,8 +201,10 @@ describe('agent', function()
   after_each(function()
     agent.teardown()
     wait_for(function()
-      return #terminal.running() == 0
-    end, 5000, 'all agents stopped')
+      return not vim.iter(pids):any(pid_alive)
+    end, 5000, 'every agent process exited')
+    pids = {}
+    vim.wait(50)
     vim.cmd('silent! only')
     vim.cmd('silent! %bwipeout!')
     vim.cmd.cd(orig_cwd)
@@ -222,7 +248,7 @@ describe('agent', function()
       assert.eq('true', env.ENABLE_IDE_INTEGRATION)
       assert.eq('true', env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL)
       assert.eq(vim.v.servername, env.NVIM)
-      assert.eq(terminal.info('claude').session_id, env.AGENT_NVIM_SESSION)
+      assert.eq(terminal.info().session_id, env.AGENT_NVIM_SESSION)
       local args = read_args(out_of('claude'))
       assert.eq('--model', args[1])
       assert.eq('x', args[2])
@@ -247,10 +273,9 @@ describe('agent', function()
       wait_ready('claude')
       local args = read_args(out_of('claude'))
       assert.eq('--allowedTools=mcp__nvim', args[#args])
-      agent.stop('claude')
-      wait_for(function()
-        return not terminal.is_running('claude')
-      end, 5000, 'claude stopped')
+      local pid = terminal.info().pid
+      agent.stop()
+      wait_exited(pid)
       vim.fn.delete(out_of('claude') .. '.env')
       agent.open('claude', { mcp = false })
       wait_ready('claude')
@@ -306,6 +331,20 @@ describe('agent', function()
       assert.eq(tmp .. '/gemini-ide', vim.fs.dirname(st.lock))
       local manifest = vim.json.decode(read(tmp .. '/gemini-ext/gemini-extension.json'))
       assert.eq('${NVIM}', manifest.mcpServers.nvim.args[#manifest.mcpServers.nvim.args])
+    end)
+
+    it('gemini: enable_ide_mode() types /ide enable into the agent terminal only when it runs Gemini', function()
+      local P = require('agent.providers.gemini')
+      assert.same({ false, 'gemini is not running' }, { P.enable_ide_mode() })
+      agent.open('claude', { focus = false })
+      wait_ready('claude')
+      assert.same({ false, 'gemini is not running' }, { P.enable_ide_mode() })
+      agent.open('gemini', { focus = false, confirm = false })
+      wait_ready('gemini')
+      assert.truthy(P.enable_ide_mode())
+      wait_for(function()
+        return read(out_of('gemini') .. '.stdin') == '\27[200~/ide enable\27[201~\r'
+      end, 3000, '/ide enable typed and submitted')
     end)
 
     it('a disabled provider launches the agent without IDE integration', function()
@@ -374,24 +413,39 @@ describe('agent', function()
     it(':Agent toggles, :AgentClose hides, :AgentStop stops', function()
       vim.cmd('Agent claude')
       wait_ready('claude')
-      assert.truthy(terminal.is_visible('claude'))
+      assert.truthy(terminal.is_visible())
       vim.cmd('Agent')
-      assert.falsy(terminal.is_visible('claude'))
-      assert.truthy(terminal.is_running('claude'))
+      assert.falsy(terminal.is_visible())
+      assert.truthy(terminal.is_running())
       vim.cmd('AgentOpen')
-      assert.truthy(terminal.is_visible('claude'))
-      vim.cmd('AgentClose claude')
-      assert.falsy(terminal.is_visible('claude'))
-      vim.cmd('AgentStop claude')
-      wait_for(function()
-        return not terminal.is_running('claude')
-      end, 5000, 'claude stopped')
+      assert.truthy(terminal.is_visible())
+      vim.cmd('AgentClose')
+      assert.falsy(terminal.is_visible())
+      assert.truthy(terminal.is_running())
+      local pid = terminal.info().pid
+      vim.cmd('AgentStop')
+      assert.falsy(terminal.is_running())
+      wait_exited(pid)
       vim.cmd('AgentOpen nope')
       assert.matches('unknown agent', notes[#notes].msg)
       vim.cmd('AgentStop')
       assert.eq('agent.nvim: no agent is running', notes[#notes].msg)
-      vim.cmd('AgentStop claude')
-      assert.eq('agent.nvim: claude is not running', notes[#notes].msg)
+    end)
+
+    it(':AgentClose and :AgentStop take no argument, and :AgentStop! no longer exists', function()
+      agent.open('claude', { focus = false })
+      wait_ready('claude')
+      for _, cmd in ipairs({ 'AgentClose claude', 'AgentStop claude', 'AgentStop copilot' }) do
+        local ok, err = pcall(vim.cmd, cmd)
+        assert.falsy(ok, cmd)
+        assert.matches('E488', err)
+      end
+      local ok, err = pcall(vim.cmd, 'AgentStop!')
+      assert.falsy(ok)
+      assert.matches('E477', err)
+      assert.truthy(terminal.is_running(), 'nothing was stopped')
+      assert.truthy(terminal.is_visible(), 'nothing was hidden')
+      assert.truthy(require('agent.providers.claude').is_running())
     end)
 
     it('reloads unmodified file buffers changed on disk when focus leaves an agent or it exits', function()
@@ -413,7 +467,7 @@ describe('agent', function()
       end
       agent_writes(ws .. '/a.txt', 'changed\n')
       agent_writes(ws .. '/b.txt', 'changed\n')
-      vim.api.nvim_set_current_win(term_win('claude'))
+      vim.api.nvim_set_current_win(term_win())
       vim.api.nvim_set_current_win(main)
       wait_for(function()
         return vim.api.nvim_buf_get_lines(a, 0, -1, false)[1] == 'changed'
@@ -421,7 +475,7 @@ describe('agent', function()
       assert.same({ 'unsaved' }, vim.api.nvim_buf_get_lines(b, 0, -1, false), 'unsaved changes are kept')
       assert.truthy(vim.bo[b].modified)
       agent_writes(ws .. '/a.txt', 'again\n')
-      agent.stop('claude')
+      agent.stop()
       wait_for(function()
         return vim.api.nvim_buf_get_lines(a, 0, -1, false)[1] == 'again'
       end, 5000, 'a.txt reloaded after the agent exited')
@@ -446,21 +500,27 @@ describe('agent', function()
       end, 1000, 'the auto_start warning')
     end)
 
-    it('status() reports agents and providers', function()
-      agent.open('claude')
-      wait_ready('claude')
+    it('status() reports the agent and the providers', function()
+      assert.eq(nil, agent.status().agent)
+      local out = vim.api.nvim_exec2('AgentStatus', { output = true }).output
+      assert.truthy(out:find('Agent:\n  none (default: claude)', 1, true), out)
+      agent.open('opencode')
+      wait_ready('opencode')
       local s = agent.status()
       assert.truthy(s.setup)
       assert.eq(vim.v.servername, s.servername)
-      assert.truthy(s.agents.claude.running)
-      assert.eq(terminal.info('claude').pid, s.agents.claude.pid)
-      assert.falsy(s.agents.copilot.running)
-      assert.eq('claude', s.agents.opencode.provider)
-      assert.eq('opencode', s.agents.opencode.kind)
+      assert.eq('opencode', s.agent.name)
+      assert.eq('opencode', s.agent.kind)
+      assert.eq('claude', s.agent.provider)
+      assert.truthy(s.agent.running)
+      assert.truthy(s.agent.visible)
+      assert.eq(terminal.info().pid, s.agent.pid)
+      assert.eq(terminal.info().session_id, s.agent.session_id)
       assert.truthy(s.providers.claude.running)
       assert.eq(0, s.providers.claude.clients)
       assert.falsy(s.providers.copilot.running)
-      vim.cmd('silent AgentStatus')
+      out = vim.api.nvim_exec2('AgentStatus', { output = true }).output
+      assert.truthy(out:find(('  opencode   running (pid %d), visible  [provider claude]'):format(s.agent.pid), 1, true), out)
     end)
 
     it('mcp_config() returns the manual registration entry for each agent kind', function()
@@ -546,38 +606,302 @@ describe('agent', function()
     end)
   end)
 
-  describe('teardown', function()
-    local function launch_all()
-      for _, k in ipairs(KINDS) do
-        assert.truthy(agent.open(k, { focus = false }))
+  describe('one agent at a time', function()
+    local orig_confirm = vim.fn.confirm
+    local confirms = {}
+    local LOCK_DIRS = { claude = 'claude-ide', copilot = 'copilot-ide', gemini = 'gemini-ide' }
+
+    ---Answer vim.fn.confirm with `choice` (1 = Yes, 2 = No, 0 = Esc); nil: the test fails when asked.
+    local function answer(choice)
+      confirms = {}
+      vim.fn.confirm = function(msg, choices, default)
+        confirms[#confirms + 1] = { msg = msg, choices = choices, default = default }
+        assert(choice, 'unexpected confirm: ' .. tostring(msg))
+        return choice
       end
-      for _, k in ipairs(KINDS) do
-        wait_ready(k)
-      end
-      local pids = {}
-      for _, k in ipairs(KINDS) do
-        pids[#pids + 1] = terminal.info(k).pid
-      end
-      local s = agent.status().providers
-      local sessions = {}
-      for _, k in ipairs(KINDS) do
-        -- The MCP config temp files live in the session dir.
-        local args = read_args(out_of(k))
-        for _, a in ipairs(args) do
-          local p = a:match('^%-%-mcp%-config=(.+)$') or a:match('^@(.+)$')
-          if p then
-            sessions[#sessions + 1] = vim.fs.dirname(p)
-          end
-        end
-      end
-      assert.eq(2, #sessions, 'claude and copilot session dirs')
-      return pids, s.copilot.address, sessions
     end
 
-    local function assert_clean(pids, socket, sessions)
+    local function provider_files(name)
+      return files_in(tmp .. '/' .. LOCK_DIRS[name])
+    end
+
+    after_each(function()
+      vim.fn.confirm = orig_confirm
+    end)
+
+    it('starting another agent asks; confirmed, the old job and its provider stop and the new one starts', function()
+      agent.open('claude')
+      wait_ready('claude')
+      local P = require('agent.providers.claude')
+      local old = terminal.info()
+      local session = vim.fs.dirname(read_args(out_of('claude'))[1]:match('^%-%-mcp%-config=(.+)$'))
+      assert.eq(1, #provider_files('claude'))
+      vim.cmd('Agent') -- hidden: replacing it asks all the same
+      assert.falsy(terminal.is_visible())
+      answer(1)
+      vim.cmd('Agent copilot')
+      assert.eq(1, #confirms)
+      assert.eq('Stop claude and start copilot?', confirms[1].msg)
+      assert.eq('&Yes\n&No', confirms[1].choices)
+      assert.eq(2, confirms[1].default, 'No is the default')
+      -- claude and its provider stopped before copilot started.
+      assert.falsy(P.is_running())
+      assert.same({}, provider_files('claude'))
+      assert.eq(nil, uv.fs_stat(session), 'claude session dir removed')
+      assert.eq('copilot', terminal.name())
+      assert.truthy(terminal.is_running())
+      assert.truthy(terminal.is_visible())
+      wait_ready('copilot')
+      wait_exited(old.pid)
+      assert.falsy(vim.api.nvim_buf_is_valid(old.bufnr))
+      assert.falsy(P.is_running(), 'still stopped after claude exited')
+      assert.truthy(require('agent.providers.copilot').is_running())
+      assert.eq(1, #provider_files('copilot'))
+      assert.eq('copilot', agent.status().agent.name)
+    end)
+
+    it('declined (No or Esc), nothing changes', function()
+      agent.open('claude')
+      wait_ready('claude')
+      local info = terminal.info()
+      local lock = require('agent.providers.claude').status().lock
+      for _, choice in ipairs({ 2, 0 }) do
+        answer(choice)
+        notes = {}
+        vim.cmd('Agent copilot')
+        local buf, err = agent.open('gemini')
+        assert.eq(nil, buf)
+        assert.eq(nil, err)
+        assert.eq(2, #confirms)
+        assert.same({}, notes, 'no message for a declined replace')
+        assert.eq('claude', terminal.name())
+        assert.eq(info.pid, terminal.info().pid)
+        assert.eq(info.bufnr, terminal.bufnr())
+        assert.truthy(terminal.is_visible())
+        assert.truthy(require('agent.providers.claude').is_running())
+        assert.eq(1, vim.fn.filereadable(lock))
+        assert.falsy(require('agent.providers.copilot').is_running())
+        assert.falsy(require('agent.providers.gemini').is_running())
+        assert.same({}, provider_files('copilot'))
+        assert.same({}, provider_files('gemini'))
+      end
+      assert.truthy(pid_alive(info.pid))
+    end)
+
+    it('a replacement whose CLI is missing is refused before asking; the running agent stays', function()
+      setup({ agents = { copilot = { cmd = { tmp .. '/no-such-cli' } } } })
+      agent.open('claude')
+      wait_ready('claude')
+      local pid = terminal.info().pid
+      answer(nil)
+      local buf, err = agent.open('copilot', { silent = true })
+      assert.eq(nil, buf)
+      assert.matches("executable '.*no%-such%-cli' not found", err)
+      assert.eq(pid, terminal.info().pid)
+      assert.truthy(require('agent.providers.claude').is_running())
+    end)
+
+    it('opts.confirm = false replaces without asking; claude -> opencode keeps the shared provider', function()
+      local P = require('agent.providers.claude')
+      agent.open('claude')
+      wait_ready('claude')
+      local port, pid = P.status().port, terminal.info().pid
+      answer(nil)
+      local buf, err = agent.open('opencode', { confirm = false })
+      assert.truthy(buf, err)
+      assert.eq('opencode', terminal.name())
+      wait_ready('opencode')
+      wait_exited(pid) -- claude's exit comes after opencode started: the provider is in use again
+      assert.truthy(P.is_running())
+      assert.eq(port, P.status().port)
+      assert.eq(1, vim.fn.filereadable(P.status().lock))
+      assert.truthy(vim.tbl_contains(vim.json.decode(read(P.status().lock)).workspaceFolders, ws))
+    end)
+
+    it(':Agent with the name of the running agent toggles it without asking', function()
+      answer(nil)
+      vim.cmd('Agent claude')
+      wait_ready('claude')
+      local pid = terminal.info().pid
+      vim.cmd('Agent claude')
+      assert.falsy(terminal.is_visible())
+      vim.cmd('Agent claude')
+      assert.truthy(terminal.is_visible())
+      vim.cmd('AgentOpen claude')
+      assert.truthy(terminal.is_visible())
+      assert.truthy(agent.toggle('claude'))
+      assert.falsy(terminal.is_visible())
+      assert.truthy(agent.open('claude'))
+      assert.truthy(terminal.is_visible())
+      assert.eq(pid, terminal.info().pid)
+      assert.same({}, notes)
+    end)
+
+    it('without a name, commands use the running agent, else default_agent', function()
+      answer(nil)
+      agent.open('copilot')
+      wait_ready('copilot')
+      vim.cmd('Agent')
+      assert.falsy(terminal.is_visible())
+      assert.eq('copilot', terminal.name())
+      vim.cmd('AgentOpen')
+      assert.truthy(terminal.is_visible())
+      assert.eq('copilot', terminal.name())
+      local pid = terminal.info().pid
+      agent.stop()
+      wait_exited(pid)
+      vim.cmd('Agent')
+      assert.eq('claude', terminal.name())
+      wait_ready('claude')
+    end)
+
+    it('an agent that already exited is replaced without asking', function()
+      answer(nil)
+      agent.open('claude', { env = { FAKE_AGENT_EXIT = '3' } })
       wait_for(function()
-        return #terminal.running() == 0
-      end, 5000, 'all agents stopped')
+        return terminal.name() == 'claude' and not terminal.is_running()
+      end, 5000, 'claude exited')
+      local buf = terminal.bufnr()
+      assert.truthy(buf, 'a failed start leaves the terminal open')
+      assert.falsy(require('agent.providers.claude').is_running(), 'its provider stopped')
+      assert.truthy(agent.open('copilot'))
+      assert.falsy(vim.api.nvim_buf_is_valid(buf))
+      assert.eq('copilot', terminal.name())
+      wait_ready('copilot')
+    end)
+
+    it(':AgentStop stops the agent and its provider (lock file removed)', function()
+      agent.open('claude')
+      wait_ready('claude')
+      local P = require('agent.providers.claude')
+      local lock = P.status().lock
+      assert.eq(1, vim.fn.filereadable(lock))
+      local pid = terminal.info().pid
+      vim.cmd('AgentStop')
+      assert.falsy(terminal.is_running())
+      assert.falsy(P.is_running())
+      assert.eq(0, vim.fn.filereadable(lock))
+      assert.same({}, provider_files('claude'))
+      wait_exited(pid)
+      assert.falsy(P.is_running())
+      assert.falsy(agent.stop())
+    end)
+
+    it('an agent exiting on its own stops its provider (lock or discovery file removed)', function()
+      for _, k in ipairs({ 'claude', 'copilot', 'gemini' }) do
+        agent.open(k, { env = { FAKE_AGENT_EXIT = '0', FAKE_AGENT_SLEEP = '1' } })
+        wait_ready(k)
+        local P = require('agent.providers.' .. k)
+        assert.truthy(P.is_running(), k)
+        assert.eq(1, #provider_files(k), k .. ' lock')
+        wait_for(function()
+          return terminal.info() == nil
+        end, 5000, k .. ' exited')
+        assert.falsy(P.is_running(), k .. ' provider stopped')
+        assert.same({}, provider_files(k))
+      end
+    end)
+
+    it('with auto_start every provider keeps running when the agent stops, is replaced or exits', function()
+      setup({ auto_start = true })
+      local function all_running(when)
+        local s = agent.status().providers
+        for _, name in ipairs(agent.PROVIDERS) do
+          assert.truthy(s[name].running, name .. ' running ' .. when)
+          assert.eq(1, #provider_files(name), name .. ' lock ' .. when)
+        end
+      end
+      all_running('after setup')
+      agent.open('claude')
+      wait_ready('claude')
+      local pid = terminal.info().pid
+      answer(1)
+      agent.open('copilot')
+      assert.eq(1, #confirms)
+      wait_ready('copilot')
+      wait_exited(pid)
+      all_running('after a replace')
+      pid = terminal.info().pid
+      agent.stop()
+      wait_exited(pid)
+      all_running('after stop()')
+      agent.open('gemini', { env = { FAKE_AGENT_EXIT = '0' } })
+      wait_for(function()
+        return terminal.info() == nil
+      end, 5000, 'gemini exited')
+      all_running('after the agent exited')
+    end)
+
+    it('the Claude provider keeps its port and token across stop and start', function()
+      local P = require('agent.providers.claude')
+      agent.open('claude')
+      wait_ready('claude')
+      local port, token, lock = P.status().port, P._state.token, P.status().lock
+      assert.eq(tostring(port), read_env(out_of('claude')).CLAUDE_CODE_SSE_PORT)
+      assert.eq(token, vim.json.decode(read(lock)).authToken)
+      local pid = terminal.info().pid
+      agent.stop()
+      assert.falsy(P.is_running())
+      assert.eq(0, vim.fn.filereadable(lock))
+      wait_exited(pid)
+      vim.fn.delete(out_of('claude') .. '.env')
+      agent.open('claude')
+      wait_ready('claude')
+      assert.truthy(P.is_running())
+      assert.eq(port, P.status().port)
+      assert.eq(token, P._state.token)
+      assert.eq(lock, P.status().lock)
+      assert.eq(token, vim.json.decode(read(lock)).authToken)
+      assert.eq(tostring(port), read_env(out_of('claude')).CLAUDE_CODE_SSE_PORT)
+    end)
+
+    it('selection events reach every running provider (auto_start: agents started outside)', function()
+      local got, originals = { claude = 0, copilot = 0, gemini = 0 }, {}
+      for name in pairs(got) do
+        local P = require('agent.providers.' .. name)
+        originals[name] = P.on_selection
+        P.on_selection = function()
+          got[name] = got[name] + 1
+        end
+      end
+      local ok, err = pcall(function()
+        setup({ auto_start = true })
+        agent.open('claude', { focus = false })
+        wait_ready('claude')
+        for name in pairs(got) do
+          got[name] = 0
+        end
+        edit_in_main(ws .. '/a.txt')
+        vim.api.nvim_win_set_cursor(0, { 2, 0 })
+        require('agent.editor.selection').flush()
+        for name, n in pairs(got) do
+          assert.truthy(n >= 1, name .. ' got the selection')
+        end
+      end)
+      for name, fn in pairs(originals) do
+        require('agent.providers.' .. name).on_selection = fn
+      end
+      assert.truthy(ok, err)
+    end)
+  end)
+
+  describe('teardown', function()
+    ---Every provider running (auto_start) and the copilot agent: its session dir holds its MCP config.
+    local function launch()
+      setup({ auto_start = true })
+      assert.truthy(agent.open('copilot', { focus = false }))
+      wait_ready('copilot')
+      local s = agent.status().providers
+      for _, name in ipairs(agent.PROVIDERS) do
+        assert.truthy(s[name].running, name .. ' running')
+      end
+      local cfg = read_args(out_of('copilot'))[2]:match('^@(.+)$')
+      assert.truthy(cfg)
+      return { terminal.info().pid }, s.copilot.address, { vim.fs.dirname(cfg) }
+    end
+
+    local function assert_clean(agent_pids, socket, sessions)
+      assert.falsy(terminal.is_running())
       for _, name in ipairs(agent.PROVIDERS) do
         assert.falsy(require('agent.providers.' .. name).is_running(), name .. ' stopped')
       end
@@ -591,47 +915,20 @@ describe('agent', function()
       end
       assert.eq(nil, uv.fs_stat(vim.fs.joinpath(vim.fn.stdpath('run'), 'agent.nvim', tostring(vim.fn.getpid()))))
       wait_for(function()
-        for _, pid in ipairs(pids) do
-          if pid_alive(pid) then
-            return false
-          end
-        end
-        return true
+        return not vim.iter(agent_pids):any(pid_alive)
       end, 5000, 'agent processes gone')
     end
 
-    it('stop(name) stops one agent and removes its temp files; providers keep running', function()
-      agent.open('claude')
-      wait_ready('claude')
-      local pid = terminal.info('claude').pid
-      local cfg = read_args(out_of('claude'))[1]:match('^%-%-mcp%-config=(.+)$')
-      assert.truthy(agent.stop('claude'))
-      wait_for(function()
-        return not terminal.is_running('claude') and not pid_alive(pid)
-      end, 5000, 'claude stopped')
-      wait_for(function()
-        return uv.fs_stat(vim.fs.dirname(cfg)) == nil
-      end, 2000, 'session dir removed')
-      assert.truthy(require('agent.providers.claude').is_running())
-      assert.falsy(agent.stop('claude'))
-    end)
-
-    it('teardown() stops every agent and provider and leaves no files', function()
-      local pids, socket, sessions = launch_all()
+    it('teardown() stops the agent and every provider (even with auto_start) and leaves no files', function()
+      local agent_pids, socket, sessions = launch()
       agent.teardown()
-      assert_clean(pids, socket, sessions)
+      assert_clean(agent_pids, socket, sessions)
     end)
 
     it('VimLeavePre tears everything down', function()
-      local pids, socket, sessions = launch_all()
+      local agent_pids, socket, sessions = launch()
       vim.api.nvim_exec_autocmds('VimLeavePre', {})
-      assert_clean(pids, socket, sessions)
-    end)
-
-    it(':AgentStop! stops everything', function()
-      local pids, socket, sessions = launch_all()
-      vim.cmd('AgentStop!')
-      assert_clean(pids, socket, sessions)
+      assert_clean(agent_pids, socket, sessions)
     end)
   end)
 end)

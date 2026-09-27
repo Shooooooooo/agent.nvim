@@ -21,14 +21,14 @@ local function complete_agents(lead)
 end
 
 local commands = {
-  { 'Agent', { nargs = '?', complete = complete_agents, desc = 'Toggle an agent terminal' } },
-  { 'AgentOpen', { nargs = '?', complete = complete_agents, desc = 'Open (start or show) an agent terminal' } },
-  { 'AgentClose', { nargs = '?', complete = complete_agents, desc = 'Hide an agent terminal (the agent keeps running)' } },
-  { 'AgentStop', { nargs = '?', bang = true, complete = complete_agents,
-    desc = 'Stop an agent (with !: stop all agents and IDE servers)' } },
+  { 'Agent', { nargs = '?', complete = complete_agents,
+    desc = 'Toggle the agent terminal (starting another agent replaces the running one)' } },
+  { 'AgentOpen', { nargs = '?', complete = complete_agents, desc = 'Open (start or show) the agent terminal' } },
+  { 'AgentClose', { nargs = 0, desc = 'Hide the agent terminal (the agent keeps running)' } },
+  { 'AgentStop', { nargs = 0, desc = 'Stop the agent (and its IDE server, unless auto_start is on)' } },
   { 'AgentDiffAccept', { nargs = 0, desc = 'Accept the proposed change in the current diff' } },
   { 'AgentDiffReject', { nargs = 0, desc = 'Reject the proposed change in the current diff' } },
-  { 'AgentStatus', { nargs = 0, desc = 'Show agents and IDE servers' } },
+  { 'AgentStatus', { nargs = 0, desc = 'Show the agent and the IDE servers' } },
   { 'AgentMcpConfig', { nargs = '?', complete = complete_agents,
     desc = 'Print the MCP config for registering the Neovim controller by hand' } },
   { 'AgentGeminiSetup', { nargs = 0, desc = 'Link the agent.nvim extension into Gemini CLI (one time)' } },

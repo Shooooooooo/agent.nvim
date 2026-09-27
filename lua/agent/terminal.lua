@@ -1,8 +1,9 @@
----@mod agent.terminal One terminal buffer per agent
+---@mod agent.terminal The agent terminal (one agent at a time)
 ---
 --- The terminal knows nothing about providers. A launcher function (set with setup() or passed per
 --- call) returns an agent.LaunchSpec (see agent.agents.build_launch); this module runs it with
---- jobstart(term=true), shows it in the configured layout, tracks focus, and cleans up on exit.
+--- jobstart(term=true), shows it in the configured layout, and cleans up on exit. There is a single
+--- terminal: opening another agent stops the one it holds (agent.open() asks first).
 local config = require('agent.config')
 local util = require('agent.util')
 
@@ -25,14 +26,14 @@ M.FAIL_FAST_MS = 5000
 ---@field stopping boolean|nil
 ---@field cleaned boolean|nil
 
----@type table<string, agent.Term>
-local terms = {}
+---The agent terminal: running, or finished with its terminal left open. A stopped terminal is
+---forgotten at once (its job may still be exiting).
+---@type agent.Term|nil
+local current = nil
 
 local state = {
   ---@type fun(name: string, opts: table): agent.LaunchSpec|nil, string|nil
   launcher = nil,
-  ---@type string|nil
-  last = nil,
   ---@type table<string, boolean>
   notified = {},
   augroup = nil,
@@ -114,17 +115,24 @@ local function fire(pattern, data)
   pcall(vim.api.nvim_exec_autocmds, 'User', { pattern = pattern, data = data, modeline = false })
 end
 
----Forget a terminal: close its windows and wipe its buffer.
 ---@param t agent.Term
-local function discard(t)
-  cleanup_term(t)
-  if terms[t.name] == t then
-    terms[t.name] = nil
-  end
+local function hide_all(t)
   if buf_valid(t) then
     for _, w in ipairs(windows_of(t.bufnr)) do
       hide_window(w)
     end
+  end
+end
+
+---Forget a terminal: close its windows and wipe its buffer.
+---@param t agent.Term
+local function discard(t)
+  cleanup_term(t)
+  if current == t then
+    current = nil
+  end
+  hide_all(t)
+  if buf_valid(t) then
     pcall(vim.api.nvim_buf_delete, t.bufnr, { force = true })
   end
 end
@@ -134,21 +142,11 @@ local function ensure_autocmds()
     return
   end
   state.augroup = vim.api.nvim_create_augroup('agent.terminal', { clear = true })
-  vim.api.nvim_create_autocmd({ 'BufEnter', 'WinEnter', 'TermEnter' }, {
-    group = state.augroup,
-    callback = function()
-      local buf = vim.api.nvim_get_current_buf()
-      local name = vim.b[buf].agent_nvim_agent
-      if name and terms[name] and terms[name].bufnr == buf then
-        state.last = name
-      end
-    end,
-  })
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = state.augroup,
     callback = function()
-      for _, t in pairs(terms) do
-        cleanup_term(t)
+      if current then
+        cleanup_term(current)
       end
     end,
   })
@@ -255,11 +253,9 @@ local function open_window(buf, layout, name)
   return win, nil
 end
 
----@param t agent.Term
 ---@param win integer
-local function enter(t, win)
+local function enter(win)
   vim.api.nvim_set_current_win(win)
-  state.last = t.name
   if tcfg().start_insert then
     vim.cmd.startinsert()
   end
@@ -298,11 +294,9 @@ local function on_exit(t, code)
   end
   fire('AgentTerminalExit', { name = t.name, code = code, bufnr = t.bufnr, session_id = t.spec.session_id })
 
-  if terms[t.name] ~= t then
-    return
-  end
-  -- A buffer wiped by hand (:bwipeout!) ends the job with SIGHUP: there is nothing left to keep open.
-  if t.stopping or not buf_valid(t) then
+  -- A stopped terminal is already forgotten. A buffer wiped by hand (:bwipeout!) ends the job with
+  -- SIGHUP: there is nothing left to keep open.
+  if t.stopping or current ~= t or not buf_valid(t) then
     discard(t)
   elseif tcfg().auto_close then
     if code ~= 0 and elapsed < M.FAIL_FAST_MS then
@@ -423,13 +417,12 @@ local function start(name, opts)
   t.job = job
   local pok, pid = pcall(vim.fn.jobpid, job)
   t.pid = pok and pid or nil
-  terms[name] = t
+  current = t
   vim.b[buf].agent_nvim_agent = name
   vim.b[buf].agent_nvim_session = spec.session_id
-  state.last = name
 
   if opts.focus ~= false then
-    enter(t, win)
+    enter(win)
   elseif vim.api.nvim_win_is_valid(prev) then
     vim.api.nvim_set_current_win(prev)
   end
@@ -451,7 +444,7 @@ local function show(t, opts)
     end
   end
   if opts.focus ~= false then
-    enter(t, win)
+    enter(win)
   end
   return t.bufnr, nil
 end
@@ -464,20 +457,39 @@ end
 ---@field launch? fun(name: string, opts: table): agent.LaunchSpec|nil, string|nil  Override the launcher
 ---@field silent? boolean     Do not notify errors (they are still returned)
 
----Start the agent if it is not running (one terminal per agent), else show it.
+---Stop the agent's job and forget its terminal: its windows close now, its temp files are removed,
+---and its buffer is wiped once the job has exited. A finished terminal left open is wiped.
+---@return boolean stopped  false when there was no terminal
+function M.stop()
+  local t = current
+  if not t then
+    return false
+  end
+  t.stopping = true
+  if alive(t) then
+    current = nil
+    cleanup_term(t)
+    hide_all(t)
+    pcall(vim.fn.jobstop, t.job)
+  else
+    discard(t)
+  end
+  return true
+end
+
+---Show `name` when it is the agent in the terminal (and still running); otherwise stop the agent in
+---the terminal, if any, and start `name`. agent.open() asks before replacing a running agent.
 ---@param name string
 ---@param opts agent.TermOpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
 function M.open(name, opts)
   opts = opts or {}
   ensure_autocmds()
-  local t = terms[name]
-  if alive(t) and buf_valid(t) then
+  local t = current
+  if t and t.name == name and alive(t) and buf_valid(t) then
     return show(t, opts)
   end
-  if t then
-    discard(t)
-  end
+  M.stop()
   local buf, err = start(name, opts)
   if not buf and err and not opts.silent then
     notify(err, vim.log.levels.ERROR)
@@ -485,28 +497,25 @@ function M.open(name, opts)
   return buf, err
 end
 
----Hide the agent's terminal windows (all tabpages); the job keeps running.
----@param name string
+---Hide the terminal windows (all tabpages); the agent keeps running.
 ---@return boolean closed  true when a window was closed
-function M.close(name)
-  local t = terms[name]
+function M.close()
+  local t = current
   if not buf_valid(t) then
     return false
   end
   local wins = windows_of(t.bufnr)
-  for _, w in ipairs(wins) do
-    hide_window(w)
-  end
+  hide_all(t)
   return #wins > 0
 end
 
----Hide the terminal when it is visible in the current tabpage, else open/show and focus it.
+---Hide the terminal when `name` runs in it and it is visible in the current tabpage; else M.open().
 ---@param name string
 ---@param opts agent.TermOpenOpts|nil
 ---@return integer|nil bufnr, string|nil err
 function M.toggle(name, opts)
-  local t = terms[name]
-  if alive(t) and buf_valid(t) and #windows_of(t.bufnr, true) > 0 then
+  local t = current
+  if t and t.name == name and alive(t) and buf_valid(t) and #windows_of(t.bufnr, true) > 0 then
     for _, w in ipairs(windows_of(t.bufnr, true)) do
       hide_window(w)
     end
@@ -515,41 +524,15 @@ function M.toggle(name, opts)
   return M.open(name, opts)
 end
 
----Stop the agent's job and wipe its terminal.
----@param name string
----@return boolean stopped  false when there was no terminal
-function M.stop(name)
-  local t = terms[name]
-  if not t then
-    return false
-  end
-  t.stopping = true
-  if alive(t) then
-    pcall(vim.fn.jobstop, t.job)
-  else
-    discard(t)
-  end
-  return true
-end
-
----Stop every agent.
-function M.stop_all()
-  for name in pairs(terms) do
-    M.stop(name)
-  end
-end
-
 ---Type text into the agent's terminal as a bracketed paste.
----@param name string|nil  nil = the last focused agent
 ---@param text string
 ---@param opts { submit?: boolean, bracketed?: boolean, submit_delay_ms?: integer }|nil
 ---@return boolean ok, string|nil err
-function M.send(name, text, opts)
+function M.send(text, opts)
   opts = opts or {}
-  name = name or M.last_focused()
-  local t = name and terms[name]
+  local t = current
   if not alive(t) then
-    return false, (name or 'agent') .. ' is not running'
+    return false, 'no agent is running'
   end
   text = text or ''
   local payload = text
@@ -560,7 +543,7 @@ function M.send(name, text, opts)
   if payload ~= '' then
     local ok, n = pcall(vim.fn.chansend, t.job, payload)
     if not ok or n == 0 then
-      return false, name .. ': cannot write to the terminal'
+      return false, t.name .. ': cannot write to the terminal'
     end
   end
   if opts.submit then
@@ -581,57 +564,34 @@ function M.send(name, text, opts)
   return true, nil
 end
 
----Names of agents whose job is running, sorted.
----@return string[]
-function M.running()
-  local out = {}
-  for name, t in pairs(terms) do
-    if alive(t) then
-      out[#out + 1] = name
-    end
-  end
-  table.sort(out)
-  return out
+---The agent in the terminal (running, or finished with its terminal left open), or nil.
+---@return string|nil
+function M.name()
+  return current and current.name
 end
 
----@param name string
 ---@return boolean
-function M.is_running(name)
-  return alive(terms[name])
+function M.is_running()
+  return alive(current)
 end
 
----@param name string
+---True when the terminal is shown in the current tabpage.
 ---@return boolean
-function M.is_visible(name)
-  local t = terms[name]
+function M.is_visible()
+  local t = current
   return buf_valid(t) and #windows_of(t.bufnr, true) > 0
 end
 
----@param name string
 ---@return integer|nil
-function M.bufnr(name)
-  local t = terms[name]
+function M.bufnr()
+  local t = current
   return buf_valid(t) and t.bufnr or nil
 end
 
----The most recently focused agent that is still running (else any running agent, else nil).
----@return string|nil
-function M.last_focused()
-  if state.last and alive(terms[state.last]) then
-    return state.last
-  end
-  return M.running()[1]
-end
-
----Details about an agent terminal, or nil.
----@param name string
+---Details about the agent terminal, or nil when there is none.
 ---@return { name: string, bufnr: integer, job: integer, pid: integer|nil, session_id: string|nil, argv: string[], cwd: string, running: boolean, exit_code: integer|nil, layout: string }|nil
-function M.info(name)
-  local t = terms[name]
-  if not t then
-    return nil
-  end
-  return info_of(t)
+function M.info()
+  return current and info_of(current)
 end
 
 ---@param t agent.Term
@@ -649,30 +609,6 @@ info_of = function(t)
     exit_code = t.exit_code,
     layout = t.layout,
   }
-end
-
----Agent whose terminal job has this pid (e.g. Claude's ide_connected pid), or nil.
----@param pid integer
----@return string|nil
-function M.find_by_pid(pid)
-  for name, t in pairs(terms) do
-    if alive(t) and t.pid == pid then
-      return name
-    end
-  end
-  return nil
-end
-
----Agent started with this launch session id (AGENT_NVIM_SESSION), or nil.
----@param session_id string
----@return string|nil
-function M.find_by_session(session_id)
-  for name, t in pairs(terms) do
-    if t.spec.session_id == session_id then
-      return name
-    end
-  end
-  return nil
 end
 
 return M

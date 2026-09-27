@@ -440,6 +440,44 @@ describe('MCP handshake and tools', function()
     assert.eq('copilot', got.provider)
     assert.eq('@a.txt:3-5 PLEASE_EDIT now', got.name)
     assert.eq(4242, got.pid)
+    assert.eq(nil, got.terminal)
+  end)
+
+  it('update_session_name names the agent terminal when it runs the CLI', function()
+    local terminal = require('agent.terminal')
+    local buf = assert(terminal.open('copilot', {
+      focus = false,
+      launch = function()
+        return { argv = { 'sh', '-c', 'exec cat' }, env = {}, cwd = tmp, cleanup = {} }
+      end,
+    }))
+    local pid = terminal.info().pid
+    local got
+    local id = api.nvim_create_autocmd('User', {
+      pattern = 'AgentSessionName',
+      callback = function(ev)
+        got = ev.data
+      end,
+    })
+    local ok, err = pcall(function()
+      -- A CLI started outside Neovim (auto_start): not the terminal's.
+      call(open_session({ copilot_pid = 4242, copilot_parent_pid = 4241 }), 'update_session_name', { name = 'outside' })
+      assert.eq(nil, got.terminal)
+      assert.eq(nil, vim.b[buf].agent_session_name)
+      -- The terminal's job is the CLI's parent (a wrapper script), or the CLI itself.
+      call(open_session({ copilot_pid = 4242, copilot_parent_pid = pid }), 'update_session_name', { name = 'inside' })
+      assert.eq('copilot', got.terminal)
+      assert.eq('inside', vim.b[buf].agent_session_name)
+      call(open_session({ copilot_pid = pid }), 'update_session_name', { name = 'itself' })
+      assert.eq('copilot', got.terminal)
+      assert.eq('itself', vim.b[buf].agent_session_name)
+    end)
+    api.nvim_del_autocmd(id)
+    terminal.stop()
+    assert.truthy(vim.wait(5000, function()
+      return not vim.api.nvim_buf_is_valid(buf)
+    end, 10), 'the terminal job exited')
+    assert.truthy(ok, err)
   end)
 
   it('missing required arguments are JSON-RPC errors; unknown tools too', function()

@@ -328,6 +328,20 @@ describe('lock file', function()
     assert.eq(vim.fn.getcwd(), folders[1])
   end)
 
+  it("lists only the launched agent's cwd: the next launch replaces it (one agent at a time)", function()
+    local a, b = TMP .. '/job-a', TMP .. '/job-b'
+    vim.fn.mkdir(a, 'p')
+    vim.fn.mkdir(b, 'p')
+    assert.truthy(P.launch_info({ cwd = a }))
+    local folders = vim.json.decode(read(P.status().lock)).workspaceFolders
+    assert.truthy(vim.tbl_contains(folders, uv.fs_realpath(a)))
+    assert.truthy(P.launch_info({ cwd = b }))
+    folders = vim.json.decode(read(P.status().lock)).workspaceFolders
+    assert.truthy(vim.tbl_contains(folders, uv.fs_realpath(b)))
+    assert.falsy(vim.tbl_contains(folders, uv.fs_realpath(a)))
+    assert.falsy(vim.tbl_contains(folders, a))
+  end)
+
   it('is removed by stop(); start() again reuses the port and the token', function()
     assert.truthy(P.start())
     local st = P.status()

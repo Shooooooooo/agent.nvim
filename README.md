@@ -1,6 +1,6 @@
 # agent.nvim
 
-Run Claude Code, OpenCode, GitHub Copilot CLI and Gemini CLI in a Neovim terminal, with Neovim
+Run Claude Code, OpenCode, GitHub Copilot CLI or Gemini CLI in a Neovim terminal, with Neovim
 itself serving the IDE integration each CLI expects from VS Code. Like
 [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim), but for four agents.
 
@@ -13,8 +13,8 @@ Code TUI, with the model's replies scripted so that the recording is reproducibl
 
 ## Features
 
-- Agents run in a split, float or tab. `:Agent` toggles the terminal; the agent keeps running
-  while hidden.
+- The agent runs in a split, float or tab. `:Agent` toggles the terminal; the agent keeps running
+  while hidden. One agent runs at a time: starting another one asks before replacing it.
 - The agent automatically sees your current file and visual selection.
 - Proposed edits open as a side-by-side diff in Neovim: accept with `:w`, reject by closing it.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
@@ -82,17 +82,20 @@ opens it (pressing `<Esc>` first would drop the selection).
 
 | Command | Description |
 |---|---|
-| `:Agent [name]` | Toggle an agent terminal, starting the agent if needed. |
-| `:AgentOpen [name]` | Open (start or show) an agent terminal and focus it. |
-| `:AgentClose [name]` | Hide the terminal. The agent keeps running. |
-| `:AgentStop [name]` | Stop the agent. `:AgentStop!` stops every agent and IDE server. |
+| `:Agent [name]` | Toggle the agent terminal, starting the agent if needed. |
+| `:AgentOpen [name]` | Open (start or show) the agent terminal and focus it. |
+| `:AgentClose` | Hide the terminal. The agent keeps running. |
+| `:AgentStop` | Stop the agent, and its IDE server unless `auto_start` is on. |
 | `:AgentDiffAccept` | Accept the current diff. |
 | `:AgentDiffReject` | Reject the current diff. |
-| `:AgentStatus` | Show the agents and the IDE servers. |
+| `:AgentStatus` | Show the agent and the IDE servers. |
 | `:AgentMcpConfig [agent]` | Print the config for registering the $NVIM controller by hand. |
 | `:AgentGeminiSetup` | Link the agent.nvim extension into Gemini CLI (once). |
 
-`[name]` defaults to the most recently focused running agent, then to `default_agent`.
+`[name]` defaults to the running agent, then to `default_agent`. Starting a different agent
+while one runs asks first (`Stop claude and start copilot?`): Yes stops the running agent, as
+`:AgentStop` does, and starts the new one; No keeps it. From Lua, `open(name, { confirm = false })`
+replaces it without asking.
 
 ## Configuration
 
@@ -158,12 +161,12 @@ Full reference: `:help agent-config`.
 
 ## The $NVIM controller
 
-For each agent it launches, agent.nvim registers a stdio MCP server through which the agent can
+When it launches an agent, agent.nvim registers a stdio MCP server through which the agent can
 drive the Neovim it runs in, without editing your agent config files. Its tools:
 `get_editor_state`, `list_buffers`, `read_buffer`, `edit_buffer`, `open_file`, `get_diagnostics`,
 `execute_command`, `eval`, `exec_lua`, `notify`. For an agent you start yourself in a Neovim
-terminal, `:AgentMcpConfig` prints the config to add, and `auto_start = true` lets it use the IDE
-connection too (`:help agent-nvim-mcp-manual`).
+terminal, `:AgentMcpConfig` prints the config to add, and `auto_start = true` keeps the IDE
+servers running so that it can use the IDE connection too (`:help agent-nvim-mcp-manual`).
 
 **Security:** the controller can do anything your Neovim can. `exec_lua`, `execute_command` and
 `eval` run arbitrary Lua, Ex commands and Vimscript as you, shell commands included. Claude,
