@@ -743,6 +743,9 @@ local function start(name, opts)
   local prev = vim.api.nvim_get_current_win()
   local buf = vim.api.nvim_create_buf(false, false)
   vim.bo[buf].bufhidden = 'hide'
+  -- Marked before it shows up anywhere, so that selection tracking, which ignores the agent's
+  -- terminal, never takes it for an empty scratch buffer to report.
+  vim.b[buf].agent_nvim_agent = name
   local win, werr = open_window(buf, layout, name)
   if not win then
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
@@ -790,7 +793,6 @@ local function start(name, opts)
   local pok, pid = pcall(vim.fn.jobpid, job)
   t.pid = pok and pid or nil
   current = t
-  vim.b[buf].agent_nvim_agent = name
   vim.b[buf].agent_nvim_session = spec.session_id
   vim.api.nvim_create_autocmd('TermEnter', {
     group = state.augroup,

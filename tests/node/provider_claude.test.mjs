@@ -540,6 +540,7 @@ describe('Claude Code 2.1.283 replay', () => {
     // Latin-1 text (e.g. from a `++bin` buffer) is the selection sent when the client becomes ready.
     await fx.lua(`require('agent.editor.selection')._reset()
       vim.cmd('enew')
+      vim.b.agent_ignore = true
       P._state.last_selection = { path = ${luaStr(fx.workspace + '/b.txt')}, bufnr = 1, text = 'caf\\233 cr\\232me',
         start = { line = 0, character = 0 }, finish = { line = 0, character = 10 }, is_empty = false, mode = 'v' }`);
     const lock = claudeLock(fx);
@@ -604,6 +605,15 @@ describe('OpenCode client', () => {
     const r1 = c.selections[1].ranges[0];
     assert.equal(r1.text, 'two\nthree');
     assert.deepEqual([r1.selection.start, r1.selection.end], [{ line: 2, character: 1 }, { line: 3, character: 6 }]);
+
+    // A buffer that is not a file (a terminal): its nvim://buffer/ id, decoded like a path, +1 too.
+    await fx.lua(`P.on_selection({ path = 'nvim://buffer/7/fish', bufnr = 7, text = 'error: boom',
+      start = { line = 4, character = 0 }, finish = { line = 4, character = 11 }, is_empty = false, mode = 'v' })`);
+    await until(() => c.selections.length === 3, 2000, 'third selection');
+    assert.equal(c.selections[2].filePath, 'nvim://buffer/7/fish');
+    const r2 = c.selections[2].ranges[0];
+    assert.equal(r2.text, 'error: boom');
+    assert.deepEqual([r2.selection.start, r2.selection.end], [{ line: 5, character: 1 }, { line: 5, character: 12 }]);
     await sleep(200);
     assert.deepEqual(c.dropped, [], 'every notification decoded under OpenCode\'s schemas');
     await c.close();

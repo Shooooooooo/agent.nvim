@@ -668,6 +668,8 @@ describe('MCP handshake', function()
   end)
 
   it('sends {"workspaceState":{"openFiles":[]}} when no file is open', function()
+    -- (The empty buffer that has focus would be the active entry itself, nvim://buffer/<n>/scratch.)
+    vim.b.agent_ignore = true
     local info = start()
     local c = new_client(info):connect()
     c:wait_event('ide/contextUpdate')
@@ -902,6 +904,90 @@ describe('ide/contextUpdate', function()
     assert.eq(a, files[1].path)
     assert.eq(true, files[1].isActive)
     assert.eq(nil, files[1].selectedText)
+  end)
+
+  it('sends a focused terminal as the active entry under its nvim://buffer/ id, never as a recent file', function()
+    local a, b = tmp .. '/a.txt', tmp .. '/b.txt'
+    write(a, 'alpha\n')
+    write(b, 'beta\n')
+    vim.cmd('edit ' .. vim.fn.fnameescape(a))
+    vim.cmd('edit ' .. vim.fn.fnameescape(b))
+    local file_win = api.nvim_get_current_win()
+    local info = start({ context_debounce_ms = 10 })
+    local c = new_client(info):connect()
+    c:wait_event('ide/contextUpdate')
+    vim.cmd('botright vnew')
+    local job = vim.fn.jobstart({ '/bin/sh', '-c', 'echo "error: boom"; exec sleep 30' }, { term = true })
+    local term = api.nvim_get_current_buf()
+    local id = ('nvim://buffer/%d/sh'):format(term)
+    ---The latest ide/contextUpdate, once its files satisfy `pred`.
+    local function wait_ctx(pred, what)
+      local found
+      wait_for(function()
+        local evs = c:events('ide/contextUpdate')
+        local m = evs[#evs] and evs[#evs].msg
+        if m and pred(m.params.workspaceState.openFiles) then
+          found = m
+          return true
+        end
+        return false
+      end, 3000, what)
+      return found
+    end
+    local ok, err = pcall(function()
+      wait_for(function()
+        return api.nvim_buf_get_lines(term, 0, 1, false)[1] == 'error: boom'
+      end, 3000, 'terminal output')
+      api.nvim_win_set_cursor(0, { 2, 0 }) -- wherever it is, its cursor is sent at 1:1
+      selection.flush()
+      local msg = wait_ctx(function(files)
+        return files[1].path == id
+      end, 'the terminal as the active entry')
+      assert.truthy(P.validate_notification(msg.method, msg.params))
+      local files = msg.params.workspaceState.openFiles
+      assert.eq(3, #files)
+      assert.eq(id, files[1].path)
+      assert.eq(true, files[1].isActive)
+      assert.same({ line = 1, character = 1 }, files[1].cursor)
+      assert.eq(b, files[2].path)
+      assert.eq(nil, files[2].isActive)
+      assert.eq(nil, files[2].cursor)
+      assert.eq(a, files[3].path)
+      assert.truthy(files[1].timestamp > files[2].timestamp, 'the newest: Gemini sorts by timestamp')
+      -- The cursor moving (as it follows a terminal's output) sends no update.
+      local n = #c:events('ide/contextUpdate')
+      api.nvim_win_set_cursor(0, { 3, 0 })
+      api.nvim_exec_autocmds('CursorMoved', {})
+      selection.flush()
+      vim.wait(100)
+      assert.eq(n, #c:events('ide/contextUpdate'), 'no update for a cursor move')
+      assert.same({ line = 1, character = 1 }, P.build_context().workspaceState.openFiles[1].cursor)
+      -- A selection in the terminal is its selectedText.
+      api.nvim_win_set_cursor(0, { 1, 0 })
+      vim.cmd('normal! vg_')
+      selection.flush()
+      msg = wait_ctx(function(list)
+        return list[1].selectedText ~= nil
+      end, 'the terminal selection')
+      assert.eq(id, msg.params.workspaceState.openFiles[1].path)
+      assert.eq('error: boom', msg.params.workspaceState.openFiles[1].selectedText)
+      vim.cmd('normal! \27')
+      -- Back in a file: the terminal is gone from the list.
+      api.nvim_set_current_win(file_win)
+      selection.flush()
+      wait_for(function()
+        local ctx = P.build_context()
+        return ctx.workspaceState.openFiles[1].path == b
+      end, 2000, 'the file active again')
+      local ctx = P.build_context()
+      assert.eq(2, #ctx.workspaceState.openFiles)
+      assert.eq(true, ctx.workspaceState.openFiles[1].isActive)
+      for _, f in ipairs(ctx.workspaceState.openFiles) do
+        assert.falsy(f.path:find('nvim://', 1, true), 'no terminal among the recent files')
+      end
+    end)
+    vim.fn.jobstop(job)
+    assert.truthy(ok, err)
   end)
 
   it('truncates the selected text and lists at most 10 files', function()

@@ -278,6 +278,10 @@ end
 
 ---The `ide/contextUpdate` params for the current editor state (never isTrusted). With
 ---selection.track = false no files are listed: they would carry the cursor and selected text.
+---When the user was last in a buffer that is not a file (a terminal other than the agent's), it is
+---the active entry, under its nvim://buffer/<n>/<label> id (Gemini passes it to the model as the
+---activeFile, which the model reads with the controller's read_buffer); it never joins the recent
+---files.
 ---@param opts { limit?: integer }|nil
 ---@return table params
 function M.build_context(opts)
@@ -285,7 +289,7 @@ function M.build_context(opts)
     return { workspaceState = { openFiles = {} } }
   end
   local limit = opts and opts.limit or M.MAX_OPEN_FILES
-  local files = selection.recent_files({ limit = limit, max_selected = M.MAX_SELECTED_TEXT })
+  local files = selection.recent_files({ limit = limit, max_selected = M.MAX_SELECTED_TEXT, buffers = true })
   local open = {}
   for _, f in ipairs(files) do
     -- A path that is not valid UTF-8 cannot be named in JSON.

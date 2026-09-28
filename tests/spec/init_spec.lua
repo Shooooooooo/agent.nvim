@@ -415,6 +415,37 @@ describe('agent', function()
     end)
   end)
 
+  describe('selection and the agent terminal', function()
+    for _, layout in ipairs({ 'split', 'current', 'tab' }) do
+      it(('a Visual-mode mapping to <cmd>AgentToggle<cr> keeps the selection (layout = %s)'):format(layout), function()
+        setup({ terminal = { layout = layout }, selection = { debounce_ms = 20 } })
+        write(ws .. '/v.txt', 'one\ntwo\nthree\n')
+        local sel = require('agent.editor.selection')
+        local v = edit_in_main(ws .. '/v.txt')
+        if layout == 'current' then
+          vim.cmd('rightbelow vsplit') -- the agent takes this window over
+        end
+        vim.keymap.set('x', '<F9>', '<cmd>AgentToggle claude<cr>')
+        local ok, err = pcall(function()
+          vim.api.nvim_win_set_cursor(0, { 1, 0 })
+          vim.api.nvim_feedkeys(vim.keycode('Vj'), 'x!', false)
+          assert.eq('one\ntwo', sel.current().text)
+          vim.api.nvim_feedkeys(vim.keycode('<F9>'), 'x', false)
+          wait_ready('claude')
+          assert.eq(require('agent.terminal').bufnr(), vim.api.nvim_get_current_buf())
+          vim.wait(sel.DEMOTE_MS + 150)
+          local s, live = sel.current()
+          assert.falsy(live)
+          assert.eq(v, s.bufnr)
+          assert.eq('one\ntwo', s.text)
+        end)
+        pcall(vim.keymap.del, 'x', '<F9>')
+        agent.stop()
+        assert.truthy(ok, err)
+      end)
+    end
+  end)
+
   describe('commands and API', function()
     it(':AgentToggle toggles, :AgentClose hides, :AgentStop stops', function()
       vim.cmd('AgentToggle claude')

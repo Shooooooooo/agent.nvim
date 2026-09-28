@@ -114,6 +114,84 @@ describe('editor.context', function()
     assert.eq(nil, ctx.path_from_uri(nil))
   end)
 
+  it('names buffers that are not files nvim://buffer/<n>/<label>, and parses those ids', function()
+    -- A terminal: the basename of the first word of its command, quoted or not.
+    vim.cmd('vnew')
+    local j1 = vim.fn.jobstart({ '/bin/sh', '-c', 'exec sleep 30' }, { term = true })
+    local t1 = api.nvim_get_current_buf()
+    vim.cmd([[terminal "/bin/sh" -c "exec sleep 30"]])
+    local t2 = api.nvim_get_current_buf()
+    assert.matches('^term://.*//%d+:"/bin/sh"', api.nvim_buf_get_name(t2))
+    assert.eq('sh', ctx.buffer_label(t1))
+    assert.eq('sh', ctx.buffer_label(t2))
+    assert.eq(('nvim://buffer/%d/sh'):format(t1), ctx.buffer_uri(t1))
+    vim.fn.jobstop(j1)
+    vim.fn.jobstop(vim.bo[t2].channel)
+    -- Else the filetype, else the basename of the name, else "scratch".
+    local b = api.nvim_create_buf(true, true)
+    assert.eq('scratch', ctx.buffer_label(b))
+    api.nvim_buf_set_name(b, 'oil:///tmp/a\tb/')
+    assert.eq('ab', ctx.buffer_label(b), 'no control characters')
+    -- Nor C1 controls, line separators or bidirectional overrides.
+    api.nvim_buf_set_name(b, 'x\u{9b}[31my\u{2028}z\u{202e}w\u{2066}v\u{200f}u')
+    assert.eq('x[31myzwvu', ctx.buffer_label(b))
+    api.nvim_buf_set_name(b, 'oil:///tmp/a\tb/')
+    vim.bo[b].filetype = 'oil'
+    assert.eq('oil', ctx.buffer_label(b))
+    assert.eq(('nvim://buffer/%d/oil'):format(b), ctx.buffer_uri(b))
+    -- Ids.
+    assert.truthy(ctx.is_buffer_uri('nvim://buffer/12/fish'))
+    assert.falsy(ctx.is_buffer_uri('/tmp/nvim://buffer/12'))
+    assert.falsy(ctx.is_buffer_uri(nil))
+    assert.eq(12, ctx.bufnr_from_uri('nvim://buffer/12/fish'))
+    assert.eq(12, ctx.bufnr_from_uri('nvim://buffer/12'))
+    assert.eq(nil, ctx.bufnr_from_uri('nvim://buffer/x/fish'))
+    assert.eq(nil, ctx.bufnr_from_uri('nvim://buffer/12x'))
+    assert.eq(nil, ctx.bufnr_from_uri('/p/a.lua'))
+    assert.eq(nil, ctx.bufnr_from_uri('nvim://buffer/0/x'), 'buffer 0 names no buffer')
+    assert.eq(nil, ctx.bufnr_from_uri('nvim://buffer/0'))
+    assert.eq(nil, ctx.path_from_uri('nvim://buffer/12/fish'), 'not a file')
+    -- A :help buffer is a file on disk.
+    vim.cmd('help help')
+    assert.truthy(ctx.is_disk_file(api.nvim_get_current_buf()))
+    assert.falsy(ctx.is_file_buffer(api.nvim_get_current_buf()))
+    assert.falsy(ctx.is_disk_file(b))
+  end)
+
+  it('labels a toggleterm terminal by its shell, and cuts labels to 64 bytes of valid UTF-8', function()
+    local common = require('agent.net.common')
+    -- toggleterm starts `<shell>;#toggleterm#<n>`: the program word ends at the ";".
+    local t = api.nvim_create_buf(true, false)
+    api.nvim_open_term(t, {})
+    for _, c in ipairs({
+      { 'term://~/src//4242:/opt/homebrew/bin/fish;#toggleterm#1', 'fish' },
+      { 'term://~/src//4243:fish;#toggleterm#12', 'fish' },
+      { 'term://~/src//4244:/bin/zsh -l;#toggleterm#3', 'zsh' },
+      { 'term://~/src//4245:"/a dir/my prog";#toggleterm#2', 'my prog' },
+      { 'term://~/src//4246:/bin/sh -c "a;b"', 'sh' },
+    }) do
+      api.nvim_buf_set_name(t, c[1])
+      assert.eq(c[2], ctx.buffer_label(t), c[1])
+    end
+    assert.eq(('nvim://buffer/%d/sh'):format(t), ctx.buffer_uri(t))
+
+    local b = api.nvim_create_buf(true, true)
+    -- 66 bytes: cut before the character that does not fit, never inside it.
+    api.nvim_buf_set_name(b, string.rep('漢', 22))
+    assert.eq(string.rep('漢', 21), ctx.buffer_label(b))
+    assert.truthy(common.valid_utf8(ctx.buffer_uri(b)))
+    api.nvim_buf_set_name(b, string.rep('a', 63) .. 'é')
+    assert.eq(string.rep('a', 63), ctx.buffer_label(b))
+    api.nvim_buf_set_name(b, string.rep('a', 62) .. 'é')
+    assert.eq(string.rep('a', 62) .. 'é', ctx.buffer_label(b), 'exactly 64 bytes')
+    -- Bytes that are not UTF-8 (a Latin-1 name) are left out.
+    api.nvim_buf_set_name(b, 'caf\233-cr\195\168me')
+    assert.eq('caf-crème', ctx.buffer_label(b))
+    assert.truthy(common.valid_utf8(ctx.buffer_uri(b)))
+    api.nvim_buf_set_name(b, '\255\254')
+    assert.eq('scratch', ctx.buffer_label(b))
+  end)
+
   it('workspace_folders starts with the realpath of the cwd', function()
     local cwd = vim.fn.getcwd()
     vim.cmd('cd ' .. vim.fn.fnameescape(dir))

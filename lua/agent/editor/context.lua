@@ -44,6 +44,140 @@ function M.file_exists(path)
   return st ~= nil and st.type == 'file'
 end
 
+---True for a buffer whose name is an absolute path to a file that exists on disk, whatever its
+---'buftype' (a :help file has buftype "help"). Buffers marked with `b:agent_ignore` are excluded.
+---@param bufnr integer
+---@return boolean
+function M.is_disk_file(bufnr)
+  if not bufnr or not api.nvim_buf_is_valid(bufnr) or vim.b[bufnr].agent_ignore then
+    return false
+  end
+  local name = api.nvim_buf_get_name(bufnr)
+  if name == '' or is_url(name) or not (name:sub(1, 1) == '/' or name:match('^%a:[\\/]')) then
+    return false
+  end
+  return M.file_exists(name)
+end
+
+--- Prefix of the identifiers under which buffers that are not files are reported to the agents.
+M.BUFFER_URI_PREFIX = 'nvim://buffer/'
+
+---The program a terminal buffer runs, from its name `term://<cwd>//<pid>:<cmd>`: the basename of the
+---first word of <cmd> ("fish" for `/opt/homebrew/bin/fish -l`), or nil. An unquoted word ends at a
+---";" too: toggleterm names its terminals `term://<cwd>//<pid>:<shell>;#toggleterm#<n>`.
+---@param name string
+---@return string|nil
+local function terminal_program(name)
+  local cmd = name:match('^term://.-//%d+:(.*)$')
+  if not cmd then
+    return nil
+  end
+  cmd = vim.trim(cmd)
+  local q = cmd:sub(1, 1)
+  local word
+  if q == '"' or q == "'" then
+    word = cmd:match('^' .. q .. '([^' .. q .. ']*)')
+  else
+    word = cmd:match('^([^%s;]+)')
+  end
+  if not word then
+    return nil
+  end
+  return word:gsub('[/\\]+$', ''):match('([^/\\]*)$')
+end
+
+--- Longest label (in bytes) of a buffer that is not a file.
+local MAX_LABEL = 64
+
+---`s` without the bytes that are not part of a valid UTF-8 sequence, and cut to at most `max`
+---bytes on a character boundary.
+---@param s string
+---@param max integer
+---@return string
+local function utf8_prefix(s, max)
+  local valid_utf8 = require('agent.net.common').valid_utf8
+  if #s <= max and valid_utf8(s) then
+    return s
+  end
+  local out, n, i = {}, 0, 1
+  while i <= #s do
+    local c = s:byte(i)
+    local len = c < 0x80 and 1 or c >= 0xF0 and 4 or c >= 0xE0 and 3 or c >= 0xC2 and 2 or 0
+    local seq = len > 0 and s:sub(i, i + len - 1) or ''
+    if len > 0 and #seq == len and (len == 1 or valid_utf8(seq)) then
+      if n + len > max then
+        break
+      end
+      out[#out + 1] = seq
+      n, i = n + len, i + len
+    else
+      i = i + 1 -- not UTF-8: dropped
+    end
+  end
+  return table.concat(out)
+end
+
+---Remove what must not appear in a label: "/" and "\", C0 controls and DEL, C1 controls
+---(U+0080-U+009F), U+200E/U+200F, U+2028/U+2029, U+202A-U+202E and U+2066-U+2069.
+---@param s string
+---@return string
+local function sanitize_label(s)
+  return (s:gsub('[%c/\\]', '')
+    :gsub('\194[\128-\159]', '')
+    :gsub('\226\128[\142\143\168\169\170-\174]', '')
+    :gsub('\226\129[\166-\169]', ''))
+end
+
+---A short name for a buffer that is not a file: the program a terminal runs, else the 'filetype',
+---else the basename of the buffer name, else "scratch". Valid UTF-8 of at most 64 bytes (cut on a
+---character boundary), with no "/", "\", control characters (C0, DEL, C1), line or paragraph
+---separators, or bidirectional formatting characters.
+---@param bufnr integer
+---@return string
+function M.buffer_label(bufnr)
+  local name = api.nvim_buf_get_name(bufnr)
+  local candidates = {
+    vim.bo[bufnr].buftype == 'terminal' and terminal_program(name) or nil,
+    vim.bo[bufnr].filetype,
+    (name:gsub('[/\\]+$', ''):match('([^/\\]*)$')),
+  }
+  for i = 1, 3 do
+    local label = candidates[i] and utf8_prefix(sanitize_label(candidates[i]), MAX_LABEL) or ''
+    if label ~= '' then
+      return label
+    end
+  end
+  return 'scratch'
+end
+
+---The identifier under which a buffer that is not a file is reported to the agents:
+---`nvim://buffer/<bufnr>/<label>` (see buffer_label()). The $NVIM controller's read_buffer reads it.
+---@param bufnr integer
+---@return string
+function M.buffer_uri(bufnr)
+  return M.BUFFER_URI_PREFIX .. bufnr .. '/' .. M.buffer_label(bufnr)
+end
+
+---True for an identifier made by buffer_uri() (a reported path that is not a file).
+---@param s any
+---@return boolean
+function M.is_buffer_uri(s)
+  return type(s) == 'string' and s:sub(1, #M.BUFFER_URI_PREFIX) == M.BUFFER_URI_PREFIX
+end
+
+---The buffer number in `nvim://buffer/<bufnr>[/<label>]`, or nil for anything else (also for buffer
+---number 0, which names no buffer). The buffer may no longer exist.
+---@param s any
+---@return integer|nil
+function M.bufnr_from_uri(s)
+  if not M.is_buffer_uri(s) then
+    return nil
+  end
+  local n = s:sub(#M.BUFFER_URI_PREFIX + 1):match('^(%d+)/') or s:sub(#M.BUFFER_URI_PREFIX + 1):match('^(%d+)$')
+  n = n and tonumber(n)
+  return n ~= 0 and n or nil
+end
+
 ---Absolute path with symlinks resolved. For a path that does not exist yet, the parent directory
 ---is resolved instead (so `/tmp/new.txt` and `/private/tmp/new.txt` compare equal on macOS).
 ---@param path string

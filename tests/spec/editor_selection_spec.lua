@@ -43,12 +43,32 @@ local function reset_ui()
   end
 end
 
----A terminal buffer without a job, shown in a new window.
-local function open_terminal_window()
+---The agent's terminal (a terminal buffer without a job, marked with b:agent_nvim_agent as
+---agent.terminal does), shown in a new window: focusing it keeps the previous context.
+local function open_agent_terminal()
   vim.cmd('vsplit')
   local b = api.nvim_create_buf(true, false)
+  vim.b[b].agent_nvim_agent = 'claude'
   api.nvim_win_set_buf(0, b)
   api.nvim_open_term(b, {})
+  return b
+end
+
+---A shell terminal that prints `lines`, then waits, in a new window (focused). Returns its buffer
+---once the output is there.
+local function open_shell(lines)
+  vim.cmd('vnew')
+  local script = {}
+  for _, l in ipairs(lines) do
+    script[#script + 1] = 'echo ' .. vim.fn.shellescape(l)
+  end
+  script[#script + 1] = 'exec sleep 60'
+  local job = vim.fn.jobstart({ '/bin/sh', '-c', table.concat(script, '; ') }, { term = true })
+  assert.truthy(job > 0, 'jobstart')
+  local b = api.nvim_get_current_buf()
+  wait_for(function()
+    return api.nvim_buf_get_lines(b, #lines - 1, #lines, false)[1] == lines[#lines]
+  end, 3000, 'terminal output')
   return b
 end
 
@@ -242,7 +262,7 @@ describe('editor.selection', function()
     it('straight for the agent terminal keeps the selection until a file window has focus again', function()
       local b = edit('a.txt', { 'one', 'two', 'three' })
       local file_win = api.nvim_get_current_win()
-      open_terminal_window()
+      open_agent_terminal()
       vim.cmd('wincmd L')
       api.nvim_set_current_win(file_win)
       api.nvim_win_set_cursor(0, { 1, 0 })
@@ -263,7 +283,7 @@ describe('editor.selection', function()
     it('keeps the selection while a command line opened from Visual mode is open and its command runs', function()
       edit('a.txt', { 'one', 'two', 'three' })
       local file_win = api.nvim_get_current_win()
-      local term = open_terminal_window()
+      local term = open_agent_terminal()
       vim.cmd('wincmd L')
       api.nvim_set_current_win(file_win)
       local got = {}
@@ -308,7 +328,7 @@ describe('editor.selection', function()
     it('keeps the selection while the command-line window is open and its command runs', function()
       edit('a.txt', { 'one', 'two', 'three' })
       local file_win = api.nvim_get_current_win()
-      local term = open_terminal_window()
+      local term = open_agent_terminal()
       vim.cmd('wincmd L')
       api.nvim_set_current_win(file_win)
       local got = {}
@@ -385,7 +405,7 @@ describe('editor.selection', function()
     local function agent_layout(lines)
       local b = edit('a.txt', lines)
       local file_win = api.nvim_get_current_win()
-      open_terminal_window()
+      open_agent_terminal()
       vim.cmd('wincmd L')
       api.nvim_set_current_win(file_win)
       return b, function(keys, leave, opts)
@@ -500,7 +520,7 @@ describe('editor.selection', function()
     it('keeps the selection when the buffer is written or changed during Visual mode', function()
       local b = edit('a.txt', { 'one', 'two', 'three' })
       local file_win = api.nvim_get_current_win()
-      open_terminal_window()
+      open_agent_terminal()
       vim.cmd('wincmd L')
       api.nvim_set_current_win(file_win)
       local kept = { event = 'one\ntwo', current = 'one\ntwo', live = false, selected_text = 'one\ntwo',
@@ -686,7 +706,7 @@ describe('editor.selection', function()
     it('drops the held selection when its buffer is wiped or unloaded', function()
       local a = edit('a.txt', { 'one', 'two', 'three' })
       local a_win = api.nvim_get_current_win()
-      open_terminal_window()
+      open_agent_terminal()
       vim.cmd('wincmd L')
       local term_win = api.nvim_get_current_win()
       for _, cmd in ipairs({ 'bwipeout!', 'bunload!', 'bdelete!' }) do
@@ -793,7 +813,7 @@ describe('editor.selection', function()
     api.nvim_win_set_cursor(0, { 2, 0 })
     -- select and move to the agent terminal faster than the debounce
     feed('vj<Esc>')
-    local term = open_terminal_window()
+    local term = open_agent_terminal()
     assert.eq(term, api.nvim_get_current_buf())
     wait_for(function()
       return #events > 0 and events[#events].text == 'two\nt'
@@ -806,25 +826,37 @@ describe('editor.selection', function()
     assert.eq(3, s.end_line)
   end)
 
-  it('ignores terminal, agent-diff, scratch and help buffers', function()
+  it('ignores the agent terminal, agent-diff buffers, b:agent_ignore and floating windows', function()
     local b = edit('a.txt', { 'one', 'two' })
     api.nvim_win_set_cursor(0, { 2, 1 })
     sel.current()
-    local term = open_terminal_window()
-    assert.falsy(sel.is_trackable(term))
+    local term = open_agent_terminal()
+    assert.eq(nil, sel.kind(term))
     local s, live = sel.current()
     assert.falsy(live)
     assert.eq(b, s.bufnr)
+    -- agent.terminal's buffer, marked or not
+    package.loaded['agent.terminal'] = { bufnr = function()
+      return term
+    end }
+    vim.b[term].agent_nvim_agent = nil
+    local ok, kind = pcall(sel.kind, term)
+    package.loaded['agent.terminal'] = nil
+    assert.truthy(ok, kind)
+    assert.eq(nil, kind)
+    assert.eq('buffer', sel.kind(term), 'any other terminal')
+    vim.b[term].agent_nvim_agent = 'claude'
 
     local acw = api.nvim_create_buf(false, true)
     vim.bo[acw].buftype = 'acwrite'
     api.nvim_buf_set_name(acw, 'agent-diff://x')
-    assert.falsy(sel.is_trackable(acw))
-    local scratch = api.nvim_create_buf(true, true)
-    assert.falsy(sel.is_trackable(scratch))
-    local named_scratch = api.nvim_create_buf(true, false)
-    api.nvim_buf_set_name(named_scratch, 'oil:///tmp/')
-    assert.falsy(sel.is_trackable(named_scratch))
+    assert.eq(nil, sel.kind(acw))
+    local orig = api.nvim_create_buf(false, true) -- a diff's scratch original
+    vim.b[orig].agent_diff_id = 'x'
+    assert.eq(nil, sel.kind(orig))
+    local ignored = api.nvim_create_buf(true, true)
+    vim.b[ignored].agent_ignore = true
+    assert.eq(nil, sel.kind(ignored))
     api.nvim_win_set_buf(0, acw)
     feed('ggVG', 'x!')
     s, live = sel.current()
@@ -832,6 +864,312 @@ describe('editor.selection', function()
     assert.eq(b, s.bufnr)
     feed('<Esc>')
     assert.truthy(sel.is_trackable(b))
+
+    -- A floating window (a picker, a popup) with a scratch buffer, a terminal or a quickfix list.
+    for _, make in ipairs({
+      function()
+        return api.nvim_create_buf(false, true)
+      end,
+      function()
+        local t = api.nvim_create_buf(false, true)
+        api.nvim_open_term(t, {})
+        return t
+      end,
+    }) do
+      local fb = make()
+      local float = api.nvim_open_win(fb, true, { relative = 'editor', row = 1, col = 1, width = 20, height = 3 })
+      assert.eq(nil, sel.kind(fb, float))
+      assert.eq('buffer', sel.kind(fb), 'the same buffer in a normal window is reported')
+      s, live = sel.current()
+      assert.falsy(live)
+      assert.eq(b, s.bufnr)
+      api.nvim_win_close(float, true)
+    end
+  end)
+
+  it('reports a terminal, a scratch buffer and other non-file buffers as nvim://buffer/<n>/<label>', function()
+    local a, pa = edit('a.txt', { 'one', 'two' })
+    local events = {}
+    sel.subscribe(function(s)
+      events[#events + 1] = s
+    end)
+    local term = open_shell({ 'hello', 'error: boom' })
+    local id = ('nvim://buffer/%d/sh'):format(term)
+    assert.eq('buffer', sel.kind(term))
+    assert.falsy(sel.is_trackable(term))
+    local s, live = sel.current()
+    assert.truthy(live)
+    assert.eq(id, s.path)
+    assert.eq(term, s.bufnr)
+    assert.eq('', s.text)
+    assert.eq(id, sel.path_of(term))
+    wait_for(function()
+      return #events > 0 and events[#events].path == id
+    end, 1000, 'selection event for the terminal')
+    -- Never a recent file; with `buffers`, the active entry, newest, ahead of the files.
+    assert.same({ pa }, vim.tbl_map(function(f)
+      return f.path
+    end, sel.recent_files()))
+    local files = sel.recent_files({ buffers = true })
+    assert.same({ id, pa }, vim.tbl_map(function(f)
+      return f.path
+    end, files))
+    assert.truthy(files[1].is_active)
+    assert.eq(nil, files[2].is_active)
+    assert.truthy(files[1].timestamp > files[2].timestamp)
+    -- Its cursor is always line 0, column 0 (1-based here).
+    assert.same({ line = 1, character = 1 }, files[1].cursor)
+    assert.same({ line = 0, character = 0 }, s.start)
+    assert.eq(term, sel.active_buf())
+    assert.eq(a, sel.last_focused_buf())
+    -- While the agent terminal has focus, the shell stays the context.
+    open_agent_terminal()
+    s, live = sel.current()
+    assert.falsy(live)
+    assert.eq(id, s.path)
+    assert.eq(id, sel.recent_files({ buffers = true })[1].path)
+    assert.eq(term, sel.active_buf())
+    -- Back in the file: the file is the context again, and the shell is gone from the list.
+    api.nvim_set_current_win(vim.fn.bufwinid(a))
+    assert.eq(pa, sel.current().path)
+    assert.same({ pa }, vim.tbl_map(function(f)
+      return f.path
+    end, sel.recent_files({ buffers = true })))
+    assert.eq(a, sel.active_buf())
+    assert.eq(sel.get(id), sel.get(term), 'get() takes the nvim://buffer/ id')
+    assert.eq(id, sel.get(id).path)
+
+    -- Labels: the filetype, else the buffer name's basename, else "scratch".
+    local scratch = api.nvim_create_buf(true, true)
+    api.nvim_win_set_buf(0, scratch)
+    assert.eq(('nvim://buffer/%d/scratch'):format(scratch), sel.current().path)
+    vim.cmd('enew')
+    assert.eq(('nvim://buffer/%d/scratch'):format(api.nvim_get_current_buf()), sel.current().path, ':enew')
+    vim.bo.filetype = 'NvimTree'
+    assert.eq(('nvim://buffer/%d/NvimTree'):format(api.nvim_get_current_buf()), sel.current().path)
+    local named = api.nvim_create_buf(true, true)
+    api.nvim_buf_set_name(named, 'oil:///tmp/some dir/')
+    api.nvim_win_set_buf(0, named)
+    assert.eq(('nvim://buffer/%d/some dir'):format(named), sel.current().path)
+    vim.bo[named].filetype = 'oil'
+    assert.eq(('nvim://buffer/%d/oil'):format(named), sel.current().path)
+    vim.cmd('copen')
+    assert.eq(('nvim://buffer/%d/qf'):format(api.nvim_get_current_buf()), sel.current().path)
+    vim.cmd('cclose')
+  end)
+
+  it('reports a :help buffer by the real path of its file', function()
+    edit('a.txt', { 'one' })
+    vim.cmd('help help')
+    local h = api.nvim_get_current_buf()
+    assert.eq('help', vim.bo[h].buftype)
+    local path = api.nvim_buf_get_name(h)
+    assert.truthy(vim.uv.fs_stat(path), path)
+    assert.eq('file', sel.kind(h))
+    assert.truthy(sel.is_trackable(h))
+    local s, live = sel.current()
+    assert.truthy(live)
+    assert.eq(path, s.path)
+    assert.eq(path, sel.recent_files({ buffers = true })[1].path)
+  end)
+
+  it('reports a Visual selection in a terminal as a selection, and the rules for leaving it', function()
+    local events = {}
+    sel.subscribe(function(s)
+      events[#events + 1] = s
+    end)
+    local a = edit('a.txt', { 'one', 'two', 'three' })
+    local file_win = api.nvim_get_current_win()
+    local term = open_shell({ 'line one', 'error: boom' })
+    local term_win = api.nvim_get_current_win()
+    local id = ('nvim://buffer/%d/sh'):format(term)
+    local agent = open_agent_terminal()
+    local agent_win = api.nvim_get_current_win()
+    api.nvim_set_current_win(term_win)
+    -- Normal mode in the terminal: Vj selects its lines.
+    api.nvim_win_set_cursor(0, { 1, 0 })
+    feed('Vj', 'x!')
+    local s, live = sel.current()
+    assert.truthy(live)
+    assert.eq(id, s.path)
+    assert.eq('line one\nerror: boom', s.text)
+    assert.eq('V', s.mode)
+    assert.same({ line = 0, character = 0 }, s.start)
+    assert.same({ line = 1, character = 11 }, s.finish)
+    assert.eq('line one\nerror: boom', sel.recent_files({ buffers = true })[1].selected_text)
+    wait_for(function()
+      return #events > 0 and events[#events].text == 'line one\nerror: boom'
+    end, 1000, 'the terminal selection event')
+    -- Straight from Visual mode to the agent terminal: kept.
+    api.nvim_set_current_win(agent_win)
+    assert.eq(agent, api.nvim_get_current_buf())
+    vim.wait(sel.DEMOTE_MS + 150)
+    s, live = sel.current()
+    assert.falsy(live)
+    assert.eq(id, s.path)
+    assert.eq('line one\nerror: boom', s.text)
+    assert.eq('line one\nerror: boom', events[#events].text)
+    -- <Esc> in the terminal: the cursor only.
+    api.nvim_set_current_win(term_win)
+    api.nvim_win_set_cursor(0, { 1, 0 })
+    feed('Vj', 'x!')
+    feed('<Esc>', 'x!')
+    vim.wait(sel.DEMOTE_MS + 150)
+    s = sel.current()
+    assert.eq(id, s.path)
+    assert.eq('', s.text)
+    -- Straight from Visual mode in the file to the terminal: the terminal is the context.
+    api.nvim_set_current_win(file_win)
+    api.nvim_win_set_cursor(0, { 1, 0 })
+    feed('Vj', 'x!')
+    assert.eq('one\ntwo', sel.current().text)
+    wait_for(function()
+      return events[#events].text == 'one\ntwo'
+    end, 1000, 'the file selection event')
+    api.nvim_set_current_win(term_win)
+    vim.wait(sel.DEMOTE_MS + 150)
+    s, live = sel.current()
+    assert.truthy(live)
+    assert.eq(id, s.path)
+    assert.eq('', s.text)
+    wait_for(function()
+      return events[#events].path == id and events[#events].text == ''
+    end, 1000, 'the terminal cursor event')
+    assert.eq(a, sel.last_focused_buf())
+  end)
+
+  it('drops a terminal selection when the user edits the finished terminal made modifiable', function()
+    reset_ui()
+    vim.cmd('terminal printf "aaa\\nbbb\\n"')
+    local term = api.nvim_get_current_buf()
+    wait_for(function()
+      return vim.fn.jobwait({ vim.bo[term].channel }, 0)[1] ~= -1
+    end, 3000, 'the job exits')
+    vim.bo[term].modifiable = true
+    feed('ggVj', 'x!')
+    assert.eq('aaa\nbbb', sel.current().text)
+    -- An edit through the selection, then straight to the agent's split.
+    feed(':s/a/X/g\r', 'x!')
+    assert.eq('XXX', api.nvim_buf_get_lines(term, 0, 1, false)[1])
+    vim.cmd('botright vsplit')
+    local agent = api.nvim_create_buf(true, false)
+    vim.b[agent].agent_nvim_agent = 'claude'
+    api.nvim_win_set_buf(0, agent)
+    vim.wait(sel.DEMOTE_MS + 150)
+    assert.eq('', sel.current().text, 'the edited selection is not sent')
+  end)
+
+  it('keeps a Visual selection in a terminal when the agent split opening resizes the terminal', function()
+    -- The terminal fills the screen; the agent's split then makes it narrower (its long first line
+    -- reflows) or lower (the blank rows below its output go). Its text changes, but not by an
+    -- edit: the selection is kept as it was captured.
+    local events = {}
+    sel.subscribe(function(s)
+      events[#events + 1] = s
+    end)
+    local long = string.rep('0', 60)
+    for _, case in ipairs({
+      { split = 'botright vsplit', keys = 'ggVj', text = long .. '\nerror: boom' },
+      { split = 'botright split', keys = 'ggVG' }, -- down to the last (blank) row of the screen
+    }) do
+      reset_ui()
+      local job = vim.fn.jobstart({ '/bin/sh', '-c', 'echo ' .. long .. '; echo "error: boom"; exec sleep 60' },
+        { term = true })
+      local term = api.nvim_get_current_buf()
+      local id = ('nvim://buffer/%d/sh'):format(term)
+      wait_for(function()
+        return api.nvim_buf_get_lines(term, 1, 2, false)[1] == 'error: boom'
+      end, 3000, 'terminal output')
+      local before = api.nvim_buf_get_lines(term, 0, -1, false)
+      feed(case.keys, 'x!')
+      local text = sel.current().text
+      if case.text then
+        assert.eq(case.text, text)
+      else
+        assert.eq(table.concat(before, '\n'), text, case.split)
+        assert.truthy(before[#before] == '', 'blank rows selected')
+      end
+      -- Straight from Visual mode to the agent's new split.
+      vim.cmd(case.split)
+      local agent = api.nvim_create_buf(true, false)
+      vim.b[agent].agent_nvim_agent = 'claude'
+      api.nvim_win_set_buf(0, agent)
+      api.nvim_open_term(agent, {})
+      wait_for(function()
+        return not vim.deep_equal(api.nvim_buf_get_lines(term, 0, -1, false), before)
+      end, 3000, 'the terminal text changes with its size: ' .. case.split)
+      vim.wait(sel.DEMOTE_MS + 150)
+      local s, live = sel.current()
+      assert.falsy(live)
+      assert.eq(id, s.path)
+      assert.eq(text, s.text, case.split)
+      assert.eq('V', s.mode)
+      assert.eq(text, events[#events].text, case.split)
+      assert.eq(text, sel.recent_files({ buffers = true })[1].selected_text, case.split)
+      -- Once the terminal has focus again, the selection is dropped as usual.
+      api.nvim_set_current_win(vim.fn.bufwinid(term))
+      vim.wait(sel.DEMOTE_MS + 150)
+      assert.eq('', sel.current().text)
+      vim.fn.jobstop(job)
+    end
+  end)
+
+  it('sends a buffer that is not a file at line 0, column 0 until a selection is made in it', function()
+    -- A terminal streaming output in Normal mode, its cursor following the output: one event, not
+    -- one per debounce (the cursor of such a buffer means nothing to the agents).
+    local events = {}
+    sel.subscribe(function(s)
+      events[#events + 1] = s
+    end)
+    edit('a.txt', { 'one', 'two' })
+    vim.cmd('vnew')
+    local job = vim.fn.jobstart({ '/bin/sh', '-c', 'i=0; while :; do i=$((i+1)); echo "tick $i"; sleep 0.02; done' },
+      { term = true })
+    local term = api.nvim_get_current_buf()
+    local id = ('nvim://buffer/%d/sh'):format(term)
+    local ok, err = pcall(function()
+      wait_for(function()
+        return api.nvim_buf_line_count(term) > api.nvim_win_get_height(0) + 5
+      end, 5000, 'the output scrolls')
+      move('G') -- on the last line: the cursor follows the output
+      local zero = { line = 0, character = 0 }
+      local function check(s)
+        assert.eq(id, s.path)
+        assert.eq('', s.text)
+        assert.truthy(s.is_empty)
+        assert.same(zero, s.start)
+        assert.same(zero, s.finish)
+        assert.same(zero, s.cursor)
+      end
+      check(sel.current())
+      sel.flush()
+      check(events[#events])
+      local n, cursors = #events, {}
+      for _ = 1, 8 do
+        vim.wait(60)
+        cursors[api.nvim_win_get_cursor(0)[1]] = true
+        -- The main loop fires CursorMoved as the cursor follows the output (`nvim -l` does not).
+        api.nvim_exec_autocmds('CursorMoved', {})
+        vim.wait(40)
+      end
+      assert.truthy(vim.tbl_count(cursors) > 1, 'the cursor followed the output')
+      assert.eq(n, #events, 'no event while only the cursor moves')
+      assert.same({ line = 1, character = 1 }, sel.recent_files({ buffers = true })[1].cursor)
+      -- A Visual selection in it is sent with its range; the cursor after it is line 0 again.
+      local row = api.nvim_win_get_cursor(0)[1] - 2
+      api.nvim_win_set_cursor(0, { row, 0 })
+      feed('vl', 'x!')
+      local s = sel.current()
+      assert.eq(id, s.path)
+      assert.same({ line = row - 1, character = 0 }, s.start)
+      assert.same({ line = row - 1, character = 2 }, s.finish)
+      feed('<Esc>', 'x!')
+      vim.wait(sel.DEMOTE_MS + 150)
+      check(sel.current())
+      check(sel.get(id))
+    end)
+    vim.fn.jobstop(job)
+    assert.truthy(ok, err)
   end)
 
   it('remembers the last selection of several buffers', function()
@@ -884,7 +1222,7 @@ describe('editor.selection', function()
     assert.eq(pc, files[2].path)
 
     -- the agent terminal having focus keeps the last file active
-    open_terminal_window()
+    open_agent_terminal()
     files = sel.recent_files()
     assert.eq(pa, files[1].path)
     assert.truthy(files[1].is_active)

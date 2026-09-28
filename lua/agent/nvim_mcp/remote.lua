@@ -315,13 +315,40 @@ local function main_buf()
   return best or api.nvim_get_current_buf()
 end
 
----Resolve a `buffer` argument (bufnr, numeric string or path; nil = main editor buffer). A path
----with no buffer gives nil and the absolute path.
+local BUFFER_ID = 'nvim://buffer/'
+
+---The buffer named by an IDE context id `nvim://buffer/<bufnr>[/<label>]` (how agent.nvim reports a
+---buffer that is not a file, such as a terminal). The label is not checked: buffer numbers are never
+---reused.
+---@param spec string
+---@return integer bufnr
+local function buffer_from_id(spec)
+  local rest = spec:sub(#BUFFER_ID + 1)
+  local n = rest:match('^(%d+)/') or rest:match('^(%d+)$')
+  if not n then
+    error(string.format('invalid Neovim buffer id %s (expected nvim://buffer/<number>[/<label>])', spec), 0)
+  end
+  local buf = tonumber(n)
+  if buf == 0 then
+    -- (nvim_buf_is_valid(0) is the current buffer of whatever context runs this call.)
+    error(string.format('invalid Neovim buffer id %s: buffer numbers start at 1', spec), 0)
+  end
+  if not api.nvim_buf_is_valid(buf) then
+    error(string.format('no buffer with number %d (%s): it was closed (wiped out) or never existed', buf, spec), 0)
+  end
+  return buf
+end
+
+---Resolve a `buffer` argument (bufnr, numeric string, nvim://buffer/ id or path; nil = main editor
+---buffer). A path with no buffer gives nil and the absolute path.
 ---@param spec any
 ---@return integer|nil bufnr, string|nil abs_path
 local function resolve_buffer(spec)
   if spec == nil or spec == vim.NIL then
     return main_buf(), nil
+  end
+  if type(spec) == 'string' and spec:sub(1, #BUFFER_ID) == BUFFER_ID then
+    return buffer_from_id(spec), nil
   end
   if type(spec) == 'string' and spec:match('^%s*%d+%s*$') then
     local n = tonumber(spec)
@@ -362,6 +389,9 @@ end
 
 -- Tools -----------------------------------------------------------------------------------------
 
+--- Lines read_buffer returns by default from a terminal buffer: its tail, the latest output.
+M.TERMINAL_TAIL = 200
+
 function tools.read_buffer(args)
   local buf, abs = resolve_buffer(args.buffer)
   local lines, label
@@ -380,6 +410,14 @@ function tools.read_buffer(args)
   local n = #lines
   local s = int(args.start_line) or 1
   local e = int(args.end_line) or -1
+  if buf and vim.bo[buf].buftype == 'terminal' and int(args.start_line) == nil and int(args.end_line) == nil then
+    -- A terminal: its last lines up to the last one with text (the rows below the prompt are empty).
+    e = n
+    while e > 1 and lines[e] == '' do
+      e = e - 1
+    end
+    s = math.max(1, e - M.TERMINAL_TAIL + 1)
+  end
   if s < 0 then
     s = n + s + 1
   end

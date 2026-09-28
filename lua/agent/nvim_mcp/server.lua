@@ -30,7 +30,8 @@ end
 
 local BUFFER = {
   anyOf = { { type = 'integer' }, { type = 'string' } },
-  description = 'Buffer number, or a file path (absolute, or relative to the Neovim working directory).',
+  description = 'Buffer number, a file path (absolute, or relative to the Neovim working directory), or an '
+    .. 'IDE context path starting with nvim://buffer/ (e.g. nvim://buffer/12/fish).',
 }
 
 ---@type { name: string, description: string, inputSchema: table }[]
@@ -42,7 +43,10 @@ local TOOLS = {
       .. 'loaded; a path with no buffer is read from disk. Defaults to the buffer in the main editor '
       .. 'window (the file the user is editing). Give buffer as a file path, or as a buffer number: '
       .. "to list buffers, call eval with map(getbufinfo({'buflisted': 1}), '[v:val.bufnr, v:val.name]') "
-      .. '(returns [bufnr, path] pairs) or use exec_lua.',
+      .. '(returns [bufnr, path] pairs) or use exec_lua. An IDE context path starting with '
+      .. 'nvim://buffer/ (e.g. nvim://buffer/12/fish) is a Neovim buffer that is not a file, such as a '
+      .. 'terminal: pass it as buffer. For a terminal buffer, the default range is its last 200 lines '
+      .. '(up to the last non-empty one).',
     inputSchema = obj({
       buffer = BUFFER,
       start_line = { type = 'integer', description = 'First line, 1-based (default 1).' },
@@ -537,7 +541,9 @@ function Server:_initialize(params)
     instructions = 'These tools control the Neovim instance that hosts this agent\'s terminal. '
       .. 'Line numbers in their arguments and results are 1-based and inclusive. read_buffer reads '
       .. 'live buffer contents, including unsaved changes; buffers can be given by number or file '
-      .. 'path. For editor state that no tool reports directly (the buffer list, windows, cursor, '
+      .. 'path. An IDE context path starting with nvim://buffer/ is a Neovim buffer (e.g. a '
+      .. 'terminal); read it with read_buffer using that path, not with your own file tools. For '
+      .. 'editor state that no tool reports directly (the buffer list, windows, cursor, '
       .. 'diagnostics), use eval or exec_lua with the Neovim API. Make file edits with your own '
       .. 'editing tools.'
   else

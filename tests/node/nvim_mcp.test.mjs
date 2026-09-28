@@ -363,6 +363,51 @@ test('every tool works against the parent', async () => {
   }
 });
 
+test('read_buffer reads nvim://buffer/ ids from the IDE context, a terminal by its tail', async () => {
+  await resetParent();
+  // A shell terminal that printed 250 lines, as the user would have it next to the agent.
+  const term = await rpc.lua(`
+    vim.cmd('botright vnew')
+    local job = vim.fn.jobstart({ '/bin/sh', '-c', 'i=1; while [ $i -le 250 ]; do echo "out $i"; i=$((i+1)); done; exec sleep 30' }, { term = true })
+    vim.g.__test_jobs = { job }
+    return vim.api.nvim_get_current_buf()
+  `);
+  let last = 0;
+  await waitFor(async () => {
+    last = await rpc.lua(`
+      for i, l in ipairs(vim.api.nvim_buf_get_lines(..., 0, -1, false)) do
+        if l == 'out 250' then return i end
+      end
+      return 0`, term);
+    return last > 0;
+  }, 5000, 'terminal output');
+  const [name, total] = await rpc.lua('return { vim.api.nvim_buf_get_name(...), vim.api.nvim_buf_line_count(...) }', term);
+  const { client } = await connectController({ env: { AGENT_NVIM_AGENT: 'claude' } });
+  try {
+    assert.match(client.getInstructions(), /An IDE context path starting with nvim:\/\/buffer\/ is a Neovim buffer \(e\.g\. a terminal\); read it with read_buffer using that path, not with your own file tools\./);
+    const { tools } = await client.listTools();
+    assert.match(tools.find((t) => t.name === 'read_buffer').description, /nvim:\/\/buffer\//);
+    for (const buffer of [`nvim://buffer/${term}/sh`, `nvim://buffer/${term}`]) {
+      const lines = text(await client.callTool({ name: 'read_buffer', arguments: { buffer } })).split('\n');
+      assert.equal(lines[0], `${name} (lines ${last - 199}-${last} of ${total})`);
+      assert.equal(lines.length, 201);
+      assert.equal(lines[200], `${String(last).padStart(6)}\tout 250`);
+    }
+    assert.equal(text(await client.callTool({ name: 'read_buffer', arguments: { buffer: `nvim://buffer/${term}/sh`, start_line: 1, end_line: 1 } })),
+      `${name} (lines 1-1 of ${total})\n     1\tout 1`);
+    for (const [buffer, re] of [
+      ['nvim://buffer/99999/fish', /no buffer with number 99999 \(nvim:\/\/buffer\/99999\/fish\): it was closed/],
+      ['nvim://buffer/fish', /invalid Neovim buffer id nvim:\/\/buffer\/fish/],
+    ]) {
+      const r = await client.callTool({ name: 'read_buffer', arguments: { buffer } });
+      assert.equal(r.isError, true);
+      assert.match(text(r), re);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
 test('per-request timeout, while the server keeps answering', async () => {
   await resetParent();
   const { client } = await connectController({ env: { AGENT_NVIM_TIMEOUT_MS: '400' } });

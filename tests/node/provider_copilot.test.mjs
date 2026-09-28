@@ -593,10 +593,31 @@ describe('copilot provider (replaying Copilot CLI 1.0.88)', () => {
         selection: { start: { line: 1, character: 3 }, end: { line: 1, character: 3 }, isEmpty: true },
         current: true,
       });
-      await fx.cmd('enew');
+      await fx.cmd('float'); // an ignored window (a picker)
       const cached = toolText(await cli.callTool('get_selection', {}, 11));
       assert.equal(cached.current, false);
       assert.equal(cached.filePath, path.join(ws(), 'a.txt'));
+    });
+
+    test('a terminal goes by its nvim://buffer/ id: selection_changed and get_selection, UTF-16 columns', async () => {
+      stream.events.length = 0;
+      // From byte 3 ('b', after 'a' and the 2-byte 'ñ') to the end: 'b😀 c'.
+      const t = await fx.cmd('terminal', { text: 'añb😀 c', col: 3 });
+      assert.equal(t.ok, true);
+      const id = `nvim://buffer/${t.bufnr}/sh`;
+      assert.equal(t.path, id);
+      const want = {
+        text: 'b😀 c',
+        filePath: id,
+        fileUrl: id,
+        // UTF-16: 'a'=1, 'ñ'=1, then 'b'=1, '😀'=2, ' '=1, 'c'=1
+        selection: { start: { line: 0, character: 2 }, end: { line: 0, character: 7 }, isEmpty: false },
+      };
+      const e = await cli.nextEvent(stream);
+      assert.equal(e.data.method, 'selection_changed');
+      assert.deepEqual(e.data.params, want);
+      assert.deepEqual(toolText(await cli.callTool('get_selection', {}, 12)), { ...want, current: true });
+      await fx.cmd('escape');
     });
 
     test('get_diagnostics: all files, or one file by URI', async () => {

@@ -28,6 +28,9 @@ if not ok then
   os.exit(1)
 end
 out({ port = P.status().port, token = P._state.token, lock = P.status().lock })
+-- The empty buffer that has focus would be reported itself (nvim://buffer/1/scratch): the tests set
+-- the selections.
+vim.b.agent_ignore = true
 
 local env = setmetatable({ P = P, diff = diff }, { __index = _G })
 local quit = false

@@ -40,13 +40,28 @@ IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable 
   controller's tools are 1-based and inclusive. Columns are byte offsets except where noted
   (Copilot and Gemini use UTF-16 when the buffer is loaded).
 - **Selection.** `lua/agent/editor/selection.lua` feeds all four protocols (the pushed
-  notifications and the pull tools). When Visual mode ends, the selection is held for
-  `DEMOTE_MS` (50 ms). If a file window then has focus (`<Esc>`, `y`, `d`, a click in the file),
-  it is replaced by the cursor, sent as an empty selection (Gemini: no `selectedText`). A cursor
-  move or text change during the grace period drops it at once. If focus went straight to the
-  agent terminal or another non-file window (`<C-w>l`, `<cmd>AgentToggle<cr>`), it is kept until a
-  file window has focus again. Re-entering Visual mode cancels the drop. A command line opened
-  from Visual mode pauses the grace period, which restarts once the command has run.
+  notifications and the pull tools). Files are reported by their path, and so are buffers named
+  after a file on disk (`:help` files). Other buffers (a terminal other than the agent's, a
+  quickfix list, a file explorer, a scratch buffer) are reported as `nvim://buffer/<n>/<label>`
+  (label: the terminal's program, else the filetype, else the name's last part, else `scratch`;
+  valid UTF-8 of at most 64 bytes), which the controller's `read_buffer` reads. Such a buffer's
+  cursor is not reported: with no selection it is sent at line 0, character 0 (empty), so a
+  terminal whose cursor follows its output sends nothing new; a Visual selection in it is sent
+  with its range. Ignored, so that the previous context stays: the agent's terminal,
+  `agent-diff://` buffers (a diff's proposal, and the read-only copy of the original shown when
+  the user's buffer cannot be; a left side that is the user's own buffer of the file is reported
+  as that file), `b:agent_ignore`, a buffer that is not a file in a floating window (a file in a
+  floating window is reported), and the command-line window. When Visual mode ends, the
+  selection is held for `DEMOTE_MS` (50 ms). If a reported window then has focus (`<Esc>`, `y`,
+  `d`, a click in the file, another terminal), it is replaced by that window's cursor, sent as an
+  empty selection (Gemini: no `selectedText`). A cursor move or text change during the grace
+  period drops it at once. If focus went straight to an ignored window (`<C-w>l` to the agent
+  terminal, `<cmd>AgentToggle<cr>`, a floating picker), it is kept until a reported window has
+  focus again. A change to its text drops it even then, except in a terminal: the user cannot
+  edit one, and its text changes with the output and with its size (the agent's split opening
+  reflows long lines and removes blank rows), so the selection is kept as captured. Re-entering
+  Visual mode cancels the drop. A command line opened from Visual mode pauses the grace period,
+  which restarts once the command has run.
 - **Blocking tools.** A diff tool that waits for the user must be answered asynchronously. Never
   block the Neovim UI. Everything that runs in a libuv callback goes through `vim.schedule`.
 - **Files.** Lock and discovery files are mode 0600. They are written atomically (temp file plus
@@ -211,6 +226,14 @@ after `openDiff` and `close_tab`, right before the write.
     `end.character == 0`. A linewise selection whose last line is empty is therefore sent as
     `end = {line: last + 1, character: 0}`.
   - A cursor-only selection has `text: ""`, which Claude shows as "opened file".
+  - A buffer that is not a file goes by its id in both fields: `filePath` and `fileUrl` are
+    `nvim://buffer/<n>/<label>` (no `file://`). Claude shows the basename ("In sh", "2 lines
+    selected") and its attachments name the id: "The user opened the file nvim://buffer/3/sh in
+    the IDE." and "The user selected the lines 1 to 2 from nvim://buffer/3/sh: ..." (2.1.284, live
+    with the fake model). The controller's `instructions` tell the model to read such a path with
+    `read_buffer`; it did. OpenCode gets the same id, with `line_offset` as usual. With no
+    selection it is sent at `{line: 0, character: 0}` (empty) wherever its cursor is, so that a
+    terminal whose cursor follows its output is not resent on every debounce.
   - Never send `selection: null`, and never send a `source` key (OpenCode drops the message).
   - Sent to a client when it becomes ready and on every change. With `selection.track = false`
     nothing is sent, not even on connect. The pull tools `getCurrentSelection` and
@@ -361,7 +384,7 @@ The server name `ide` is reserved.
 
 | Tool | Contract |
 |---|---|
-| `get_selection` `{}` | `{text, filePath, fileUrl, selection {start, end, isEmpty}, current}`. `current` is true for the active editor: the current window when it shows a file, or, while a non-file window such as the agent terminal has focus, the last focused file if it is still shown in the current tab page and selection tracking is on. Otherwise the cached selection with `current: false`, or `null`. |
+| `get_selection` `{}` | `{text, filePath, fileUrl, selection {start, end, isEmpty}, current}`. `current` is true for the active editor: the current window when it is reported (a file, or a terminal as `nvim://buffer/<n>/<label>` in both `filePath` and `fileUrl`), or, while an ignored window such as the agent terminal has focus, the last reported buffer (the last focused file, or a terminal focused since) if it is still shown in the current tab page and selection tracking is on. Otherwise the cached selection with `current: false`, or `null`. |
 | `get_diagnostics` `{uri?}` | `[{uri, filePath, diagnostics: [{message, severity: "error"\|"warning"\|"information"\|"hint", range, source?, code?}]}]`, only files with diagnostics. |
 | `open_diff` `{original_file_path, new_file_contents, tab_name}` | **Blocking, with no timeout on either side.** Resolve with `{success: true, result: "SAVED"\|"REJECTED", trigger, tab_name, message}`. `success`, `result`, `trigger` and `message` are all required, or the result is ignored. After `SAVED` **the CLI writes `new_file_contents` itself**, so edits to the proposal would be lost: the proposal is read-only. `trigger` is one of `accepted_via_button`, `rejected_via_button`, `closed_via_tool`, `client_disconnected`. |
 | `close_diff` `{tab_name}` | Sent when the user answers in the terminal (and on interrupt). Resolves the pending `open_diff` with `REJECTED`/`closed_via_tool`, and returns `{success, already_closed, tab_name, message}`. |
@@ -381,7 +404,11 @@ The server name `ide` is reserved.
 
 - `selection_changed` `{text, filePath, fileUrl, selection: {start, end, isEmpty}}`. All fields
   are required, and lines are 0-based. Not sent (not even replayed) with
-  `selection.track = false`.
+  `selection.track = false`. A buffer that is not a file has `filePath` = `fileUrl` =
+  `nvim://buffer/<n>/<label>`; its characters are UTF-16 from the buffer's lines, as for a file.
+  With no selection it is sent at line 0, character 0 (empty), wherever its cursor is.
+  1.0.88 attaches such a selection as `File: nvim://buffer/3/sh (lines 1-2)` (live, with the fake
+  model), and its model read the buffer with `nvim-read_buffer`.
   - The footer shows `@file:L1[-L2]`. A non-empty selection is attached to the next prompt
     automatically.
   - It is sent to every session, and replayed when a GET stream opens (the CLI clears its cache on
@@ -535,6 +562,14 @@ disconnects the IDE client for the rest of the process.** Optional fields are om
     cursor (UTF-16 character).
   - `selectedText` appears only while there is a selection: in Visual mode, or kept after a switch
     from Visual mode straight to the agent terminal (see Conventions). Truncated to 16384.
+  - When the user was last in a buffer that is not a file (a terminal other than the agent's), it
+    is the first entry instead: `isActive`, the newest `timestamp` (Gemini sorts by it and clears
+    `isActive` unless the newest entry has it), path `nvim://buffer/<n>/<label>`, cursor
+    `{line: 1, character: 1}` unless something is selected (its position means nothing to the
+    model, and a terminal's cursor follows its output), `selectedText` as for a file. It never joins the recent files: once a
+    file has focus again, it is gone. Verified with 0.61.0: the schema accepts it, `/ide status`
+    lists `sh (active)`, and the model gets `"activeFile": {"path": "nvim://buffer/4/sh", ...}`
+    and read it with `mcp_nvim_read_buffer`.
   - With no files, send `{"workspaceState":{"openFiles":[]}}`. Debounced 50 ms, broadcast to every
     session.
   - With `selection.track = false` that empty context is all Gemini gets, also on stream open.
@@ -704,6 +739,12 @@ user's config for the session.
     editor window.
 - **Tools.** `read_buffer`, `open_file`, `execute_command`, `eval`, `exec_lua`, `notify`.
   - The schemas are in `nvim_mcp/server.lua`; `:help agent-nvim-mcp-tools` has the argument table.
+  - `read_buffer` takes the `nvim://buffer/<n>[/<label>]` ids of the IDE protocols (the label is
+    not checked; buffer numbers are never reused) and fails with a clear message for a buffer that
+    no longer exists or a malformed id, including buffer 0 (to the API, the current buffer of
+    whatever context runs the call; a plain `buffer: 0` still means the main editor buffer). A
+    terminal without `start_line`/`end_line` gives its last 200 lines, up to the last one with
+    text.
   - No tools for editor state, diagnostics or edits: those come from the IDE protocols (where they
     have them) and the agents' own edit tools, and `exec_lua` reaches the rest. The tool
     descriptions and the `instructions` string point the model there.

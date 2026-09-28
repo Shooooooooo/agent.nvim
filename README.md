@@ -16,7 +16,9 @@ Lua, and send you notifications.
 - The agent runs in a split (below your file by default), a float, a tab or the current window.
   `:AgentToggle` toggles the terminal; the agent keeps running while hidden. One agent runs at a
   time: starting another one asks before replacing it.
-- The agent automatically sees your current file and visual selection.
+- The agent automatically sees your current file and visual selection. In a terminal or another
+  buffer that is not a file, it sees that buffer instead (`nvim://buffer/<n>/<label>`, e.g. "In
+  fish" in Claude), and reads it through the [$NVIM controller](#the-nvim-controller).
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
@@ -174,9 +176,10 @@ When it launches an agent, agent.nvim registers a stdio MCP server through which
 drive the Neovim it runs in, without editing your agent config files. Its tools: `read_buffer`,
 `open_file`, `execute_command`, `eval`, `exec_lua`, `notify`. It leaves the current file,
 selection and diagnostics to the IDE connection, edits to the agent's own tools, and anything else
-to `exec_lua`. For an agent you start yourself in a Neovim terminal, `:AgentMcpConfig` prints the
-config to add, and `auto_start = true` keeps the IDE servers running so that it can use the IDE
-connection too (`:help agent-nvim-mcp-manual`).
+to `exec_lua`. `read_buffer` also reads the terminals and other buffers that the IDE connection
+reports as `nvim://buffer/<n>/<label>`. For an agent you start yourself in a Neovim terminal,
+`:AgentMcpConfig` prints the config to add, and `auto_start = true` keeps the IDE servers running
+so that it can use the IDE connection too (`:help agent-nvim-mcp-manual`).
 
 **Security:** the controller can do anything your Neovim can. `exec_lua`, `execute_command` and
 `eval` run arbitrary Lua, Ex commands and Vimscript as you, shell commands included. Claude,

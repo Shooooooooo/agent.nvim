@@ -99,6 +99,12 @@ local function result_json(box)
   return vim.json.decode(content[1].text, { luanil = { object = true, array = true } }), content[1].text
 end
 
+---Focus a scratch buffer in a floating window (a picker, a popup): ignored by selection tracking.
+local function focus_float()
+  local b = api.nvim_create_buf(false, true)
+  return api.nvim_open_win(b, true, { relative = 'editor', row = 1, col = 1, width = 20, height = 3 })
+end
+
 local function request(session, method, params)
   next_id = next_id + 1
   local box = {}
@@ -511,11 +517,12 @@ describe('selection', function()
 
   it('get_selection: current editor, cached selection, or null', function()
     local s = open_session()
-    -- A scratch buffer is not a file: nothing known yet.
-    vim.cmd('enew')
+    -- A floating window is ignored: nothing known yet.
+    local float = focus_float()
     local data, text = result_json(call(s, 'get_selection'))
     assert.eq(nil, data)
     assert.eq('null', text)
+    api.nvim_win_close(float, true)
 
     vim.cmd('edit ' .. vim.fn.fnameescape(ws .. '/a.txt'))
     api.nvim_win_set_cursor(0, { 1, 6 })
@@ -525,10 +532,10 @@ describe('selection', function()
     assert.eq(api.nvim_buf_get_name(0), cur.filePath)
     assert.same({ start = { line = 0, character = 6 }, ['end'] = { line = 0, character = 6 }, isEmpty = true }, cur.selection)
 
-    -- Focus on a non-file buffer: the last selection is returned with current=false.
+    -- Focus on an ignored window: the last selection is returned with current=false.
     P.on_selection({ path = api.nvim_buf_get_name(0), bufnr = api.nvim_get_current_buf(), text = 'hello',
       start = { line = 0, character = 0 }, finish = { line = 0, character = 5 }, is_empty = false })
-    vim.cmd('enew')
+    focus_float()
     local cached = result_json(call(s, 'get_selection'))
     assert.eq(false, cached.current)
     assert.truthy(cached.filePath:match('a%.txt$'))
@@ -547,10 +554,11 @@ describe('selection', function()
     vim.cmd('normal! \27')
     assert.eq('hello', sel.text)
     P.on_selection(sel)
-    -- Focus moves to a terminal in another window; a.txt is still shown.
+    -- Focus moves to the agent terminal in another window; a.txt is still shown.
     vim.cmd('vsplit')
     vim.cmd('enew')
     local job = vim.fn.jobstart({ 'sleep', '20' }, { term = true })
+    vim.b.agent_nvim_agent = 'copilot'
     local term_win = api.nvim_get_current_win()
     local ok, err = pcall(function()
       assert.eq('terminal', vim.bo.buftype)
@@ -957,12 +965,68 @@ describe('notifications', function()
       local data = result_json(call(a, 'get_selection'))
       assert.eq('', data.text)
       assert.eq(true, data.current)
-      -- Not a file buffer any more: the cached selection is the dropped one too.
-      vim.cmd('enew')
+      -- An ignored window has focus: the cached selection is the dropped one too.
+      focus_float()
       data = result_json(call(a, 'get_selection'))
       assert.eq('', data.text)
       assert.eq(file, data.filePath)
     end)
+    unsubscribe()
+    selection.stop()
+    a:close()
+    assert.truthy(ok, err)
+  end)
+
+  it('a terminal (not the agent\'s) goes by its nvim://buffer/ id, with UTF-16 columns from its lines', function()
+    local selection = require('agent.editor.selection')
+    selection.start()
+    local unsubscribe = selection.subscribe(P.on_selection) -- as agent.nvim forwards it
+    local a, sent = streaming_session()
+    vim.cmd('botright vnew')
+    local job = vim.fn.jobstart({ '/bin/sh', '-c', 'echo "héllo 😀 wörld"; exec sleep 30' }, { term = true })
+    local term = api.nvim_get_current_buf()
+    local ok, err = pcall(function()
+      local id = ('nvim://buffer/%d/sh'):format(term)
+      wait_for(function()
+        return api.nvim_buf_get_lines(term, 0, 1, false)[1] == 'héllo 😀 wörld'
+      end, 3000, 'terminal output')
+      wait_for(function()
+        return #sent > 0 and sent[#sent].params.filePath == id
+      end, 2000, 'selection_changed for the terminal')
+      assert.eq(id, sent[#sent].params.fileUrl)
+      -- Its cursor goes at line 0, column 0: moving it (as it follows the output) sends nothing.
+      local zero = { start = { line = 0, character = 0 }, ['end'] = { line = 0, character = 0 }, isEmpty = true }
+      assert.same(zero, sent[#sent].params.selection)
+      selection.flush()
+      local n = #sent
+      api.nvim_win_set_cursor(0, { 2, 0 })
+      api.nvim_exec_autocmds('CursorMoved', {})
+      selection.flush()
+      vim.wait(100)
+      assert.eq(n, #sent, 'no selection_changed for a cursor move')
+      assert.same(zero, result_json(call(a, 'get_selection')).selection)
+      -- From the emoji (byte 7, UTF-16 6: é is 2 bytes / 1 unit) to the end of the line.
+      api.nvim_win_set_cursor(0, { 1, 7 })
+      vim.cmd('normal! vg_')
+      wait_for(function()
+        return sent[#sent].params.text == '😀 wörld'
+      end, 2000, 'selection_changed with the terminal selection')
+      local want = {
+        text = '😀 wörld', filePath = id, fileUrl = id,
+        selection = { start = { line = 0, character = 6 }, ['end'] = { line = 0, character = 14 }, isEmpty = false },
+      }
+      assert.same(want, sent[#sent].params)
+      want.current = true
+      assert.same(want, result_json(call(a, 'get_selection')))
+      assert.same(want, (function()
+        -- Straight from Visual mode to an ignored window: the selection is kept, and the terminal
+        -- is still the active editor.
+        focus_float()
+        vim.wait(selection.DEMOTE_MS + 100)
+        return result_json(call(a, 'get_selection'))
+      end)())
+    end)
+    vim.fn.jobstop(job)
     unsubscribe()
     selection.stop()
     a:close()

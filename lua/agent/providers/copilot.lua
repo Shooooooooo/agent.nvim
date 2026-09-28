@@ -307,14 +307,15 @@ end
 -- ---------------------------------------------------------------------------
 
 ---Convert an agent.editor.selection value into Copilot's SelectionInfo (0-based lines, UTF-16
----characters, percent-encoded fileUrl).
+---characters from the buffer's lines, percent-encoded fileUrl). A buffer that is not a file (a
+---terminal) goes by its nvim://buffer/<n>/<label> id in both filePath and fileUrl.
 ---@param s agent.Selection
 ---@return table
 function M.selection_params(s)
   return {
     text = s.text or '',
     filePath = s.path,
-    fileUrl = util.file_url(s.path),
+    fileUrl = context().is_buffer_uri(s.path) and s.path or util.file_url(s.path),
     selection = {
       start = position(s.bufnr, s.start),
       ['end'] = position(s.bufnr, s.finish),
@@ -323,17 +324,17 @@ function M.selection_params(s)
   }
 end
 
----Whether a selection taken from a file window that no longer has focus still comes from the
----"active editor": its buffer is the last focused file buffer (known only while selection tracking
----runs) and is shown in the current tab page. VS Code keeps activeTextEditor while its terminal has
----focus (copilot.md §4.9).
+---Whether a selection taken from a window that no longer has focus still comes from the "active
+---editor": its buffer is the one the agents see as the current one (the last focused file, or a
+---terminal focused since; known only while selection tracking runs) and is shown in the current
+---tab page. VS Code keeps activeTextEditor while its terminal has focus (copilot.md §4.9).
 ---@param sel table agent.editor.selection
 ---@param s agent.Selection
 ---@return boolean
 local function still_active(sel, s)
   local b = s.bufnr
-  if not sel.is_running() or not b or not api.nvim_buf_is_loaded(b) or api.nvim_buf_get_name(b) ~= s.path
-    or sel.last_focused_buf() ~= b then
+  if not sel.is_running() or not b or not api.nvim_buf_is_loaded(b) or sel.path_of(b) ~= s.path
+    or sel.active_buf() ~= b then
     return false
   end
   for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do

@@ -327,7 +327,9 @@ local function render_selection(s, kind)
   return {
     text = s.text or '',
     filePath = s.path,
-    fileUrl = util.file_url(s.path),
+    -- A buffer that is not a file (a terminal) goes by its nvim://buffer/<n>/<label> id in both
+    -- (Claude shows the basename: "In fish"); the agent reads it with the controller's read_buffer.
+    fileUrl = context.is_buffer_uri(s.path) and s.path or util.file_url(s.path),
     selection = { start = start, ['end'] = finish, isEmpty = s.is_empty and true or false },
   }
 end
@@ -680,8 +682,10 @@ tools[#tools + 1] = {
       obj.success = true
       return json_text(obj)
     end
+    -- (Selection tracking unavailable, or nothing reported yet while an ignored window such as the
+    -- agent terminal has focus: never report that window by its raw name.)
     local name = vim.api.nvim_buf_get_name(0)
-    if name == '' then
+    if name == '' or not context.is_file_buffer(vim.api.nvim_get_current_buf()) then
       return json_text({ success = false, message = 'No active editor found' })
     end
     return json_text({

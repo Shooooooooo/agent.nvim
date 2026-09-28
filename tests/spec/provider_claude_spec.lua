@@ -543,6 +543,10 @@ end)
 describe('selection_changed', function()
   before_each(function()
     assert.truthy(P.start())
+    -- The empty buffer that has focus would be reported itself (nvim://buffer/<n>/scratch): the
+    -- synthetic selections below are the context.
+    require('agent.editor.selection')._reset()
+    vim.b.agent_ignore = true
   end)
 
   it('reaches Claude only after the post-connect delay, 0-based, deduplicated', function()
@@ -622,6 +626,98 @@ describe('selection_changed', function()
     vim.wait(150)
     assert.eq(0, #c.notifications('selection_changed'))
     assert.eq(0, #o.notifications('selection_changed'))
+  end)
+
+  it('sends a buffer that is not a file under its nvim://buffer/ id, in filePath and fileUrl', function()
+    local c = track(claude_client())
+    local o = track(opencode_client())
+    wait_ready(2)
+    c.clear()
+    o.clear()
+    P.on_selection(sel({ path = 'nvim://buffer/12/fish', text = 'error: x\nfailed', start = { line = 3, character = 0 },
+      finish = { line = 4, character = 6 }, mode = 'v' }))
+    assert.same({
+      text = 'error: x\nfailed',
+      filePath = 'nvim://buffer/12/fish',
+      fileUrl = 'nvim://buffer/12/fish',
+      selection = { start = { line = 3, character = 0 }, ['end'] = { line = 4, character = 6 }, isEmpty = false },
+    }, c.take('selection_changed').params)
+    -- OpenCode: the same id, and line_offset as usual.
+    assert.same({
+      text = 'error: x\nfailed',
+      filePath = 'nvim://buffer/12/fish',
+      fileUrl = 'nvim://buffer/12/fish',
+      selection = { start = { line = 4, character = 1 }, ['end'] = { line = 5, character = 7 }, isEmpty = false },
+    }, o.take('selection_changed').params)
+    -- The cursor only ("In fish").
+    P.on_selection(sel({ path = 'nvim://buffer/12/fish', start = { line = 7, character = 2 } }))
+    local n = c.take('selection_changed')
+    assert.eq('', n.params.text)
+    assert.eq('nvim://buffer/12/fish', n.params.fileUrl)
+    assert.same({ start = { line = 7, character = 2 }, ['end'] = { line = 7, character = 2 }, isEmpty = true },
+      n.params.selection)
+    assert.same({ line = 8, character = 3 }, o.take('selection_changed').params.selection.start)
+  end)
+
+  it('reports a focused terminal (not the agent\'s) by its nvim://buffer/ id, live and from the tools', function()
+    local selection = require('agent.editor.selection')
+    selection._reset()
+    config.setup({ providers = { claude = { lock_dir = LOCK_DIR, notify_delay_ms = 80 } },
+      selection = { debounce_ms = 20 } })
+    selection.start()
+    local unsubscribe = selection.subscribe(P.on_selection) -- as agent.nvim forwards it
+    local c = track(claude_client())
+    wait_ready(1)
+    c.clear()
+    vim.cmd('botright vnew')
+    local job = vim.fn.jobstart({ '/bin/sh', '-c', 'echo "boom: it failed"; exec sleep 30' }, { term = true })
+    local term = vim.api.nvim_get_current_buf()
+    local ok, err = pcall(function()
+      local id = ('nvim://buffer/%d/sh'):format(term)
+      local n = c.wait(function(m)
+        return m.method == 'selection_changed' and m.params.filePath == id
+      end, 3000, 'selection_changed for the terminal')
+      assert.eq(id, n.params.fileUrl)
+      assert.eq('', n.params.text)
+      wait_for(function()
+        return vim.api.nvim_buf_get_lines(term, 0, 1, false)[1] == 'boom: it failed'
+      end, 3000, 'terminal output')
+      -- Its cursor is always sent at line 0, column 0: a cursor that moves (as it follows a
+      -- terminal's output) sends nothing.
+      local zero = { start = { line = 0, character = 0 }, ['end'] = { line = 0, character = 0 }, isEmpty = true }
+      assert.same(zero, n.params.selection)
+      selection.flush()
+      c.clear()
+      vim.api.nvim_win_set_cursor(0, { 2, 0 })
+      vim.api.nvim_exec_autocmds('CursorMoved', {})
+      selection.flush()
+      vim.wait(100)
+      assert.same({}, c.notifications('selection_changed'))
+      local latest = vim.json.decode(text_of(c.tool('getLatestSelection')))
+      assert.eq(id, latest.filePath)
+      assert.same(zero, latest.selection)
+      -- A Visual selection in the terminal (Normal mode) is a real selection.
+      vim.api.nvim_win_set_cursor(0, { 1, 0 })
+      vim.cmd('normal! 0vg_')
+      local v = c.wait(function(m)
+        return m.method == 'selection_changed' and m.params.text == 'boom: it failed'
+      end, 3000, 'the terminal selection')
+      assert.eq(id, v.params.filePath)
+      assert.same({ start = { line = 0, character = 0 }, ['end'] = { line = 0, character = 15 }, isEmpty = false },
+        v.params.selection)
+      local r = vim.json.decode(text_of(c.tool('getCurrentSelection')))
+      assert.eq(true, r.success)
+      assert.eq(id, r.filePath)
+      assert.eq(id, r.fileUrl)
+      assert.eq('boom: it failed', r.text)
+      vim.cmd('normal! \27')
+      r = vim.json.decode(text_of(c.tool('getLatestSelection')))
+      assert.eq(id, r.filePath)
+    end)
+    vim.fn.jobstop(job)
+    unsubscribe()
+    selection._reset()
+    assert.truthy(ok, err)
   end)
 
   it('replaces invalid UTF-8 with U+FFFD, so text frames stay valid', function()
@@ -978,9 +1074,17 @@ describe('compatibility tools', function()
     r = vim.json.decode(text_of(c.tool('getLatestSelection')))
     assert.eq(file, r.filePath)
     assert.falsy(r.success)
+    -- In an ignored window (the agent terminal), the latest selection is kept.
     vim.cmd('enew')
+    vim.b.agent_nvim_agent = 'claude'
+    vim.api.nvim_buf_set_name(0, 'term://' .. TMP .. '//4242:claude')
     r = vim.json.decode(text_of(c.tool('getCurrentSelection')))
-    assert.eq(true, r.success) -- the latest file selection is kept
+    assert.eq(true, r.success)
+    assert.eq(file, r.filePath)
+    -- With nothing reported yet, that window is never reported by its raw name.
+    require('agent.editor.selection')._reset()
+    r = vim.json.decode(text_of(c.tool('getCurrentSelection')))
+    assert.same({ success = false, message = 'No active editor found' }, r)
   end)
 end)
 

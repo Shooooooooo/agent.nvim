@@ -3,7 +3,9 @@
 -- Usage: nvim --headless -u NONE -i NONE -n -l copilot_provider.lua <repo_root> <tmp_dir>
 -- Prints one JSON line {lock, socket, ws, ide_dir} once listening. Then reads commands from stdin,
 -- one per line ("<word> [json]"), and prints one JSON line per command:
---   stats | select {path,start:[l,c],end:[l,c]} | cursor {path,line,col} | enew
+--   stats | select {path,start:[l,c],end:[l,c]} | cursor {path,line,col} | float
+--   terminal {text,col} (a shell terminal that printed text; Visual selection from byte col to the
+--   end of the line, forwarded as agent.nvim does) | escape
 --   accept <tab> | reject <tab> | closeui <tab>
 --   diffinfo <tab> | diag {path,items} | write {path,text} | buflines <path> | launch {cwd}
 --   stop | quit (or EOF)
@@ -90,8 +92,28 @@ function handlers.cursor(a)
   return { ok = true }
 end
 
-function handlers.enew()
-  vim.cmd('enew')
+-- A floating window (a picker): ignored by selection tracking.
+function handlers.float()
+  api.nvim_open_win(api.nvim_create_buf(false, true), true, { relative = 'editor', row = 1, col = 1, width = 20, height = 3 })
+  return { ok = true }
+end
+
+function handlers.terminal(a)
+  vim.cmd('botright vnew')
+  local job = vim.fn.jobstart({ '/bin/sh', '-c', 'printf "%s\\n" "$0"; exec sleep 60', a.text }, { term = true })
+  local buf = api.nvim_get_current_buf()
+  local shown = vim.wait(5000, function()
+    return api.nvim_buf_get_lines(buf, 0, 1, false)[1] == a.text
+  end, 20)
+  api.nvim_win_set_cursor(0, { 1, a.col })
+  vim.cmd('normal! vg_')
+  local sel = require('agent.editor.selection').current()
+  P.on_selection(sel)
+  return { ok = shown and job > 0, bufnr = buf, path = sel and sel.path or vim.NIL, text = sel and sel.text or vim.NIL }
+end
+
+function handlers.escape()
+  vim.cmd('normal! \27')
   return { ok = true }
 end
 

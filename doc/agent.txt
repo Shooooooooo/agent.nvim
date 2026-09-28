@@ -578,10 +578,32 @@ Any extra entry under `agents` becomes an agent. It needs `cmd` and
 
                                                                *agent-context*
 What the agent sees ~
-There is nothing to send by hand: agent.nvim reports the file you are in and
-your visual selection to the agent as they change (`selection.track`).
-While the agent's terminal has focus, the last file you were in stays the
-current one.
+There is nothing to send by hand: agent.nvim reports the buffer you are in
+and your visual selection to the agent as they change (`selection.track`).
+- A file is reported by its path, and so is a buffer named after a file on
+  disk, such as a |:help| file.
+- Any other buffer is reported as `nvim://buffer/<n>/<label>`: a terminal
+  other than the agent's, a quickfix list, a file explorer, a scratch
+  buffer. The label is the program a terminal runs ("fish"), else the
+  'filetype' ("qf", "NvimTree"), else the last part of the buffer name, else
+  "scratch". Claude shows "In fish". A Visual selection in a terminal
+  (Normal mode) is sent with its text, like one in a file. The cursor in
+  such a buffer is not: it is always sent at the start of the buffer, so
+  that a terminal whose cursor follows its output sends nothing new. The
+  agent reads such a buffer with the $NVIM controller's read_buffer, which
+  takes that path (|agent-nvim-mcp-tools|); a terminal's last 200 lines by
+  default. Gemini gets it as its active file, but never in its list of
+  recent files.
+- Ignored: the agent's own terminal, the command-line window, buffers with
+  |b:agent_ignore|, and:
+  - agent-diff:// buffers (|agent-diff|): a diff's proposal, and the
+    read-only copy of the original it shows when it cannot use your buffer.
+    When the left side of a diff is your own buffer of the file, it is
+    reported as that file.
+  - A buffer that is not a file, in a floating window (pickers, popups,
+    notifications). A file in a floating window is reported.
+  While one of them has focus, the last buffer you were in stays the
+  current one.
 
 Select lines, then switch to the agent straight from Visual mode: with <C-w>j
 to the agent's split below (the default; <C-w>l to a split on the right), or
@@ -590,11 +612,12 @@ the agent is hidden. Where the focus is 50 ms after you leave Visual mode
 decides what happens to the selection:
 - A file window (<Esc>, y, d, >, a click in the file, <C-w>k to another
   file): the selection is dropped, and the agent sees just the file and the
-  cursor.
-- The agent window or another non-file window (<C-w>j, a click in the
-  terminal, a Visual-mode mapping to `<cmd>AgentOpen<cr>`): the selection is
-  kept for your next prompt. It is dropped when a file window has focus
-  again.
+  cursor. The same goes for another reported buffer, such as a terminal
+  that is not the agent's: the agent then sees that buffer.
+- An ignored window (<C-w>j to the agent window, a click in it, a
+  Visual-mode mapping to `<cmd>AgentOpen<cr>`, a floating picker): the
+  selection is kept for your next prompt. It is dropped when a reported
+  window has focus again.
 - `:` from Visual mode keeps the selection while the command line, or the
   command-line window (q:, <C-f>), is open. Once the command has run, the
   same rule applies: the selection is dropped when a file window has focus
@@ -604,7 +627,9 @@ decides what happens to the selection:
   the agent window: an operator (d, >, J), `:'<,'>s/a/b/`, a block insert
   (I, $A) or a formatter. A write, such as an autosave, does not. Neither
   does a change elsewhere in the file: when a line is added above the
-  selection, the selection follows its text.
+  selection, the selection follows its text. In a terminal, which you
+  cannot edit, the selection is kept as you made it, although its text
+  changes with the output and when the agent's split resizes it.
 - A blockwise selection made with $ extends to the end of every line, as
   y yanks it.
 
@@ -847,13 +872,19 @@ tools.
                                                         *agent-nvim-mcp-tools*
 Tools ~
 All line numbers are 1-based and inclusive. A buffer can be given as a buffer
-number or a file path (absolute, or relative to Neovim's cwd). "Current"
-means the buffer in the main editor window, not the agent's terminal.
+number, a file path (absolute, or relative to Neovim's cwd) or an
+`nvim://buffer/` path from the IDE connection. "Current" means the buffer in
+the main editor window, not the agent's terminal.
 
 read_buffer
     buffer? (default: current), start_line? (default 1), end_line? (default
     -1, the last line). A header "<path> (lines a-b of N)", then numbered
     lines. Includes unsaved changes; a path with no buffer is read from disk.
+    buffer also takes the `nvim://buffer/<n>[/<label>]` paths under which
+    the IDE connection reports buffers that are not files (|agent-context|),
+    and fails for a buffer that no longer exists and for buffer 0 in such a
+    path. For a terminal, the default range is its last 200 lines, up to
+    the last one with text.
 open_file
     path, line?, column?, end_line?, split? ("none", "horizontal",
     "vertical", "tab"). Opens in the main editor window (never in the agent
@@ -1101,7 +1132,9 @@ b:agent_diff_id         Diff proposal and scratch original buffers: the diff
 t:agent_diff            Diff tab pages: the diff id.
                                                               *b:agent_ignore*
 b:agent_ignore          Set it yourself: when true, the buffer is not
-                        reported as a selection or an open file.
+                        reported as a selection or an open file, and
+                        focusing it keeps the previous context
+                        (|agent-context|).
                                                          *g:loaded_agent_nvim*
 g:loaded_agent_nvim     Load guard of plugin/agent.lua.
 
@@ -1164,8 +1197,9 @@ The agent does not see the selection ~
     Check that it is connected (|:AgentStatus| shows a client) and that
     `selection.track` is on. The selection is dropped when you leave Visual
     mode in the file (for example with <Esc>), when you go back to a file
-    window and when its text changes: select again and switch to the agent
-    straight from Visual mode.
+    window or to another reported buffer (a terminal that is not the
+    agent's, |agent-context|) and when its text changes: select again and
+    switch to the agent straight from Visual mode.
     Copilot attaches only a non-empty selection (|agent-context|).
 "could not write the Claude lock file: E739: ..." ~
     Shown at setup() with `auto_start`, or when Claude or OpenCode starts.

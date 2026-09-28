@@ -189,6 +189,64 @@ describe('nvim_mcp remote', function()
       vim.env.post = nil
     end)
 
+    it('reads a buffer by its IDE context id nvim://buffer/<n>[/<label>], and a terminal by its tail', function()
+      vim.cmd('botright vnew')
+      local job = fn.jobstart({ '/bin/sh', '-c', 'i=1; while [ $i -le 250 ]; do echo "out $i"; i=$((i+1)); done; '
+        .. 'exec sleep 30' }, { term = true })
+      assert.truthy(job > 0, 'jobstart failed')
+      jobs[#jobs + 1] = job
+      local term = api.nvim_get_current_buf()
+      local last
+      wait_for(function()
+        for i, l in ipairs(api.nvim_buf_get_lines(term, 0, -1, false)) do
+          if l == 'out 250' then
+            last = i
+            return true
+          end
+        end
+        return false
+      end, 5000, 'terminal output')
+      local name, total = api.nvim_buf_get_name(term), api.nvim_buf_line_count(term)
+      assert.truthy(total > last, 'the empty rows below the output')
+      -- The last 200 lines, up to the last one with text.
+      local tail = ('%s (lines %d-%d of %d)'):format(name, last - 199, last, total)
+      for _, spec in ipairs({ ('nvim://buffer/%d/sh'):format(term), ('nvim://buffer/%d'):format(term), term,
+        tostring(term) }) do
+        local text = ok_text('read_buffer', { buffer = spec })
+        local lines = vim.split(text, '\n')
+        assert.eq(tail, lines[1], vim.inspect(spec))
+        assert.eq(201, #lines)
+        assert.eq(('%6d\tout 51'):format(last - 199), lines[2])
+        assert.eq(('%6d\tout 250'):format(last), lines[201])
+      end
+      -- A range reads what it names, as for any buffer.
+      assert.eq(name .. ' (lines 1-2 of ' .. total .. ')\n     1\tout 1\n     2\tout 2',
+        ok_text('read_buffer', { buffer = ('nvim://buffer/%d/sh'):format(term), start_line = 1, end_line = 2 }))
+      assert.matches(' %(lines 250%-' .. total .. ' of ' .. total .. '%)\n',
+        ok_text('read_buffer', { buffer = term, start_line = 250 }))
+      -- Another buffer that is not a file.
+      local scratch = api.nvim_create_buf(true, true)
+      api.nvim_buf_set_lines(scratch, 0, -1, false, { 'a', 'b' })
+      assert.eq(('[No Name] (buffer %d) (lines 1-2 of 2)\n     1\ta\n     2\tb'):format(scratch),
+        ok_text('read_buffer', { buffer = ('nvim://buffer/%d/scratch'):format(scratch) }))
+      -- Unknown, wiped or malformed ids.
+      api.nvim_buf_delete(scratch, { force = true })
+      assert.matches('no buffer with number ' .. scratch .. ' %(nvim://buffer/' .. scratch .. '/scratch%): it was closed',
+        err_text('read_buffer', { buffer = ('nvim://buffer/%d/scratch'):format(scratch) }))
+      assert.matches('no buffer with number 99999', err_text('read_buffer', { buffer = 'nvim://buffer/99999/sh' }))
+      assert.matches('invalid Neovim buffer id nvim://buffer/sh', err_text('read_buffer', { buffer = 'nvim://buffer/sh' }))
+      assert.matches('invalid Neovim buffer id', err_text('read_buffer', { buffer = 'nvim://buffer/' }))
+      -- Buffer 0 in an id names no buffer (to the API it is whatever buffer is current), while a
+      -- plain 0 is still the main editor buffer, not the terminal that has focus.
+      assert.eq(term, api.nvim_get_current_buf())
+      for _, spec in ipairs({ 'nvim://buffer/0/sh', 'nvim://buffer/0', 'nvim://buffer/00/x' }) do
+        assert.matches('^invalid Neovim buffer id ' .. vim.pesc(spec) .. ': buffer numbers start at 1$',
+          err_text('read_buffer', { buffer = spec }))
+      end
+      assert.eq(ok_text('read_buffer', {}), ok_text('read_buffer', { buffer = 0 }))
+      assert.falsy(ok_text('read_buffer', { buffer = 0 }):find(name, 1, true))
+    end)
+
     it('resolves relative paths against the working directory', function()
       local f = write('rel.txt', { 'rel' })
       vim.cmd('edit ' .. f)
@@ -548,6 +606,8 @@ describe('nvim_mcp server (in process)', function()
       clientInfo = { name = 't', version = '1' } })
     local init = reply_for(1)
     assert.eq('2025-06-18', init.result.protocolVersion)
+    assert.matches('An IDE context path starting with nvim://buffer/ is a Neovim buffer %(e%.g%. a terminal%); read it '
+      .. 'with read_buffer using that path, not with your own file tools%.', init.result.instructions)
     request(2, 'tools/list', vim.empty_dict())
     local tools = reply_for(2).result.tools
     local names = {}

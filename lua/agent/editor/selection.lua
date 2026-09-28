@@ -1,18 +1,29 @@
 ---@mod agent.editor.selection Selection, cursor and recently-focused-file tracking
 ---
---- Tracks, for file buffers only (see context.is_file_buffer: terminals, `agent-diff://` and
---- other special buffers are ignored):
----  * the latest selection: a live visual/select-mode selection, or the cursor position;
+--- Tracks the buffers the user works in (kind()):
+---  * files ('file'): file buffers (context.is_file_buffer) and buffers named after a file that
+---    exists on disk (:help files), reported by their path;
+---  * other buffers ('buffer'): terminals, nofile, quickfix and prompt buffers, file explorers,
+---    unnamed scratch buffers, reported as `nvim://buffer/<bufnr>/<label>` (context.buffer_uri(),
+---    e.g. nvim://buffer/12/fish), which the $NVIM controller's read_buffer reads;
+---  * ignored (nil): the agent's own terminal, agent.nvim's diff buffers (`agent-diff://`), buffers
+---    marked with `b:agent_ignore`, and any other buffer in a floating window (pickers, popups,
+---    notifications) or in the command-line window. Focusing them keeps the previous context.
+--- and keeps:
+---  * the latest selection: a live visual/select-mode selection, or the cursor position (always
+---    line 0, column 0 in a buffer that is not a file: see cursor_selection());
 ---  * the last selection of every buffer (get(), last_visual());
 ---  * the recently focused files with wall-clock focus timestamps (recent_files(); Gemini's
----    `openFiles`). This tracker lives here, not in context.lua, because it shares the autocmds.
+---    `openFiles`; files only). This tracker lives here, not in context.lua, because it shares the
+---    autocmds.
 --- Subscribers are called on the main loop after `config.selection.debounce_ms` of quiet.
 ---
 --- Leaving Visual mode ("demotion", as in claudecode.nvim): the selection is captured at once and
 --- held for a grace period of M.DEMOTE_MS. When it ends, the selection is dropped (the cursor is
---- reported) if a file window has focus: <Esc>, y, d, >, a click in the file, another file window.
---- If the focus went elsewhere, typically straight from Visual mode to the agent terminal (<C-w>l,
---- a `<cmd>AgentToggle<cr>` mapping), the selection is kept for the agent until a file window has
+--- reported) if a reported window has focus: <Esc>, y, d, >, a click in the file, another file
+--- window, a terminal other than the agent's (whose cursor is then reported). If the focus went to
+--- an ignored window, typically straight from Visual mode to the agent terminal (<C-w>l, a
+--- `<cmd>AgentToggle<cr>` mapping), the selection is kept for the agent until a reported window has
 --- focus again. Re-entering Visual mode cancels the grace period. A command line opened from Visual
 --- mode (':', which leaves Visual mode first, or a search, which does not), and the command-line
 --- window opened from it (q:, <C-f>), pause it: the selection is kept while they are open, and the
@@ -27,13 +38,16 @@
 --- when an autosave wrote the buffer right after it. The text is not compared: keys typed in a burst
 --- are not seen one by one, so the text last seen may be that of a smaller selection. Writes do not
 --- count, and edits seen while Visual mode was still active (TextChanged: a formatter, a plugin, a
---- reload) do not either. An operator that changes nothing (u on lowercase text, y) keeps it.
+--- reload) do not either. An operator that changes nothing (u on lowercase text, y) keeps it. In a
+--- buffer that is not 'modifiable' (a terminal, whose output changes it) no operator can consume it.
 ---
 --- While the selection is held, extmarks track its region: a change to its text drops it (a command
 --- run from Visual mode such as :'<,'>s or !sort, a block insert with I or $A, a formatter), a
 --- change elsewhere keeps it where the text moved (a line inserted above). The text is read in the
 --- window it was selected in ('list' changes the width of a tab in a block). A blockwise selection
---- made with $ extends to the end of every line, as y yanks it.
+--- made with $ extends to the end of every line, as y yanks it. A selection held in a terminal is
+--- kept as it was captured: the user cannot edit a terminal, and its text changes with the output
+--- and when its window is resized (lines reflow when the agent split opens).
 local util = require('agent.util')
 local context = require('agent.editor.context')
 
@@ -59,7 +73,8 @@ M.DEMOTE_MS = 50
 ---@field character integer  0-based byte column
 
 ---@class agent.Selection
----@field path string          absolute path (the buffer name)
+---@field path string          absolute path (the buffer name) of a file; `nvim://buffer/<bufnr>/<label>`
+---  for another buffer (context.buffer_uri(), context.is_buffer_uri())
 ---@field bufnr integer
 ---@field text string          '' for a cursor-only position
 ---@field start agent.Position
@@ -67,7 +82,8 @@ M.DEMOTE_MS = 50
 ---@field is_empty boolean     text == ''
 ---@field mode 'n'|'v'|'V'|'\22'  'n' = cursor only; select modes are reported as their visual equivalent
 ---@field linewise boolean
----@field cursor agent.Position  cursor position when captured
+---@field cursor agent.Position  cursor position when captured (line 0, column 0 for a cursor-only
+---  position in a buffer that is not a file)
 ---@field start_line integer   1-based first line
 ---@field end_line integer     1-based last line (inclusive)
 
@@ -89,6 +105,9 @@ local function new_state()
     -- Visual mode, to detect an operator that consumed the selection (flush_visual())
     visual_entry = nil,
     recent = {}, -- MRU of focused file buffers: { bufnr, path, timestamp }
+    -- { bufnr, timestamp }: the buffer of the latest selection and when it got it (recent_files()
+    -- dates a non-file buffer with it)
+    focus = nil,
     seeded = false,
     last_ts = 0,
     debounced = nil,
@@ -125,10 +144,78 @@ local function in_cmdwin()
   return vim.fn.getcmdwintype() ~= ''
 end
 
+---The agent's own terminal: the buffer of agent.terminal, or one it marked with b:agent_nvim_agent
+---(also after the agent exited, while its terminal is left open).
+---@param bufnr integer
+---@return boolean
+local function is_agent_terminal(bufnr)
+  if vim.b[bufnr].agent_nvim_agent then
+    return true
+  end
+  local term = package.loaded['agent.terminal']
+  if type(term) ~= 'table' or type(term.bufnr) ~= 'function' then
+    return false
+  end
+  local ok, b = pcall(term.bufnr)
+  return ok and b == bufnr
+end
+
+---How a buffer is reported to the agents, when it has focus in window `win`:
+---  'file'    a file buffer, or a buffer named after a file on disk (:help): by its path;
+---  'buffer'  another buffer: as `nvim://buffer/<bufnr>/<label>`;
+---  nil       ignored (not loaded, the agent's terminal, agent.nvim's diff buffers, b:agent_ignore,
+---            the command-line window, or a non-file buffer in a floating window): focusing it
+---            keeps the previous context.
+---@param bufnr integer
+---@param win? integer  the window showing it; without it, floating windows are not considered
+---@return 'file'|'buffer'|nil
+function M.kind(bufnr, win)
+  if not bufnr or not api.nvim_buf_is_valid(bufnr) or not api.nvim_buf_is_loaded(bufnr) then
+    return nil
+  end
+  if context.is_file_buffer(bufnr) then
+    return 'file'
+  end
+  local b = vim.b[bufnr]
+  if b.agent_ignore or b.agent_diff_id ~= nil or is_agent_terminal(bufnr)
+    or vim.startswith(api.nvim_buf_get_name(bufnr), 'agent-diff://') then
+    return nil
+  end
+  if context.is_disk_file(bufnr) then
+    return 'file'
+  end
+  if win and api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative ~= '' then
+    return nil
+  end
+  if in_cmdwin() and bufnr == api.nvim_get_current_buf() then
+    return nil
+  end
+  return 'buffer'
+end
+
+---A loaded file buffer (kind() 'file'): reported by its path, and listed in recent_files().
 ---@param bufnr integer
 ---@return boolean
 function M.is_trackable(bufnr)
-  return context.is_file_buffer(bufnr) and api.nvim_buf_is_loaded(bufnr)
+  return M.kind(bufnr) == 'file'
+end
+
+---The buffer in `win` is reported to the agents (kind() is not nil).
+---@param bufnr integer
+---@param win? integer
+---@return boolean
+local function reportable(bufnr, win)
+  return M.kind(bufnr, win) ~= nil
+end
+
+---The path a buffer is reported under: its name for a file, context.buffer_uri() for another buffer.
+---@param bufnr integer
+---@return string
+function M.path_of(bufnr)
+  if M.is_trackable(bufnr) then
+    return api.nvim_buf_get_name(bufnr)
+  end
+  return context.buffer_uri(bufnr)
 end
 
 local function now_wall_ms()
@@ -146,15 +233,22 @@ local function next_timestamp()
   return ts
 end
 
+---The cursor as an empty selection. In a buffer that is not a file it is always at line 0, column 0:
+---where the cursor is means nothing to the agents (they read such a buffer whole, with read_buffer),
+---and in a terminal it follows the output, which would send an event on every debounce.
 ---@param bufnr integer
 ---@param win integer|nil
 ---@param pos? integer[]  {row, col} (default: the cursor of `win`)
 ---@return agent.Selection
 local function cursor_selection(bufnr, win, pos)
+  local path = M.path_of(bufnr)
+  if context.is_buffer_uri(path) then
+    pos = { 1, 0 }
+  end
   pos = pos or api.nvim_win_get_cursor(win)
   local p = { line = pos[1] - 1, character = pos[2] }
   return {
-    path = api.nvim_buf_get_name(bufnr),
+    path = path,
     bufnr = bufnr,
     text = '',
     start = p,
@@ -304,7 +398,7 @@ end
 ---@return agent.Selection
 local function make_selection(buf, text, kind, start, finish, cursor)
   return {
-    path = api.nvim_buf_get_name(buf),
+    path = M.path_of(buf),
     bufnr = buf,
     text = text,
     start = start,
@@ -456,12 +550,12 @@ local function edited_since(snap, buf)
   return vim.bo[buf].modified or delta > (snap.modified and 1 or 0)
 end
 
----Selection in the current window, or nil when its buffer is not trackable.
+---Selection in the current window, or nil when it is ignored (kind()).
 ---@return agent.Selection|nil
 local function compute()
   local win = api.nvim_get_current_win()
   local buf = api.nvim_win_get_buf(win)
-  if not M.is_trackable(buf) then
+  if not reportable(buf, win) then
     return nil
   end
   local mode = api.nvim_get_mode().mode
@@ -485,20 +579,29 @@ local function compute()
         return held.selection
       end
     end
-    -- The cursor moved or the text changed (y, d, >, a click...), or another file window has
+    -- The cursor moved or the text changed (y, d, >, a click...), or another reported window has
     -- focus: the selection is dropped before the grace period ends.
     cancel_demotion()
   end
   return cursor_selection(buf, win)
 end
 
+---Note the buffer of the latest selection, and when it got it.
+---@param bufnr integer
+local function note_focus(bufnr)
+  if not state.focus or state.focus.bufnr ~= bufnr then
+    state.focus = { bufnr = bufnr, timestamp = next_timestamp() }
+  end
+end
+
 ---Recompute the latest selection from the current window (no events).
----@return agent.Selection|nil selection  nil when the current buffer is not trackable
+---@return agent.Selection|nil selection  nil when the current window is ignored
 local function refresh()
   local s = compute()
   if s then
     state.latest = s
     remember(s)
+    note_focus(s.bufnr)
   end
   return s
 end
@@ -529,7 +632,7 @@ local function flush_visual(kind, live)
   local snap = state.visual_entry
   state.visual_entry = nil
   release_held()
-  if not M.is_trackable(buf) then
+  if not reportable(buf, win) then
     return false
   end
   local p1, p2
@@ -548,7 +651,8 @@ local function flush_visual(kind, live)
   -- last seen in Visual mode. Only an edit counts, not a write (`:noautocmd write` by an autosave).
   -- The text is not compared: after keys typed in a burst, the selection last seen may be smaller
   -- than the one the operator consumed, and the region left may hold that text again by chance.
-  local consumed = seen and edited_since(snap, buf)
+  -- No operator edits a buffer that is not 'modifiable' (a terminal changes with its output).
+  local consumed = seen and vim.bo[buf].modifiable and edited_since(snap, buf)
   local s = p1 and not consumed and region_selection(buf, win, p1, p2, kind, dollar) or nil
   if not s or s.is_empty then
     -- Nothing to hold: report the cursor now, so that a switch to the agent terminal before the
@@ -576,6 +680,7 @@ local function flush_visual(kind, live)
   state.held = h
   state.latest = s
   remember(s)
+  note_focus(buf)
   return true
 end
 
@@ -598,6 +703,13 @@ local function held_stale()
   end
   if not api.nvim_buf_is_loaded(h.bufnr) then
     return true
+  end
+  if vim.bo[h.bufnr].buftype == 'terminal' and not vim.bo[h.bufnr].modifiable then
+    -- The user cannot edit a (running) terminal, so nothing can consume the selection: its text
+    -- changes with the output, and when its window is resized (the agent split opening: long lines
+    -- reflow, blank rows below the prompt go). The selection is kept as it was captured. A finished
+    -- terminal made 'modifiable' is checked like any other buffer.
+    return false
   end
   local tick = api.nvim_buf_get_changedtick(h.bufnr)
   if tick == h.tick then
@@ -654,15 +766,15 @@ local function held_stale()
   return false
 end
 
----The cursor of the file window the agent sees as the current one, other than one showing
----`except`: the current window, else a window of the current tab page showing the most recently
----focused file.
+---The cursor of the window the agent sees as the current one, other than one showing `except`: the
+---current window when it is reported, else a window of the current tab page showing the most
+---recently focused file.
 ---@param except integer
 ---@return agent.Selection|nil
 local function fallback_cursor(except)
   local cur = api.nvim_get_current_win()
   local buf = api.nvim_win_get_buf(cur)
-  if buf ~= except and M.is_trackable(buf) then
+  if buf ~= except and reportable(buf, cur) then
     return cursor_selection(buf, cur)
   end
   local wins = api.nvim_tabpage_list_wins(0)
@@ -679,8 +791,8 @@ local function fallback_cursor(except)
 end
 
 ---`bufnr` is unloaded or deleted: the selection held in it, or last reported in it, is gone. Report
----the cursor of the current file window instead, or nothing when there is none, so that every
----consumer agrees.
+---the cursor of the current reported window or file window instead, or nothing when there is none,
+---so that every consumer agrees.
 ---@param bufnr integer
 local function lose(bufnr)
   if state.visual_entry and state.visual_entry.bufnr == bufnr then
@@ -694,19 +806,20 @@ local function lose(bufnr)
     state.latest = ok and s or nil
     if state.latest then
       remember(state.latest)
+      note_focus(state.latest.bufnr)
     end
   end
 end
 
 ---Drop the held selection now, wherever the focus is: report the cursor of its buffer, as the
----grace period would in a file window.
+---grace period would in a reported window.
 local function drop_held()
   local h = state.held
   cancel_demotion()
   if refresh() or not h then
-    return -- a file window has focus: refresh() reported its cursor
+    return -- a reported window has focus: refresh() reported its cursor
   end
-  if not M.is_trackable(h.bufnr) then
+  if not reportable(h.bufnr) then
     lose(h.bufnr) -- unloaded
     return
   end
@@ -714,6 +827,7 @@ local function drop_held()
   local s = cursor_selection(h.bufnr, win, not win and h.pos or nil)
   state.latest = s
   remember(s)
+  note_focus(h.bufnr)
 end
 
 ---@param bufnr integer
@@ -752,14 +866,21 @@ end
 
 ---@param bufnr integer
 local function renamed(bufnr)
-  if not M.is_trackable(bufnr) then
+  local kind = M.kind(bufnr)
+  if not kind then
     forget(bufnr)
     return
   end
-  local path = api.nvim_buf_get_name(bufnr)
-  for _, r in ipairs(state.recent) do
+  -- A buffer that is no longer a file (a terminal started in it, say) leaves the recent files.
+  local path = kind == 'file' and api.nvim_buf_get_name(bufnr) or nil
+  for i = #state.recent, 1, -1 do
+    local r = state.recent[i]
     if r.bufnr == bufnr and r.path ~= path then
-      r.path = path
+      if path then
+        r.path = path
+      else
+        table.remove(state.recent, i)
+      end
       state.files_dirty = true
     end
   end
@@ -873,7 +994,7 @@ local function on_mode_changed()
   if is then
     -- Visual mode entered, or still active (v -> V, back from a search): see flush_visual().
     local buf = api.nvim_get_current_buf()
-    if M.is_trackable(buf) then
+    if reportable(buf, api.nvim_get_current_win()) then
       snapshot(buf, is)
     else
       state.visual_entry = nil
@@ -1035,9 +1156,9 @@ function M.flush()
   fire()
 end
 
----The latest selection in a file buffer. When the current window shows a trackable buffer, the
----selection is computed now (`live` = true); otherwise (e.g. the agent terminal has focus) the last
----known selection is returned (`live` = false).
+---The latest selection. When the current window is reported (kind()), the selection is computed
+---now (`live` = true); otherwise (e.g. the agent terminal has focus) the last known selection is
+---returned (`live` = false).
 ---@return agent.Selection|nil s, boolean live
 function M.current()
   local s = refresh()
@@ -1047,7 +1168,7 @@ function M.current()
   return state.latest, false
 end
 
----@param which integer|string|nil  bufnr or path; nil = current buffer
+---@param which integer|string|nil  bufnr, path or nvim://buffer/ id; nil = current buffer
 ---@return integer|nil
 local function resolve_buf(which)
   if which == nil or which == 0 then
@@ -1056,11 +1177,14 @@ local function resolve_buf(which)
   if type(which) == 'number' then
     return which
   end
+  if context.is_buffer_uri(which) then
+    return context.bufnr_from_uri(which)
+  end
   return context.find_buf(which)
 end
 
 ---Last selection (visual or cursor) recorded in a buffer.
----@param which integer|string|nil bufnr or path; nil = current buffer
+---@param which integer|string|nil bufnr, path or nvim://buffer/ id; nil = current buffer
 ---@return agent.Selection|nil
 function M.get(which)
   local b = resolve_buf(which)
@@ -1072,7 +1196,7 @@ function M.get(which)
 end
 
 ---Last non-empty visual selection recorded in a buffer (kept after the cursor moves on).
----@param which integer|string|nil bufnr or path; nil = current buffer
+---@param which integer|string|nil bufnr, path or nvim://buffer/ id; nil = current buffer
 ---@return agent.Selection|nil
 function M.last_visual(which)
   local b = resolve_buf(which)
@@ -1095,6 +1219,18 @@ function M.last_focused_buf()
     return state.latest.bufnr
   end
   return nil
+end
+
+---The buffer the agents see as the current one, also while an ignored window (the agent terminal)
+---has focus: the buffer of the latest selection when it is not a file (a terminal, say), else the
+---most recently focused file buffer (last_focused_buf()).
+---@return integer|nil bufnr
+function M.active_buf()
+  local s = state.latest
+  if s and context.is_buffer_uri(s.path) and reportable(s.bufnr) then
+    return s.bufnr
+  end
+  return M.last_focused_buf()
 end
 
 ---@param text string
@@ -1137,7 +1273,7 @@ local function buf_cursor(bufnr)
 end
 
 ---@class agent.RecentFile
----@field path string
+---@field path string         absolute path; with opts.buffers, the first entry may be a nvim://buffer/ id
 ---@field bufnr integer
 ---@field timestamp integer   wall-clock ms of the last focus (strictly increasing)
 ---@field is_active boolean|nil  true for the first (most recently focused) entry only
@@ -1147,7 +1283,11 @@ end
 ---Recently focused files, most recent first (Gemini `ide/contextUpdate.openFiles`). Only loaded file
 ---buffers whose file exists on disk. The first entry is the active file, even while the agent terminal
 ---has focus; it carries the cursor and the selected text.
----@param opts? { limit?: integer, max_selected?: integer }  defaults 10 and 16384 (UTF-16 units; '... [TRUNCATED]' is appended)
+---With `opts.buffers`, when the latest selection is in a buffer that is not a file (a terminal
+---other than the agent's, say), that buffer comes first instead, as the active entry, under its
+---nvim://buffer/ id and with the newest timestamp; the files follow. It never enters the list of
+---recent files: once a file has focus again, it is gone.
+---@param opts? { limit?: integer, max_selected?: integer, buffers?: boolean }  defaults 10, 16384 (UTF-16 units; '... [TRUNCATED]' is appended), false
 ---@return agent.RecentFile[]
 function M.recent_files(opts)
   opts = opts or {}
@@ -1157,6 +1297,12 @@ function M.recent_files(opts)
   touch_recent(api.nvim_get_current_buf())
   refresh()
   local out, seen = {}, {}
+  local latest = state.latest
+  local buffer = opts.buffers and limit > 0 and latest and context.is_buffer_uri(latest.path)
+    and reportable(latest.bufnr) and latest.bufnr or nil
+  if buffer then
+    out[1] = { path = M.path_of(buffer), bufnr = buffer, timestamp = 0 }
+  end
   for _, r in ipairs(state.recent) do
     if #out >= limit then
       break
@@ -1165,6 +1311,14 @@ function M.recent_files(opts)
       seen[r.path] = true
       out[#out + 1] = { path = r.path, bufnr = r.bufnr, timestamp = r.timestamp }
     end
+  end
+  if buffer then
+    -- The active entry must be the newest (Gemini sorts the entries by timestamp).
+    local ts = state.focus and state.focus.bufnr == buffer and state.focus.timestamp or 0
+    for i = 2, #out do
+      ts = math.max(ts, out[i].timestamp + 1)
+    end
+    out[1].timestamp = ts
   end
   local active = out[1]
   if active then
