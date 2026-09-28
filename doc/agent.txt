@@ -80,7 +80,6 @@ requires its protocol's auth token.
 lazy.nvim: >lua
     {
       'Shooooooooo/agent.nvim',
-      main = 'agent',
       opts = {},
       keys = {
         { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' },

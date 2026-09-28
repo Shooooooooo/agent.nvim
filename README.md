@@ -52,7 +52,6 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   'Shooooooooo/agent.nvim',
-  main = 'agent',
   opts = {},
   keys = {
     { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
