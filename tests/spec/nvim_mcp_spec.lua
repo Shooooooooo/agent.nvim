@@ -59,11 +59,6 @@ local function reset_editor()
       pcall(api.nvim_buf_delete, b, { force = true })
     end
   end
-  vim.diagnostic.reset()
-end
-
-local function lines_of(buf)
-  return api.nvim_buf_get_lines(buf, 0, -1, false)
 end
 
 describe('nvim_mcp remote', function()
@@ -129,95 +124,10 @@ describe('nvim_mcp remote', function()
     it('falls back to the last used file buffer when the tab has no editor window', function()
       local f = write('last.txt', { 'l1', 'l2' })
       vim.cmd('edit ' .. f)
-      api.nvim_win_set_cursor(0, { 2, 0 })
-      local _, term_buf = open_terminal()
+      open_terminal()
       vim.cmd('only')
-      local s = ok_json('get_editor_state')
-      assert.eq(fn.bufnr(f), s.current.bufnr)
-      assert.eq(2, s.current.cursor.line)
-      assert.eq(1, #s.windows)
-      assert.matches('\n     2\tl2$', ok_text('read_buffer'))
-      assert.truthy(term_buf ~= s.current.bufnr)
-    end)
-  end)
-
-  describe('get_editor_state', function()
-    it('reports the main editor buffer, windows and the last selection while in the terminal', function()
-      local f = write('state.txt', { 'one', 'two', 'three' })
-      vim.cmd('edit ' .. f)
-      api.nvim_win_set_cursor(0, { 2, 1 })
-      vim.cmd('normal! Vj\27')
-      local editor = api.nvim_get_current_win()
-      local term_win, term_buf = open_terminal()
-      local s = ok_json('get_editor_state')
-      assert.eq(fn.getcwd(), s.cwd)
-      assert.eq('string', type(s.mode))
-      assert.eq(fn.bufnr(f), s.current.bufnr)
-      assert.eq(api.nvim_buf_get_name(fn.bufnr(f)), s.current.path)
-      assert.eq(false, s.current.modified)
-      assert.same({ line = 3, col = 2 }, s.current.cursor) -- V then j keeps byte column 1 (0-based)
-      assert.same({ path = api.nvim_buf_get_name(fn.bufnr(f)), start_line = 2, end_line = 3, text = 'two\nthree' },
-        s.visual_selection)
-      assert.eq(2, #s.windows)
-      local by_id = {}
-      for _, w in ipairs(s.windows) do
-        by_id[w.winid] = w
-      end
-      assert.same({ winid = term_win, bufnr = term_buf, path = api.nvim_buf_get_name(term_buf), is_current = true,
-        is_terminal = true, is_floating = false }, by_id[term_win])
-      assert.eq(false, by_id[editor].is_terminal)
-      assert.eq(false, by_id[editor].is_current)
-      assert.eq(1, s.tabpage)
-      assert.eq(#fn.getbufinfo({ buflisted = 1 }), s.buffer_count)
-    end)
-
-    it('reports a live visual selection and null when there is none', function()
-      local f = write('sel.txt', { 'alpha', 'beta', 'gamma' })
-      vim.cmd('edit ' .. f)
-      local s = ok_json('get_editor_state')
-      assert.eq(nil, s.visual_selection)
-      -- the JSON really contains null
-      assert.matches('"visual_selection":null', ok_text('get_editor_state'))
-      vim.cmd('normal! 1Gvj')
-      s = ok_json('get_editor_state')
-      assert.eq('v', s.mode)
-      assert.eq(1, s.visual_selection.start_line)
-      assert.eq(2, s.visual_selection.end_line)
-      assert.eq('alpha\nb', s.visual_selection.text)
-      vim.cmd('normal! \27')
-    end)
-  end)
-
-  describe('list_buffers', function()
-    it('lists listed buffers, and unlisted ones on request', function()
-      local a = write('a.lua', { 'x', 'y' })
-      local b = write('b.txt', { 'z' })
-      vim.cmd('edit ' .. a)
-      vim.cmd('badd ' .. b)
-      local scratch = api.nvim_create_buf(false, true)
-      local list = ok_json('list_buffers')
-      local by_path = {}
-      for _, e in ipairs(list) do
-        if e.path then
-          by_path[e.path] = e
-        end
-        assert.truthy(e.bufnr ~= scratch, 'unlisted buffer should be hidden')
-      end
-      local ea = by_path[api.nvim_buf_get_name(fn.bufnr(a))]
-      local name_a = api.nvim_buf_get_name(fn.bufnr(a))
-      assert.same({ bufnr = fn.bufnr(a), path = name_a, name = fn.fnamemodify(name_a, ':~:.'),
-        filetype = vim.bo[fn.bufnr(a)].filetype, buftype = '', modified = false, loaded = true, line_count = 2,
-        is_current = true }, ea)
-      local eb = by_path[api.nvim_buf_get_name(fn.bufnr(b))]
-      assert.eq(false, eb.loaded)
-      assert.eq(0, eb.line_count)
-      assert.eq(false, eb.is_current)
-      local all = ok_json('list_buffers', { include_unlisted = true })
-      local found = false
-      for _, e in ipairs(all) do
-        found = found or e.bufnr == scratch
-      end
-      assert.truthy(found, 'unlisted buffer missing with include_unlisted')
+      assert.eq(nil, R.main_window())
+      assert.eq(api.nvim_buf_get_name(fn.bufnr(f)) .. ' (lines 1-2 of 2)\n     1\tl1\n     2\tl2', ok_text('read_buffer'))
     end)
   end)
 
@@ -271,11 +181,11 @@ describe('nvim_mcp remote', function()
       vim.env.post = 'EXPANDED'
       local f = write('$post.txt', { 'dollar' })
       assert.matches('%$post%.txt %(lines 1%-1 of 1%)\n     1\tdollar$', ok_text('read_buffer', { buffer = f }))
-      local res = ok_json('edit_buffer', { buffer = f, start_line = 1, end_line = 1, text = 'DOLLAR', save = true })
-      assert.matches('%$post%.txt$', res.path)
-      assert.same({ 'DOLLAR' }, fn.readfile(f))
       local opened = ok_json('open_file', { path = f })
-      assert.eq(res.bufnr, opened.bufnr)
+      assert.matches('%$post%.txt$', opened.path)
+      -- the path finds the buffer open_file created (unsaved changes show)
+      api.nvim_buf_set_lines(opened.bufnr, 0, -1, true, { 'DOLLAR' })
+      assert.matches('%$post%.txt %(lines 1%-1 of 1%)\n     1\tDOLLAR$', ok_text('read_buffer', { buffer = f }))
       vim.env.post = nil
     end)
 
@@ -288,80 +198,6 @@ describe('nvim_mcp remote', function()
       vim.cmd('cd ' .. fn.fnameescape(cwd))
       assert.truthy(ok, text)
       assert.matches('\n     1\trel$', text)
-    end)
-  end)
-
-  describe('edit_buffer', function()
-    local f, buf
-    before_each(function()
-      f = write('e.txt', { 'one', 'two', 'three' })
-      vim.cmd('edit ' .. f)
-      buf = api.nvim_get_current_buf()
-    end)
-
-    it('replaces an inclusive range', function()
-      local res = ok_json('edit_buffer', { buffer = buf, start_line = 2, end_line = 3, text = 'TWO\nTHREE\nFOUR' })
-      assert.same({ 'one', 'TWO', 'THREE', 'FOUR' }, lines_of(buf))
-      assert.same({ bufnr = buf, path = api.nvim_buf_get_name(buf), line_count = 4, modified = true, saved = false }, res)
-    end)
-
-    it('inserts with end_line = start_line - 1, appends, deletes and ignores one trailing newline', function()
-      ok_json('edit_buffer', { buffer = buf, start_line = 1, end_line = 0, text = 'zero\n' })
-      assert.same({ 'zero', 'one', 'two', 'three' }, lines_of(buf))
-      ok_json('edit_buffer', { buffer = buf, start_line = 5, end_line = 4, text = 'four' })
-      assert.same({ 'zero', 'one', 'two', 'three', 'four' }, lines_of(buf))
-      ok_json('edit_buffer', { buffer = buf, start_line = 2, end_line = 3, text = '' })
-      assert.same({ 'zero', 'three', 'four' }, lines_of(buf))
-      ok_json('edit_buffer', { buffer = buf, start_line = 2, end_line = -1, text = 'a\r\nb\n\n' })
-      assert.same({ 'zero', 'a', 'b', '' }, lines_of(buf))
-    end)
-
-    it('makes each edit one undo block', function()
-      vim.bo[buf].undolevels = 500
-      ok_json('edit_buffer', { buffer = buf, start_line = 1, end_line = 1, text = 'ONE' })
-      ok_json('edit_buffer', { buffer = buf, start_line = 2, end_line = 2, text = 'TWO\nTWO-B' })
-      vim.cmd('silent undo')
-      assert.same({ 'ONE', 'two', 'three' }, lines_of(buf))
-      vim.cmd('silent undo')
-      assert.same({ 'one', 'two', 'three' }, lines_of(buf))
-      assert.eq(500, vim.bo[buf].undolevels, 'buffer-local undolevels is kept')
-    end)
-
-    it('saves when asked', function()
-      local res = ok_json('edit_buffer', { buffer = f, start_line = 1, end_line = 1, text = 'saved', save = true })
-      assert.eq(true, res.saved)
-      assert.eq(false, res.modified)
-      assert.same({ 'saved', 'two', 'three' }, fn.readfile(f))
-    end)
-
-    it('saves even when the file changed on disk (no blocking prompt)', function()
-      fn.writefile({ 'changed', 'outside' }, f)
-      uv.fs_utime(f, os.time() + 5, os.time() + 5)
-      local res = ok_json('edit_buffer', { buffer = buf, start_line = 1, end_line = 1, text = 'mine', save = true })
-      assert.eq(true, res.saved)
-      assert.same({ 'mine', 'two', 'three' }, fn.readfile(f))
-    end)
-
-    it('loads a file that has no buffer into a listed buffer', function()
-      local g = write('new.txt', { 'x', 'y' })
-      local res = ok_json('edit_buffer', { buffer = g, start_line = 2, end_line = 2, text = 'Y' })
-      local b = fn.bufnr(g)
-      assert.eq(b, res.bufnr)
-      assert.truthy(vim.bo[b].buflisted)
-      assert.same({ 'x', 'Y' }, lines_of(b))
-      assert.same({ 'x', 'y' }, fn.readfile(g))
-    end)
-
-    it('refuses terminal buffers and bad ranges', function()
-      local _, term_buf = open_terminal()
-      assert.matches('terminal', err_text('edit_buffer', { buffer = term_buf, start_line = 1, end_line = 1, text = 'x' }))
-      assert.matches('start_line 5 is out of range',
-        err_text('edit_buffer', { buffer = buf, start_line = 5, end_line = 5, text = 'x' }))
-      assert.matches('end_line 4 is out of range',
-        err_text('edit_buffer', { buffer = buf, start_line = 2, end_line = 4, text = 'x' }))
-      assert.matches('end_line 0 is out of range',
-        err_text('edit_buffer', { buffer = buf, start_line = 2, end_line = 0, text = 'x' }))
-      assert.same({ 'one', 'two', 'three' }, lines_of(buf))
     end)
   end)
 
@@ -427,43 +263,6 @@ describe('nvim_mcp remote', function()
     it('fails for missing files and directories', function()
       assert.matches('file not found', err_text('open_file', { path = tmpdir .. '/nope.txt' }))
       assert.matches('is a directory', err_text('open_file', { path = tmpdir }))
-    end)
-  end)
-
-  describe('get_diagnostics', function()
-    it('returns 1-based diagnostics for one or all buffers, filtered by severity', function()
-      local a = write('a.lua', { 'local x = 1', 'print(y)' })
-      local b = write('b.lua', { 'z' })
-      vim.cmd('edit ' .. a)
-      vim.cmd('badd ' .. b)
-      local ba, bb = fn.bufnr(a), fn.bufnr(b)
-      fn.bufload(bb)
-      local ns = api.nvim_create_namespace('agent_nvim_mcp_test')
-      vim.diagnostic.set(ns, ba, {
-        { lnum = 1, col = 6, end_lnum = 1, end_col = 7, severity = vim.diagnostic.severity.ERROR, message = 'undefined y',
-          source = 'lua_ls', code = 'undefined-global' },
-        { lnum = 0, col = 6, end_lnum = 0, end_col = 7, severity = vim.diagnostic.severity.HINT, message = 'unused x' },
-      })
-      vim.diagnostic.set(ns, bb, {
-        { lnum = 0, col = 0, severity = vim.diagnostic.severity.WARN, message = 'warn z', code = 12 },
-      })
-      local all = ok_json('get_diagnostics')
-      assert.eq(3, #all)
-      local only_a = ok_json('get_diagnostics', { buffer = a })
-      assert.eq(2, #only_a)
-      assert.same({ path = api.nvim_buf_get_name(ba), line = 1, col = 7, end_line = 1, end_col = 7, severity = 'hint',
-        message = 'unused x' }, only_a[1])
-      assert.same({ path = api.nvim_buf_get_name(ba), line = 2, col = 7, end_line = 2, end_col = 7, severity = 'error',
-        message = 'undefined y', source = 'lua_ls', code = 'undefined-global' }, only_a[2])
-      local warn = ok_json('get_diagnostics', { min_severity = 'warning' })
-      assert.eq(2, #warn)
-      local sev = {}
-      for _, d in ipairs(warn) do
-        sev[d.severity] = d
-      end
-      assert.truthy(sev.error and sev.warning)
-      assert.eq(12, sev.warning.code)
-      assert.same({}, ok_json('get_diagnostics', { buffer = tmpdir .. '/none.lua' }))
     end)
   end)
 
@@ -761,8 +560,10 @@ describe('nvim_mcp server (in process)', function()
       assert.truthy(R.tools[t.name], 'remote implements ' .. t.name)
     end
     table.sort(names)
-    assert.same({ 'edit_buffer', 'eval', 'exec_lua', 'execute_command', 'get_diagnostics', 'get_editor_state',
-      'list_buffers', 'notify', 'open_file', 'read_buffer' }, names)
+    assert.same({ 'eval', 'exec_lua', 'execute_command', 'notify', 'open_file', 'read_buffer' }, names)
+    local remote_names = vim.tbl_keys(R.tools)
+    table.sort(remote_names)
+    assert.same(names, remote_names, 'remote.lua implements exactly the listed tools')
     assert.same(names, (function()
       local n = nvim_mcp.tool_names()
       table.sort(n)
@@ -823,14 +624,14 @@ describe('nvim_mcp server (in process)', function()
     local r = reply_for(1).result
     assert.eq(true, r.isError)
     assert.matches('unknown argument "bogus"', r.content[1].text)
-    request(2, 'tools/call', { name = 'edit_buffer', arguments = { buffer = 1, start_line = 'x', end_line = 1, text = '' } })
+    request(2, 'tools/call', { name = 'read_buffer', arguments = { buffer = 1, start_line = 'x' } })
     assert.matches('"start_line" must be an integer', reply_for(2).result.content[1].text)
     request(3, 'tools/call', { name = 'open_file', arguments = { path = '/x', split = 'diagonal' } })
     assert.matches('one of none, horizontal, vertical, tab', reply_for(3).result.content[1].text)
     request(4, 'tools/call', { name = 'nope', arguments = {} })
     assert.eq(-32602, reply_for(4).error.code)
-    request(5, 'tools/call', { name = 'edit_buffer', arguments = { buffer = 1, start_line = 1, text = '' } })
-    assert.matches('missing required argument "end_line"', reply_for(5).result.content[1].text)
+    request(5, 'tools/call', { name = 'open_file', arguments = { line = 1 } })
+    assert.matches('missing required argument "path"', reply_for(5).result.content[1].text)
     -- numeric strings and nulls are tolerated
     request(6, 'tools/call', { name = 'read_buffer', arguments = { start_line = '1', end_line = vim.NIL } })
     assert.falsy(reply_for(6).result.isError)

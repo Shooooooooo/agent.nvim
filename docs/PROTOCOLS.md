@@ -702,11 +702,11 @@ user's config for the session.
     installed into the parent once per controller version as `_G.__agent_nvim_remote`, and
     reinstalled if missing. It adds an augroup `agent_nvim_remote_mru` that tracks the main
     editor window.
-- **Tools.** `get_editor_state`, `list_buffers`, `read_buffer`, `edit_buffer`, `open_file`,
-  `get_diagnostics`, `execute_command`, `eval`, `exec_lua`, `notify`.
-  - The schemas are in `nvim_mcp/server.lua`; the README has the argument table.
-  - `get_editor_state.visual_selection` is the live selection in Visual mode, otherwise the last
-    one (`'<` and `'>`). Unlike the IDE context (Conventions, Selection) it stays after `<Esc>`.
+- **Tools.** `read_buffer`, `open_file`, `execute_command`, `eval`, `exec_lua`, `notify`.
+  - The schemas are in `nvim_mcp/server.lua`; `:help agent-nvim-mcp-tools` has the argument table.
+  - No tools for editor state, diagnostics or edits: those come from the IDE protocols (where they
+    have them) and the agents' own edit tools, and `exec_lua` reaches the rest. The tool
+    descriptions and the `instructions` string point the model there.
   - Lines are 1-based and inclusive. Arguments are validated against the schema (unknown, missing
     or mistyped arguments give an `isError` result).
   - Results are text, JSON where structured. A tool failure is `{isError: true, content: [{type: "text", text}]}`.
@@ -714,9 +714,11 @@ user's config for the session.
     window. `open_file`, `execute_command` and `eval` run there, so they never replace the
     agent's terminal. `exec_lua` runs as-is.
 - **Verified.** Claude Code 2.1.283 connected over stdio in 16 ms: `server/discover` got
-  `-32601`, then `initialize` (protocol `2025-11-25`). Copilot 1.0.88 listed all 10 tools. Gemini
-  0.61.0 showed `nvim (from agent-nvim) ... Connected`. OpenCode 1.18.32 called `nvim_exec_lua`
-  and `nvim_open_file`, and both results reached the model.
+  `-32601`, then `initialize` (protocol `2025-11-25`). Copilot 1.0.88 listed all the tools (10
+  at the time, before the four that duplicated the IDE interface were removed). Gemini 0.61.0
+  showed `nvim (from agent-nvim) ... Connected`. OpenCode 1.18.32 called `nvim_exec_lua` and
+  `nvim_open_file`, and both results reached the model. With the six tools, Claude 2.1.283 and
+  Copilot 1.0.88 still call `exec_lua` and `open_file` in the live e2e run (`tests/e2e/run.sh`).
 
 ---
 

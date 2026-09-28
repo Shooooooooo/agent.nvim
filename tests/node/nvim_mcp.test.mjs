@@ -16,8 +16,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const MAIN = path.join(ROOT, 'lua', 'agent', 'nvim_mcp', 'main.lua');
 const NVIM = process.env.NVIM_BIN || 'nvim';
 const FLAGS = ['--headless', '-u', 'NONE', '-i', 'NONE', '-n'];
-const TOOL_NAMES = ['edit_buffer', 'eval', 'exec_lua', 'execute_command', 'get_diagnostics', 'get_editor_state',
-  'list_buffers', 'notify', 'open_file', 'read_buffer'];
+const TOOL_NAMES = ['eval', 'exec_lua', 'execute_command', 'notify', 'open_file', 'read_buffer'];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -252,7 +251,6 @@ async function resetParent() {
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
       if b ~= vim.api.nvim_get_current_buf() then pcall(vim.api.nvim_buf_delete, b, { force = true }) end
     end
-    vim.diagnostic.reset()
   `);
 }
 
@@ -305,35 +303,18 @@ test('every tool works against the parent', async () => {
   const aName = await rpc.lua('return vim.api.nvim_buf_get_name(vim.fn.bufnr(...))', a);
   const { client } = await connectController({ env: { AGENT_NVIM_AGENT: 'claude' } });
   try {
-    // get_editor_state: "current" is the editor buffer although the terminal is focused
-    const state = json(await client.callTool({ name: 'get_editor_state', arguments: {} }));
-    assert.equal(state.mode, 't');
-    assert.equal(state.current.path, aName);
-    assert.deepEqual(state.current.cursor, { line: 1, col: 1 });
-    assert.equal(state.windows.length, 2);
-    const term = state.windows.find((w) => w.is_terminal);
-    assert.equal(term.winid, layout.term);
-    assert.equal(term.is_current, true);
-    assert.equal(state.visual_selection, null);
+    // read_buffer: defaults to the editor buffer although the terminal is focused, and includes
+    // unsaved changes; by path, with a range
+    const aBuf = await rpc.lua('return vim.fn.bufnr(...)', a);
+    await rpc.request('nvim_buf_set_lines', aBuf, 1, 2, false, ['TWO', 'TWO-B']);
+    assert.equal(text(await client.callTool({ name: 'read_buffer', arguments: {} })),
+      `${aName} (lines 1-4 of 4)\n     1\tone\n     2\tTWO\n     3\tTWO-B\n     4\tthree`);
+    assert.equal(text(await client.callTool({ name: 'read_buffer', arguments: { buffer: a, start_line: 3 } })),
+      `${aName} (lines 3-4 of 4)\n     3\tTWO-B\n     4\tthree`);
+    assert.equal(fs.readFileSync(a, 'utf8'), 'one\ntwo\nthree\n');
 
-    // list_buffers
-    const bufs = json(await client.callTool({ name: 'list_buffers', arguments: {} }));
-    const ba = bufs.find((x) => x.path === aName);
-    assert.equal(ba.line_count, 3);
-    assert.equal(ba.is_current, true);
-    assert.ok(bufs.some((x) => x.buftype === 'terminal'));
-
-    // read_buffer (by path, with a range)
-    assert.equal(text(await client.callTool({ name: 'read_buffer', arguments: { buffer: a, start_line: 2 } })),
-      `${aName} (lines 2-3 of 3)\n     2\ttwo\n     3\tthree`);
-
-    // edit_buffer + save, checked through the second channel and on disk
-    const edited = json(await client.callTool({
-      name: 'edit_buffer', arguments: { buffer: a, start_line: 2, end_line: 2, text: 'TWO\nTWO-B', save: true },
-    }));
-    assert.deepEqual(edited, { bufnr: ba.bufnr, path: aName, line_count: 4, modified: false, saved: true });
-    assert.deepEqual(await rpc.request('nvim_buf_get_lines', ba.bufnr, 0, -1, false), ['one', 'TWO', 'TWO-B', 'three']);
-    assert.equal(fs.readFileSync(a, 'utf8'), 'one\nTWO\nTWO-B\nthree\n');
+    // eval runs in the editor window, not the terminal
+    assert.equal(json(await client.callTool({ name: 'eval', arguments: { expression: "bufnr('%')" } })), aBuf);
 
     // open_file: lands in the editor window, never the terminal; selects the range
     const opened = json(await client.callTool({ name: 'open_file', arguments: { path: b, line: 2, end_line: 3 } }));
@@ -353,17 +334,6 @@ test('every tool works against the parent', async () => {
     assert.equal(after.term_buf, layout.term_buf);
     assert.deepEqual(after.sel, ['b2', 'b3']);
     await rpc.request('nvim_input', '<Esc>');
-
-    // get_diagnostics
-    await rpc.lua(`
-      local buf = ...
-      local ns = vim.api.nvim_create_namespace('node_test')
-      vim.diagnostic.set(ns, buf, { { lnum = 1, col = 0, end_lnum = 1, end_col = 3, severity = 1, message = 'bad', source = 'test' } })
-    `, ba.bufnr);
-    assert.deepEqual(json(await client.callTool({ name: 'get_diagnostics', arguments: { buffer: ba.bufnr } })), [
-      { path: aName, line: 2, col: 1, end_line: 2, end_col: 3, severity: 'error', message: 'bad', source: 'test', code: null },
-    ]);
-    assert.deepEqual(json(await client.callTool({ name: 'get_diagnostics', arguments: { min_severity: 'error' } })).length, 1);
 
     // execute_command, eval, exec_lua
     assert.equal(text(await client.callTool({ name: 'execute_command', arguments: { command: 'echo "hello"' } })), 'hello');
@@ -385,10 +355,9 @@ test('every tool works against the parent', async () => {
     const invalid = await client.callTool({ name: 'read_buffer', arguments: { start_line: 'first' } });
     assert.equal(invalid.isError, true);
     assert.match(text(invalid), /start_line/);
-    const term_edit = await client.callTool({
-      name: 'edit_buffer', arguments: { buffer: layout.term_buf, start_line: 1, end_line: 1, text: 'x' },
-    });
-    assert.equal(term_edit.isError, true);
+    const missing = await client.callTool({ name: 'open_file', arguments: { path: path.join(tmp, 'nope.txt') } });
+    assert.equal(missing.isError, true);
+    assert.match(text(missing), /file not found/);
   } finally {
     await client.close();
   }

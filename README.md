@@ -28,9 +28,9 @@ the real Claude Code TUI, with the model's replies scripted so that the recordin
 | Agent | Sees file and selection | Diffs in Neovim | Diagnostics |
 |---|---|---|---|
 | Claude Code (`claude`) | yes | yes, editable | yes |
-| OpenCode (`opencode`) | yes | no | through the controller |
+| OpenCode (`opencode`) | yes | no | through `exec_lua` |
 | GitHub Copilot CLI (`copilot`) | selection (file through a tool) | yes, read-only | yes |
-| Gemini CLI (`gemini`) | yes | yes, editable | through the controller |
+| Gemini CLI (`gemini`) | yes | yes, editable | through `exec_lua` |
 
 ## Requirements
 
@@ -169,11 +169,12 @@ Full reference: `:help agent-config`.
 ## The $NVIM controller
 
 When it launches an agent, agent.nvim registers a stdio MCP server through which the agent can
-drive the Neovim it runs in, without editing your agent config files. Its tools:
-`get_editor_state`, `list_buffers`, `read_buffer`, `edit_buffer`, `open_file`, `get_diagnostics`,
-`execute_command`, `eval`, `exec_lua`, `notify`. For an agent you start yourself in a Neovim
-terminal, `:AgentMcpConfig` prints the config to add, and `auto_start = true` keeps the IDE
-servers running so that it can use the IDE connection too (`:help agent-nvim-mcp-manual`).
+drive the Neovim it runs in, without editing your agent config files. Its tools: `read_buffer`,
+`open_file`, `execute_command`, `eval`, `exec_lua`, `notify`. It leaves the current file,
+selection and diagnostics to the IDE connection, edits to the agent's own tools, and anything else
+to `exec_lua`. For an agent you start yourself in a Neovim terminal, `:AgentMcpConfig` prints the
+config to add, and `auto_start = true` keeps the IDE servers running so that it can use the IDE
+connection too (`:help agent-nvim-mcp-manual`).
 
 **Security:** the controller can do anything your Neovim can. `exec_lua`, `execute_command` and
 `eval` run arbitrary Lua, Ex commands and Vimscript as you, shell commands included. Claude,

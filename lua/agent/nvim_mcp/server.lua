@@ -36,46 +36,18 @@ local BUFFER = {
 ---@type { name: string, description: string, inputSchema: table }[]
 local TOOLS = {
   {
-    name = 'get_editor_state',
-    description = 'Get the state of the Neovim editor that hosts this agent: working directory, mode, '
-      .. 'the buffer in the main editor window ("current": the window the user edits in, not the '
-      .. 'agent terminal) with its cursor, the visual selection (live, or the last one in that buffer), '
-      .. 'the windows of the current tab page, and the number of listed buffers. Lines and columns are 1-based.',
-    inputSchema = obj({}),
-  },
-  {
-    name = 'list_buffers',
-    description = 'List Neovim buffers with their number, path, file type, buffer type, modified/loaded '
-      .. 'state and line count. is_current marks the buffer in the main editor window.',
-    inputSchema = obj({
-      include_unlisted = { type = 'boolean', description = 'Also include unlisted buffers (default false).' },
-    }),
-  },
-  {
     name = 'read_buffer',
     description = 'Read lines of a Neovim buffer, including unsaved changes. Returns a header line '
       .. '"<path> (lines a-b of N)" followed by numbered lines ("%6d<TAB>text"). Unloaded buffers are '
-      .. 'loaded; a path with no buffer is read from disk. Defaults to the buffer in the main editor window.',
+      .. 'loaded; a path with no buffer is read from disk. Defaults to the buffer in the main editor '
+      .. 'window (the file the user is editing). Give buffer as a file path, or as a buffer number: '
+      .. "to list buffers, call eval with map(getbufinfo({'buflisted': 1}), '[v:val.bufnr, v:val.name]') "
+      .. '(returns [bufnr, path] pairs) or use exec_lua.',
     inputSchema = obj({
       buffer = BUFFER,
       start_line = { type = 'integer', description = 'First line, 1-based (default 1).' },
       end_line = { type = 'integer', description = 'Last line, 1-based inclusive; -1 means the last line (default -1).' },
     }),
-  },
-  {
-    name = 'edit_buffer',
-    description = 'Replace lines start_line..end_line (1-based, inclusive) of a buffer with text, in '
-      .. 'Neovim, as one undoable change. Use end_line = start_line - 1 to insert before start_line '
-      .. '(start_line = line count + 1 appends). text is split on newlines; an empty string deletes '
-      .. 'the lines and a single trailing newline is ignored. The file is loaded into a buffer if needed. '
-      .. 'Set save to write the buffer to disk. Terminal buffers are refused.',
-    inputSchema = obj({
-      buffer = BUFFER,
-      start_line = { type = 'integer', description = 'First line to replace, 1-based.' },
-      end_line = { type = 'integer', description = 'Last line to replace, 1-based inclusive (-1 = last line).' },
-      text = { type = 'string', description = 'Replacement text.' },
-      save = { type = 'boolean', description = 'Write the buffer to its file afterwards (default false).' },
-    }, { 'buffer', 'start_line', 'end_line', 'text' }),
   },
   {
     name = 'open_file',
@@ -94,19 +66,6 @@ local TOOLS = {
     }, { 'path' }),
   },
   {
-    name = 'get_diagnostics',
-    description = 'Get diagnostics (LSP and other sources) from Neovim for one buffer, or for all buffers '
-      .. 'when buffer is omitted. Positions are 1-based and inclusive.',
-    inputSchema = obj({
-      buffer = BUFFER,
-      min_severity = {
-        type = 'string',
-        enum = { 'error', 'warning', 'info', 'hint' },
-        description = 'Only return diagnostics at least this severe.',
-      },
-    }),
-  },
-  {
     name = 'execute_command',
     description = 'Run an Ex command in Neovim (as typed after ":") and return its output. The command runs '
       .. 'in the context of the main editor window.',
@@ -116,7 +75,9 @@ local TOOLS = {
   },
   {
     name = 'eval',
-    description = 'Evaluate a Vimscript expression in Neovim and return its value as JSON.',
+    description = 'Evaluate a Vimscript expression in Neovim and return its value as JSON. It is '
+      .. "evaluated in the context of the main editor window, so e.g. expand('%:p') and line('.') give "
+      .. "the user's file and cursor line, not the agent terminal's.",
     inputSchema = obj({
       expression = { type = 'string', description = 'Vimscript expression, e.g. "expand(\'%:p\')".' },
     }, { 'expression' }),
@@ -125,7 +86,9 @@ local TOOLS = {
     name = 'exec_lua',
     description = 'Execute Lua code in Neovim and return its return value(s) as JSON (several values '
       .. 'become an array). The arguments are available as "..." in the chunk. The current window may '
-      .. 'be the agent terminal.',
+      .. 'be the agent terminal. Use it for editor state that no other tool reports, e.g. '
+      .. '"return vim.diagnostic.get()" for diagnostics (the Lua API keeps its own conventions, such '
+      .. 'as 0-based diagnostic lines).',
     inputSchema = obj({
       code = { type = 'string', description = 'Lua chunk, e.g. "return vim.api.nvim_buf_line_count(...)".' },
       args = { type = 'array', items = vim.empty_dict(), description = 'Arguments passed to the chunk as "...".' },
@@ -572,8 +535,11 @@ function Server:_initialize(params)
   local instructions
   if self.addr then
     instructions = 'These tools control the Neovim instance that hosts this agent\'s terminal. '
-      .. 'Line numbers are 1-based and inclusive. read_buffer and edit_buffer work on live buffer '
-      .. 'contents, including unsaved changes; buffers can be given by number or file path.'
+      .. 'Line numbers in their arguments and results are 1-based and inclusive. read_buffer reads '
+      .. 'live buffer contents, including unsaved changes; buffers can be given by number or file '
+      .. 'path. For editor state that no tool reports directly (the buffer list, windows, cursor, '
+      .. 'diagnostics), use eval or exec_lua with the Neovim API. Make file edits with your own '
+      .. 'editing tools.'
   else
     instructions = 'Not running inside Neovim ($NVIM is not set), so no Neovim tools are available.'
   end

@@ -46,8 +46,8 @@ to accept or reject, and the agent can read your diagnostics.
 
 The $NVIM controller (|agent-nvim-mcp|) is a stdio MCP server that agent.nvim
 registers when it launches an agent, without editing your agent config files.
-Through it the agent can read and edit buffers, open files, query diagnostics,
-run Ex commands, evaluate Vimscript and run Lua in your Neovim.
+Through it the agent can read buffers, open files, run Ex commands,
+evaluate Vimscript, run Lua and show notifications in your Neovim.
 
 The plugin is pure Lua on |vim.uv| with no runtime dependencies. Every server
 binds to loopback or to a Unix socket in a private directory, and every server
@@ -807,8 +807,8 @@ What works ~
   Gemini's prompt instead closes the diff; if you approve there, your Neovim
   edits are used. An empty proposal cannot be accepted, because Gemini would
   write the model's original proposal instead.
-- Diagnostics: not part of the protocol. The model can use the controller's
-  get_diagnostics.
+- Diagnostics: not part of the protocol. The model can read them with the
+  controller's exec_lua (|vim.diagnostic.get()|).
 
 Limitations ~
 - The controller is a stdio MCP server, and Gemini refuses those in
@@ -848,44 +848,31 @@ All line numbers are 1-based and inclusive. A buffer can be given as a buffer
 number or a file path (absolute, or relative to Neovim's cwd). "Current"
 means the buffer in the main editor window, not the agent's terminal.
 
-get_editor_state
-    No arguments. JSON: cwd, mode, current {bufnr, path, filetype, modified,
-    cursor {line, col}}, visual_selection {path, start_line, end_line, text}
-    or null, windows [{winid, bufnr, path, is_current, is_terminal,
-    is_floating}], tabpage, buffer_count. visual_selection is the live
-    selection in Visual mode, else the last one (the '< and '> marks), which
-    unlike |agent-context| stays after <Esc>.
-list_buffers
-    include_unlisted? JSON list: bufnr, path, name, filetype, buftype,
-    modified, loaded, line_count, is_current.
 read_buffer
     buffer? (default: current), start_line? (default 1), end_line? (default
     -1, the last line). A header "<path> (lines a-b of N)", then numbered
     lines. Includes unsaved changes; a path with no buffer is read from disk.
-edit_buffer
-    buffer, start_line, end_line, text, save?. Replaces the lines with text
-    as one undoable change. end_line = start_line - 1 inserts; "" deletes.
-    Terminal buffers are refused. JSON {bufnr, path, line_count, modified,
-    saved}.
 open_file
     path, line?, column?, end_line?, split? ("none", "horizontal",
     "vertical", "tab"). Opens in the main editor window (never in the agent
     terminal) and focuses it; end_line selects line..end_line. JSON {bufnr,
     winid, path}.
-get_diagnostics
-    buffer? (default: all buffers), min_severity? ("error", "warning",
-    "info", "hint"). JSON list: path, line, col, end_line, end_col,
-    severity, message, source, code.
 execute_command
     command. The command's output, or "(no output)". Runs in the context of
     the main editor window.
 eval
-    expression. The Vimscript value as JSON.
+    expression. The Vimscript value as JSON. Evaluated in the context of the
+    main editor window.
 exec_lua
     code, args?. The chunk's return value(s) as JSON; `...` holds args.
 notify
     message, level? ("info", "warn", "error"). Shows |vim.notify()| in
     Neovim; returns "ok".
+
+There are no tools for editor state, diagnostics or edits. The IDE
+connection reports the current file and selection (and diagnostics, for
+Claude and Copilot), the agent edits with its own tools, and exec_lua
+reaches the rest (the buffer list, windows, |vim.diagnostic.get()|).
 
 A failed call returns an MCP error result with the message. If Neovim is
 waiting at a prompt (hit-enter, -- More --), nothing runs and the agent is

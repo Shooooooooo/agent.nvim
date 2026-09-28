@@ -123,10 +123,6 @@ local function is_floating(win)
   return api.nvim_win_get_config(win).relative ~= ''
 end
 
-local function is_terminal_buf(buf)
-  return vim.bo[buf].buftype == 'terminal'
-end
-
 ---True for a window where the user edits files: not floating, not a terminal, not a sidebar,
 ---scratch/special or diff window, and not locked to its buffer.
 ---@param win integer
@@ -263,19 +259,6 @@ end
 -- Never expand $VARS: file names may contain a literal "$".
 local NORMALIZE_OPTS = { expand_env = false }
 
-local function buf_path(buf)
-  local name = api.nvim_buf_get_name(buf)
-  return name ~= '' and name or vim.NIL
-end
-
-local function display_name(buf)
-  local name = api.nvim_buf_get_name(buf)
-  if name == '' then
-    return '[No Name]'
-  end
-  return fn.fnamemodify(name, ':~:.')
-end
-
 ---Absolute, normalized path: expands a leading ~ only (never $VARS or wildcards).
 ---@param path string
 ---@return string
@@ -317,11 +300,11 @@ end
 
 ---The user's editing context: the buffer in the main editor window, or, when the tab has no
 ---editor window, the most recently used listed file buffer (then the current buffer).
----@return integer bufnr, integer|nil winid
+---@return integer bufnr
 local function main_buf()
   local win = M.main_window()
   if win then
-    return api.nvim_win_get_buf(win), win
+    return api.nvim_win_get_buf(win)
   end
   local best, best_used
   for _, info in ipairs(fn.getbufinfo({ buflisted = 1 })) do
@@ -329,17 +312,14 @@ local function main_buf()
       best, best_used = info.bufnr, info.lastused
     end
   end
-  if best then
-    return best, nil
-  end
-  return api.nvim_get_current_buf(), api.nvim_get_current_win()
+  return best or api.nvim_get_current_buf()
 end
 
----Resolve a `buffer` argument (bufnr, numeric string or path; nil = main editor buffer).
+---Resolve a `buffer` argument (bufnr, numeric string or path; nil = main editor buffer). A path
+---with no buffer gives nil and the absolute path.
 ---@param spec any
----@param create boolean  create (bufadd, listed) a buffer for a path that has none
 ---@return integer|nil bufnr, string|nil abs_path
-local function resolve_buffer(spec, create)
+local function resolve_buffer(spec)
   if spec == nil or spec == vim.NIL then
     return main_buf(), nil
   end
@@ -362,16 +342,7 @@ local function resolve_buffer(spec, create)
     error('buffer must be a buffer number or a file path', 0)
   end
   local abs = abspath(spec)
-  local buf = find_buf_by_path(abs)
-  if buf or not create then
-    return buf, abs
-  end
-  if fn.isdirectory(abs) == 1 then
-    error(abs .. ' is a directory', 0)
-  end
-  buf = fn.bufadd(abs)
-  vim.bo[buf].buflisted = true
-  return buf, abs
+  return find_buf_by_path(abs), abs
 end
 
 local function ensure_loaded(buf)
@@ -379,33 +350,6 @@ local function ensure_loaded(buf)
     -- bufload never shows the swap-file prompt, so it cannot block.
     fn.bufload(buf)
   end
-end
-
----Break the undo sequence so the next change is its own undo block (API changes made without
----user input in between are otherwise joined). Setting 'undolevels' closes the block; only the
----global value is written, so a buffer-local value survives (:h undo-break).
-local function break_undo(buf)
-  api.nvim_buf_call(buf, function()
-    vim.go.undolevels = vim.go.undolevels
-  end)
-end
-
----Split tool text into buffer lines: an empty string is zero lines, a single trailing newline
----ends the last line, CR before LF is dropped, NUL bytes use the API's NL representation.
----@param text string
----@return string[]
-local function split_text(text)
-  if text == '' then
-    return {}
-  end
-  local lines = vim.split(text, '\n', { plain = true })
-  if lines[#lines] == '' then
-    lines[#lines] = nil
-  end
-  for i, l in ipairs(lines) do
-    lines[i] = (l:gsub('\r$', ''):gsub('%z', '\n'))
-  end
-  return lines
 end
 
 local function int(v)
@@ -418,111 +362,8 @@ end
 
 -- Tools -----------------------------------------------------------------------------------------
 
-local function visual_selection(buf, win)
-  local cur = api.nvim_get_current_win()
-  local mode = api.nvim_get_mode().mode:sub(1, 1)
-  local to_visual = { v = 'v', V = 'V', ['\22'] = '\22', s = 'v', S = 'V', ['\19'] = '\22' }
-  local ok, res = pcall(function()
-    if to_visual[mode] and win and cur == win then
-      local p1, p2 = fn.getpos('v'), fn.getpos('.')
-      return {
-        start_line = math.min(p1[2], p2[2]),
-        end_line = math.max(p1[2], p2[2]),
-        text = fn.getregion(p1, p2, { type = to_visual[mode] }),
-      }
-    end
-    -- Not selecting right now: report the last selection ('< and '>) of the main buffer, which is
-    -- what the user selected before switching to the agent terminal.
-    local s, e = api.nvim_buf_get_mark(buf, '<'), api.nvim_buf_get_mark(buf, '>')
-    if s[1] == 0 or e[1] == 0 then
-      return nil
-    end
-    return api.nvim_buf_call(buf, function()
-      local vmode = fn.visualmode()
-      return {
-        start_line = s[1],
-        end_line = e[1],
-        text = fn.getregion(fn.getpos("'<"), fn.getpos("'>"), { type = vmode ~= '' and vmode or 'v' }),
-      }
-    end)
-  end)
-  if not ok or not res then
-    return vim.NIL
-  end
-  return {
-    path = buf_path(buf),
-    start_line = res.start_line,
-    end_line = res.end_line,
-    text = table.concat(res.text, '\n'),
-  }
-end
-
-function tools.get_editor_state()
-  local cur_win = api.nvim_get_current_win()
-  local buf, win = main_buf()
-  local cursor
-  if win then
-    cursor = api.nvim_win_get_cursor(win)
-  else
-    -- Not shown in this tab: its last cursor position.
-    cursor = api.nvim_buf_get_mark(buf, '"')
-    if cursor[1] == 0 then
-      cursor = { 1, 0 }
-    end
-  end
-  local windows = {}
-  for _, w in ipairs(api.nvim_tabpage_list_wins(0)) do
-    local b = api.nvim_win_get_buf(w)
-    windows[#windows + 1] = {
-      winid = w,
-      bufnr = b,
-      path = buf_path(b),
-      is_current = w == cur_win,
-      is_terminal = is_terminal_buf(b),
-      is_floating = is_floating(w),
-    }
-  end
-  return {
-    cwd = fn.getcwd(),
-    mode = api.nvim_get_mode().mode,
-    current = {
-      bufnr = buf,
-      path = buf_path(buf),
-      filetype = vim.bo[buf].filetype,
-      modified = vim.bo[buf].modified,
-      cursor = { line = cursor[1], col = cursor[2] + 1 },
-    },
-    visual_selection = visual_selection(buf, win),
-    windows = windows,
-    tabpage = fn.tabpagenr(),
-    buffer_count = #fn.getbufinfo({ buflisted = 1 }),
-  }
-end
-
-function tools.list_buffers(args)
-  local current = main_buf()
-  local out = {}
-  for _, b in ipairs(api.nvim_list_bufs()) do
-    if args.include_unlisted or vim.bo[b].buflisted then
-      local loaded = api.nvim_buf_is_loaded(b)
-      out[#out + 1] = {
-        bufnr = b,
-        path = buf_path(b),
-        name = display_name(b),
-        filetype = vim.bo[b].filetype,
-        buftype = vim.bo[b].buftype,
-        modified = vim.bo[b].modified,
-        loaded = loaded,
-        line_count = loaded and api.nvim_buf_line_count(b) or 0,
-        is_current = b == current,
-      }
-    end
-  end
-  return out
-end
-
 function tools.read_buffer(args)
-  local buf, abs = resolve_buffer(args.buffer, false)
+  local buf, abs = resolve_buffer(args.buffer)
   local lines, label
   if buf then
     ensure_loaded(buf)
@@ -561,55 +402,6 @@ function tools.read_buffer(args)
     out[#out + 1] = string.format('%6d\t%s', i, (lines[i]:gsub('\n', '\0')))
   end
   return table.concat(out, '\n')
-end
-
-function tools.edit_buffer(args)
-  local buf = resolve_buffer(args.buffer, true)
-  if is_terminal_buf(buf) then
-    error('refusing to edit a terminal buffer', 0)
-  end
-  ensure_loaded(buf)
-  local n = api.nvim_buf_line_count(buf)
-  local s, e = int(args.start_line), int(args.end_line)
-  if not s or not e or type(args.text) ~= 'string' then
-    error('start_line, end_line and text are required', 0)
-  end
-  if e < 0 then
-    e = n + e + 1
-  end
-  if s < 1 or s > n + 1 then
-    error(string.format('start_line %d is out of range (buffer has %d lines; use %d to append)', s, n, n + 1), 0)
-  end
-  if e < s - 1 or e > n then
-    error(string.format('end_line %d is out of range (must be between %d and %d)', e, s - 1, n), 0)
-  end
-  break_undo(buf)
-  api.nvim_buf_set_lines(buf, s - 1, e, true, split_text(args.text))
-  local saved = false
-  if args.save then
-    local name = api.nvim_buf_get_name(buf)
-    if name == '' then
-      error('the edit was applied, but the buffer has no file name, so it was not saved', 0)
-    end
-    if vim.bo[buf].readonly then
-      error('the edit was applied, but the buffer is readonly, so it was not saved', 0)
-    end
-    -- write! skips the "file changed since reading" confirmation, which would block Neovim.
-    local ok, err = pcall(api.nvim_buf_call, buf, function()
-      vim.cmd('silent keepalt write!')
-    end)
-    if not ok then
-      error('the edit was applied, but saving failed: ' .. tostring(err), 0)
-    end
-    saved = true
-  end
-  return {
-    bufnr = buf,
-    path = buf_path(buf),
-    line_count = api.nvim_buf_line_count(buf),
-    modified = vim.bo[buf].modified,
-    saved = saved,
-  }
 end
 
 ---Leave insert/visual/select mode before moving the cursor to another window.
@@ -691,58 +483,6 @@ function tools.open_file(args)
     end
   end
   return { bufnr = buf, winid = win, path = api.nvim_buf_get_name(buf) }
-end
-
-local SEVERITY_NAMES = { 'error', 'warning', 'info', 'hint' }
-local SEVERITY_BY_NAME = { error = 1, warning = 2, info = 3, hint = 4 }
-
-function tools.get_diagnostics(args)
-  local opts = {}
-  if args.min_severity then
-    local sev = SEVERITY_BY_NAME[args.min_severity]
-    if not sev then
-      error('min_severity must be one of error, warning, info, hint', 0)
-    end
-    opts.severity = { min = sev }
-  end
-  local bufnr
-  if args.buffer ~= nil and args.buffer ~= vim.NIL then
-    bufnr = resolve_buffer(args.buffer, false)
-    if not bufnr then
-      return {}
-    end
-  end
-  local out = {}
-  for _, d in ipairs(vim.diagnostic.get(bufnr, opts)) do
-    local line, col = d.lnum + 1, d.col + 1
-    local end_line = (d.end_lnum or d.lnum) + 1
-    -- end_col is 0-based exclusive, which equals the 1-based inclusive column.
-    local end_col = d.end_col or d.col
-    if end_line == line and end_col < col then
-      end_col = col
-    end
-    out[#out + 1] = {
-      path = buf_path(d.bufnr),
-      line = line,
-      col = col,
-      end_line = end_line,
-      end_col = end_col,
-      severity = SEVERITY_NAMES[d.severity] or tostring(d.severity),
-      message = d.message,
-      source = d.source == nil and vim.NIL or d.source,
-      code = d.code == nil and vim.NIL or d.code,
-    }
-  end
-  table.sort(out, function(a, b)
-    local pa, pb = a.path == vim.NIL and '' or a.path, b.path == vim.NIL and '' or b.path
-    if pa ~= pb then
-      return pa < pb
-    elseif a.line ~= b.line then
-      return a.line < b.line
-    end
-    return a.col < b.col
-  end)
-  return out
 end
 
 function tools.execute_command(args)
