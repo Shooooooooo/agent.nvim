@@ -80,17 +80,20 @@ requires its protocol's auth token.
 lazy.nvim: >lua
     {
       'Shooooooooo/agent.nvim',
+      lazy = false,
       opts = {},
       keys = {
         { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' },
           desc = 'Toggle agent' },
       },
-      cmd = { 'AgentToggle', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig',
-              'AgentGeminiSetup' },
     }
 <
-If you use `auto_start = true`, do not lazy-load the plugin: the IDE servers
-must already be running when you start an agent yourself.
+`lazy = false` loads the plugin at startup, so every command exists from the
+start and `auto_start = true` works; this costs little, because nothing starts
+until you open an agent. `keys` then only defines the mapping. If you
+lazy-load the plugin instead, list its commands in `cmd`, and do not combine
+it with `auto_start = true`: the IDE servers must already be running when you
+start an agent yourself.
 
 vim.pack (Neovim 0.12+): >lua
     vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })

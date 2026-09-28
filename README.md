@@ -52,11 +52,11 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   'Shooooooooo/agent.nvim',
+  lazy = false,
   opts = {},
   keys = {
     { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
   },
-  cmd = { 'AgentToggle', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' },
 }
 ```
 
