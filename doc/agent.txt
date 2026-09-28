@@ -83,7 +83,7 @@ lazy.nvim: >lua
       lazy = false,
       opts = {},
       keys = {
-        { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' },
+        { '<F8>', '<cmd>AgentToggle<cr>', mode = { 'n', 'x', 't' },
           desc = 'Toggle agent' },
       },
     }
@@ -98,10 +98,12 @@ start an agent yourself.
 vim.pack (Neovim 0.12+): >lua
     vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
     require('agent').setup({})
-    vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>')
+    vim.keymap.set({ 'n', 'x', 't' }, '<F8>', '<cmd>AgentToggle<cr>')
 <
 The mappings work in Visual mode too (`x`), so that a selection reaches the
-agent when <leader>ac opens it: <Esc> first would drop it (|agent-context|).
+agent when <F8> opens it: <Esc> first would drop it (|agent-context|). They
+work in Terminal mode (`t`) as well, where a function key does not get in the
+way of typing: <F8> also hides the agent from inside its terminal.
 
 Calling setup() is optional: every command calls setup({}) the first time it
 runs, if setup() has not been called yet.
@@ -117,8 +119,8 @@ runs, if setup() has not been called yet.
    agent connects to it by itself. One agent runs at a time: starting
    another one asks first (|agent-replace|).
 3. Select lines and switch to the agent window straight from Visual mode:
-   <C-w>j (then `i` to type), or <leader>ac (|agent-install|) when the
-   agent is hidden. The agent keeps the selection. Leaving Visual mode in
+   <C-w>j (then `i` to type), or <F8> (|agent-install|) when the agent
+   is hidden. The agent keeps the selection. Leaving Visual mode in
    the file (<Esc>) drops it, and the agent then sees just the current
    file. See |agent-context|.
 4. Ask the agent to change a file. When it asks for permission, a diff tab
@@ -418,8 +420,8 @@ terminal.split_side ("below")
     agent's split goes. That is the "split" layout, the agent's view in a
     diff tab page (|agent-diff-terminal|), and the "current" layout when it
     has no window to take (|agent-layout-current|). A split below or above
-    is as wide as the editor; "right" keeps the agent beside your code, as
-    in the README demo (|agent-demo|).
+    is as wide as the editor, as in the README demo (|agent-demo|); "right"
+    keeps the agent beside your code.
 terminal.split_size (0.4)
     Size of those splits as a fraction (0 to 1) of the editor height (below,
     above) or width (right, left). The view in a diff tab page is as large
@@ -1236,21 +1238,35 @@ The demo ~
 `make demo` (demo/record.sh) re-records the README demo,
 demo/agent-nvim-demo.gif, with VHS (https://github.com/charmbracelet/vhs),
 which types demo/demo.tape into a real Neovim running the real Claude Code
-2.1.283 TUI. Only the model is fake: its replies come from the same local
-endpoint as the end-to-end test (tests/e2e/fake_model.mjs) playing
-demo/plan.json, so the recording is reproducible, and the model name in
-Claude's header is only its default. HOME, the XDG directories and
-CLAUDE_CONFIG_DIR point to a temp directory, so your Claude account and config
-are never used.
+2.1.284 TUI. Claude is asked to debug demo/project/stats.py, whose mean() is
+wrong. Through the $NVIM controller it starts a pdb session with nvim-gdb
+(https://github.com/sakhnik/nvim-gdb): `:GdbStartPDB` opens pdb's terminal
+beside the script, whose window marks the line pdb stops on and the
+breakpoint. Claude sends pdb commands with nvim-gdb's `:Gdb` and reads the
+answers (`exec_lua`), proposes the fix in a diff that `:w` accepts, re-runs
+the script in the same pdb session, which prints 6.0, and notifies the result.
+
+Only the model is fake: its replies come from the same local endpoint as the
+end-to-end test (tests/e2e/fake_model.mjs) playing demo/plan.json, so the
+recording is reproducible, and the model name in Claude's header is only its
+default. Neovim, nvim-gdb, pdb and Claude Code really run. HOME, TMPDIR, the
+XDG directories and CLAUDE_CONFIG_DIR point to a temp directory, so your
+Claude account and config are never used.
 
 The demo config, demo/init.lua, keeps the default layout (the agent in a
 split below the file), starts Claude with `--permission-mode manual` so that
 it asks before editing, sets `auto_approve = true` for the $NVIM controller,
-and adds the colours, the statusline and the notification popup.
+loads nvim-gdb, and adds the colours, the statusline, the debugger's signs
+and the notification popup. Only the demo uses nvim-gdb: agent.nvim does not
+need it.
 
-It needs vhs, ttyd, ffmpeg, nvim, node, claude and the JetBrainsMono Nerd
-Font. `DEMO_OUT=<dir>` writes the files elsewhere. Every run differs slightly
-(the clock, the spinner words), so commit new files only when the demo itself
+It needs vhs, ttyd, ffmpeg, nvim, node, claude, git, python3 on $PATH (Python
+3.9, as /usr/bin/python3 on macOS: the tape expects its pdb output) and the
+JetBrainsMono Nerd Font. record.sh fetches nvim-gdb at a pinned commit into
+its temp directory, which needs network access to github.com;
+`DEMO_NVIMGDB=<checkout>` uses an existing checkout of that commit instead.
+`DEMO_OUT=<dir>` writes the GIF elsewhere. Every run differs slightly (the
+clock, the spinner words), so commit a new GIF only when the demo itself
 changed. The header of demo/record.sh has the details.
 
  vim:tw=78:ts=8:sw=4:sts=4:et:ft=help:norl:

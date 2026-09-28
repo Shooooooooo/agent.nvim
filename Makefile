@@ -12,6 +12,7 @@ test-node:
 test-e2e:
 	./tests/e2e/run.sh $(AGENTS)
 
-# Re-record the README demo (demo/agent-nvim-demo.gif) with VHS; see demo/record.sh.
+# Re-record the README demo (demo/agent-nvim-demo.gif) with VHS; it fetches nvim-gdb, so it needs
+# network access (see demo/record.sh).
 demo:
 	./demo/record.sh

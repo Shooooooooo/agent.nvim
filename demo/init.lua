@@ -1,11 +1,16 @@
--- Minimal Neovim config for the README demo (demo/record.sh). It loads agent.nvim from this
--- repository and points Claude Code at the local scripted model that record.sh starts. Every
--- DEMO_* variable comes from record.sh, which also isolates HOME, XDG_* and CLAUDE_CONFIG_DIR.
+-- Neovim config for the README demo (demo/record.sh). It loads agent.nvim from this repository
+-- and nvim-gdb (https://github.com/sakhnik/nvim-gdb) from the checkout that record.sh fetches at
+-- a pinned commit, and points Claude Code at the local scripted model that record.sh starts.
+-- Every DEMO_* variable comes from record.sh, which also isolates HOME, TMPDIR, XDG_* and
+-- CLAUDE_CONFIG_DIR.
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
-for _, var in ipairs({ 'DEMO_MODEL_URL', 'DEMO_CLAUDE_CONFIG_DIR', 'DEMO_API_KEY' }) do
+for _, var in ipairs({
+  'DEMO_MODEL_URL', 'DEMO_CLAUDE_CONFIG_DIR', 'DEMO_API_KEY', 'DEMO_NVIMGDB',
+}) do
   -- Never start Claude against a real account or config: run this only through demo/record.sh.
   assert(vim.env[var], var .. ' is not set: run demo/record.sh')
 end
+vim.opt.rtp:prepend(vim.env.DEMO_NVIMGDB) -- plugin/nvimgdb.vim defines :GdbStartPDB and :Gdb
 vim.opt.rtp:prepend(repo)
 
 -- Looks
@@ -28,7 +33,6 @@ vim.o.showtabline = 0
 vim.o.fillchars = 'eob: ,vert:│,diff:╱'
 vim.o.shortmess = vim.o.shortmess .. 'IF'
 vim.o.wrap = false
-vim.g.mapleader = ' '
 
 local c = { blue = '#89b4fa', mauve = '#cba6f7', green = '#a6e3a1', peach = '#fab387', base = '#1e1e2e',
   mantle = '#181825', text = '#cdd6f4', sub = '#a6adc8', surface = '#313244' }
@@ -95,11 +99,11 @@ function _G.demo_statusline()
 end
 vim.o.statusline = '%{%v:lua.demo_statusline()%}'
 
--- Notifications as a small popup in the top right corner of the editor (the empty right half of
--- the file, above Claude's split), so that messages the agent sends through the $NVIM controller's
--- notify tool stand out (the tool passes the agent's name as the title). A popup belongs to the
--- view it was shown in: it closes when another tab page (a diff) opens, where it would cover the
--- proposed code.
+-- Notifications as a small popup in the bottom right corner of the script's window (the top left
+-- one, whose right half is empty; pdb's pane takes the editor's top right corner), so that
+-- messages the agent sends through the $NVIM controller's notify tool stand out (the tool passes
+-- the agent's name as the title). A popup belongs to the view it was shown in: it closes when
+-- another tab page (a diff) opens, where it would cover the proposed code.
 local titles = { [vim.log.levels.WARN] = 'Warning', [vim.log.levels.ERROR] = 'Error' }
 vim.notify = function(msg, level, opts)
   local function show()
@@ -112,8 +116,10 @@ vim.notify = function(msg, level, opts)
     local title = (opts and opts.title) or titles[level] or 'Notification'
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    local script = vim.fn.win_getid(1)
     local win = vim.api.nvim_open_win(buf, false, {
-      relative = 'editor', anchor = 'NE', row = 1, col = vim.o.columns - 2,
+      relative = 'win', win = script, anchor = 'SE',
+      row = vim.api.nvim_win_get_height(script) - 1, col = vim.api.nvim_win_get_width(script) - 2,
       width = math.min(width, vim.o.columns - 8), height = #lines,
       style = 'minimal', border = 'rounded', focusable = false, zindex = 200,
       title = ' ' .. title .. ' ', title_pos = 'left',
@@ -141,6 +147,60 @@ vim.api.nvim_create_autocmd('TermEnter', {
   end,
 })
 
+-- A terminal window (pdb's) shows no cursor line (nvim-gdb opens it with :vnew, which copies
+-- 'cursorline' from the script's window), and its cursor starts on the terminal's last line:
+-- Neovim scrolls a terminal window that is not in Terminal mode only when its cursor is at the
+-- end, so the pdb pane then follows pdb's output once it no longer fits.
+vim.api.nvim_create_autocmd('TermOpen', {
+  callback = function(ev)
+    for _, win in ipairs(vim.fn.win_findbuf(ev.buf)) do
+      vim.wo[win].cursorline = false
+      vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(ev.buf), 0 })
+    end
+  end,
+})
+
+-- nvim-gdb's layout: the window the session starts from (the script's, since the $NVIM
+-- controller runs Ex commands in the main editor window) becomes its source window, and
+-- termwin_command opens the debugger's terminal next to it. The default ('belowright new')
+-- stacks pdb under the script; 'belowright vnew' puts it on the right of the script instead,
+-- above Claude's split, which keeps its place. No new tab page: nvim-gdb opens one only for a
+-- second session in the same tab page. (nvim-gdb's own keys, among them <F8> for a breakpoint,
+-- are buffer-local in the source window during a session; the demo presses none of them.)
+vim.g.nvimgdb_config_override = { termwin_command = 'belowright vnew' }
+
+-- The signs nvim-gdb places in the source window: the current line (▶) and breakpoints (●). The
+-- sign column is hidden above; when a session starts, the source window (the only window of the
+-- tab page showing a file) gets one two signs wide, so that a breakpoint's ● stays visible next
+-- to the ▶ when pdb stops on it (a one-sign column shows only the ▶, which nvim-gdb places with a
+-- higher priority). nvim-gdb defines the signs' text when a session starts, which keeps the
+-- highlights given here: the current line's sign, number and text on an amber band (over the
+-- cursor line, where nvim-gdb also puts the source window's cursor; the sign column's cells on
+-- that line too, through CursorLineSign), breakpoints in red. No culhl: on the cursor line,
+-- Neovim draws every sign with the culhl of the highest-priority one, which would make the ●
+-- amber like the ▶.
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'NvimGdbStart',
+  callback = function()
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.bo[vim.api.nvim_win_get_buf(win)].buftype == '' then
+        vim.wo[win].signcolumn = 'yes:2'
+        vim.wo[win].winhighlight = 'CursorLineSign:DemoGdbLine'
+      end
+    end
+  end,
+})
+local band = '#443f2b'
+hl(0, 'DemoGdbLine', { bg = band })
+hl(0, 'DemoGdbMark', { fg = '#f9e2af', bg = band, bold = true })
+hl(0, 'DemoGdbBreakpoint', { fg = '#f38ba8' })
+vim.fn.sign_define('GdbCurrentLine', {
+  texthl = 'DemoGdbMark', numhl = 'DemoGdbMark', linehl = 'DemoGdbLine',
+})
+for i = 1, 10 do
+  vim.fn.sign_define('GdbBreakpoint' .. i, { texthl = 'DemoGdbBreakpoint' })
+end
+
 -- agent.nvim, with the default terminal layout: Claude in a split below the file, 0.4 of the
 -- editor's height (terminal.layout 'split', split_side 'below', split_size 0.4). A diff opens in a
 -- tab of its own that shows Claude too, full width below original | proposed and as tall as here
@@ -165,5 +225,5 @@ require('agent').setup({
     },
   },
 })
--- The README's recommended mapping (Normal and Visual mode).
-vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
+-- The README's recommended mapping (Normal, Visual and Terminal mode).
+vim.keymap.set({ 'n', 'x', 't' }, '<F8>', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })

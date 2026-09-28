@@ -9,13 +9,7 @@ itself serving the IDE integration each CLI expects from VS Code. Like
 (through `$NVIM`): the agent can read your unsaved buffers, open files for you, run Ex commands or
 Lua, and send you notifications.
 
-![agent.nvim demo: lines selected in Neovim show up in Claude Code's split below the file; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller, and its edit opens in a Neovim diff tab, original and proposed side by side with Claude Code still shown below, and is accepted with :w](demo/agent-nvim-demo.gif)
-
-The demo uses the default layout, the agent in a split below the file: select lines, switch to
-Claude with `<C-w>j` and type the request. Claude notifies through the $NVIM controller, and its
-edit opens in a Neovim diff tab, with Claude still in view below, where `:w` accepts it. This is
-the real Claude Code TUI, with the model's replies scripted so that the recording is reproducible
-(see [demo/](demo/)).
+![agent.nvim demo: asked to debug a Python script, Claude Code, in a split below the file, starts a pdb session through the $NVIM controller; nvim-gdb opens pdb beside the script and marks the breakpoint line, Claude's fix opens in a Neovim diff tab and is accepted with :w, and the re-run in the same pdb session prints 6.0](demo/agent-nvim-demo.gif)
 
 ## Features
 
@@ -55,7 +49,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   lazy = false,
   opts = {},
   keys = {
-    { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
+    { '<F8>', '<cmd>AgentToggle<cr>', mode = { 'n', 'x', 't' }, desc = 'Toggle agent' },
   },
 }
 ```
@@ -64,11 +58,13 @@ With `vim.pack` (Neovim 0.12+):
 
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
-vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
+vim.keymap.set({ 'n', 'x', 't' }, '<F8>', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
 ```
 
-The mapping works in Visual mode too, so that a selection reaches the agent when `<leader>ac`
-opens it (pressing `<Esc>` first would drop the selection).
+The mapping works in Visual mode too, so that a selection reaches the agent when `<F8>` opens
+it (pressing `<Esc>` first would drop the selection). It works in Terminal mode as well, where a
+function key does not get in the way of typing: `<F8>` also hides the agent from inside its
+terminal.
 
 ## Quick start
 
@@ -78,8 +74,8 @@ opens it (pressing `<Esc>` first would drop the selection).
    `:AgentToggle copilot`, `:AgentToggle gemini`). The agent connects to Neovim by itself; Gemini
    needs a [one-time setup](#gemini-cli) first.
 3. Select lines and switch to the agent straight from Visual mode: `<C-w>j` (then `i` to type), or
-   the `<leader>ac` mapping when the agent is hidden. The agent keeps the selection. Leaving Visual
-   mode in the file (`<Esc>`) drops it, and the agent then sees just the current file.
+   `<F8>` when the agent is hidden. The agent keeps the selection. Leaving Visual mode in the
+   file (`<Esc>`) drops it, and the agent then sees just the current file.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
    `<leader>aa`, reject with `<leader>ad` or by closing the tab. The tab shows the agent's
    terminal too, so you can read its prompt or answer there instead. Claude Code's default mode
@@ -186,18 +182,3 @@ Copilot and Gemini ask before each call (following their own permission settings
 in with `agents.<name>.auto_approve = true`; OpenCode allows all tools unless its own
 `permission` config says otherwise. Turn the controller off with `nvim_mcp.enabled = false`, or
 per agent with `agents.<name>.mcp = false`.
-
-## More
-
-- `:help agent.nvim`: the full reference (options, Lua API, events, per-agent details,
-  troubleshooting).
-- `:checkhealth agent`: checks the agent CLIs, the IDE servers and the controller.
-- [docs/PROTOCOLS.md](docs/PROTOCOLS.md): the four IDE protocols, for contributors.
-- Tests: `make test` (Lua specs and MCP SDK conformance), `make test-e2e` (live, real agent CLIs).
-- Demo: `make demo` re-records the GIF (see `:help agent-demo` and `demo/record.sh`).
-
-## Credits
-
-The Claude IDE protocol implementation follows
-[coder/claudecode.nvim](https://github.com/coder/claudecode.nvim), whose Lua server and protocol
-notes were the reference.

@@ -1,35 +1,82 @@
 {
-  "_comment": "Scripted model turn for demo/record.sh, served by tests/e2e/fake_model.mjs. @WORKSPACE@ is replaced with the demo workspace path.",
-  "trigger": "table.concat",
-  "delay_ms": 1200,
+  "_comment": "Scripted model turn for demo/record.sh, served by tests/e2e/fake_model.mjs. @WORKSPACE@ is replaced with the demo workspace path. The tool calls really run in the demo's Neovim: execute_command starts a pdb session with nvim-gdb (:GdbStartPDB), whose source window marks the current line with a sign; each exec_lua call sends its arguments to pdb one at a time with nvim-gdb's :Gdb command, waits for pdb's next prompt in nvim-gdb's terminal after each, and returns what pdb printed for the last one.",
+  "trigger": "pdb session",
+  "delay_ms": 1500,
   "chunk_ms": 45,
   "steps": [
     {
-      "tool": "^mcp__nvim__notify$",
-      "delay_ms": 2200,
-      "text": "I'll rewrite `greet` with `table.concat` and return \"Hello!\" for an empty list.",
+      "tool": "^mcp__nvim__execute_command$",
+      "delay_ms": 2000,
+      "text": "Starting a pdb session on `stats.py` with nvim-gdb.",
       "input": {
-        "message": "Rewriting M.greet(). Review the diff when it opens.",
-        "level": "info"
+        "command": "GdbStartPDB python3 -m pdb stats.py"
+      }
+    },
+    {
+      "tool": "^mcp__nvim__exec_lua$",
+      "delay_ms": 3500,
+      "text": "Breaking in the loop, on line 4, to print `i`, `xs[i]` and `total`.",
+      "input": {
+        "code": "-- nvim-gdb's debugger terminal (filetype nvimgdb)\nlocal b = vim.iter(vim.api.nvim_list_bufs()):find(function(b) return vim.bo[b].filetype == 'nvimgdb' end)\nlocal function prompts() return vim.fn.matchbufline(b, '(Pdb)', 1, '$') end\nfor _, cmd in ipairs({...}) do\n  local n = #prompts()\n  vim.cmd.Gdb(cmd) -- nvim-gdb's :Gdb sends the command to the debugger\n  vim.wait(5000, function() return #prompts() > n end)\nend\nlocal p = prompts()\nreturn vim.fn.getbufline(b, p[#p - 1].lnum + 1, p[#p].lnum - 1)",
+        "args": [
+          "break 4",
+          "continue",
+          "p i, xs[i], total"
+        ]
       }
     },
     {
       "tool": "^Read$",
-      "delay_ms": 2000,
+      "delay_ms": 3500,
+      "text": "pdb stopped on line 4, which nvim-gdb marks with ▶ in the script, and prints `(1, 8, 0)`: on the first pass `i` is already 1, so `xs[0]`, the 4, is never added.",
       "input": {
-        "file_path": "@WORKSPACE@/greet.lua"
+        "file_path": "@WORKSPACE@/stats.py"
       }
     },
     {
       "tool": "^Edit$",
-      "delay_ms": 2000,
+      "delay_ms": 5000,
+      "text": "`range(1, len(xs))` starts at index 1: it sums 8 + 6 = 14 and divides by 3, hence 4.67. It should start at 0.",
       "input": {
-        "file_path": "@WORKSPACE@/greet.lua",
-        "old_string": "function M.greet(names)\n  local msg = \"Hello, \"\n  for i = 1, #names do\n    msg = msg .. names[i]\n    if i < #names then\n      msg = msg .. \", \"\n    end\n  end\n  return msg .. \"!\"\nend",
-        "new_string": "function M.greet(names)\n  if #names == 0 then\n    return \"Hello!\"\n  end\n  local s = table.concat(names, \", \")\n  return \"Hello, \" .. s .. \"!\"\nend"
+        "file_path": "@WORKSPACE@/stats.py",
+        "old_string": "    for i in range(1, len(xs)):",
+        "new_string": "    for i in range(len(xs)):"
+      }
+    },
+    {
+      "tool": "^mcp__nvim__exec_lua$",
+      "delay_ms": 3000,
+      "text": "Re-running the fixed script in the same pdb session, to the same breakpoint.",
+      "input": {
+        "code": "-- nvim-gdb's debugger terminal (filetype nvimgdb)\nlocal b = vim.iter(vim.api.nvim_list_bufs()):find(function(b) return vim.bo[b].filetype == 'nvimgdb' end)\nlocal function prompts() return vim.fn.matchbufline(b, '(Pdb)', 1, '$') end\nfor _, cmd in ipairs({...}) do\n  local n = #prompts()\n  vim.cmd.Gdb(cmd) -- nvim-gdb's :Gdb sends the command to the debugger\n  vim.wait(5000, function() return #prompts() > n end)\nend\nlocal p = prompts()\nreturn vim.fn.getbufline(b, p[#p - 1].lnum + 1, p[#p].lnum - 1)",
+        "args": [
+          "restart",
+          "continue",
+          "p i, xs[i], total"
+        ]
+      }
+    },
+    {
+      "tool": "^mcp__nvim__exec_lua$",
+      "delay_ms": 4500,
+      "text": "Now `i` starts at 0, on the 4: `(0, 4, 0)`. Running to the end:",
+      "input": {
+        "code": "-- nvim-gdb's debugger terminal (filetype nvimgdb)\nlocal b = vim.iter(vim.api.nvim_list_bufs()):find(function(b) return vim.bo[b].filetype == 'nvimgdb' end)\nlocal function prompts() return vim.fn.matchbufline(b, '(Pdb)', 1, '$') end\nfor _, cmd in ipairs({...}) do\n  local n = #prompts()\n  vim.cmd.Gdb(cmd) -- nvim-gdb's :Gdb sends the command to the debugger\n  vim.wait(5000, function() return #prompts() > n end)\nend\nlocal p = prompts()\nreturn vim.fn.getbufline(b, p[#p - 1].lnum + 1, p[#p].lnum - 1)",
+        "args": [
+          "clear 1",
+          "continue"
+        ]
+      }
+    },
+    {
+      "tool": "^mcp__nvim__notify$",
+      "delay_ms": 3500,
+      "input": {
+        "message": "✓ mean([4, 8, 6]) = 6.0 in the pdb session",
+        "level": "info"
       }
     }
   ],
-  "final": "Done. `greet` now joins the names with `table.concat`, and `greet({})` returns \"Hello!\" instead of \"Hello, !\".",
-  "final_delay_ms": 1200
+  "final": "Fixed. The loop started at index 1, so `mean` never added `xs[0]`. With `range(len(xs))` the pdb session now prints 6.0.",
+  "final_delay_ms": 1500
 }

@@ -1,125 +1,97 @@
 # agent.nvim README demo. Do not run this tape directly: run demo/record.sh (or `make demo`),
-# which builds the isolated environment, exports DEMO_RC and encodes the frames written here.
+# which builds the isolated environment (nvim-gdb included), exports DEMO_RC and encodes the
+# frames written here.
 #
-# Story: open Neovim on a small Lua module, start Claude Code with :AgentToggle claude (in the
-# default split below the file; its chip shows the open file), select a function (the chip follows
-# the selection), go straight to Claude's prompt and ask for a change (Claude gets the selected
-# lines), watch the $NVIM controller's notification, review the proposed edit in a Neovim diff (a
-# tab of its own: original | proposed on top, Claude below, waiting for the review) and accept it
-# with :w, then run the new code. The model turn is scripted in demo/plan.json.
+# Story: Neovim on a small Python script whose mean() is wrong; the user opens Claude Code below
+# (:AgentToggle claude) and asks it to debug the script in a pdb session with nvim-gdb. Everything
+# else is Claude, through the $NVIM controller: it starts the session (execute_command
+# "GdbStartPDB python3 -m pdb stats.py"), which puts pdb's terminal on the right of the script,
+# sends pdb commands with nvim-gdb's :Gdb and reads pdb's answers (exec_lua), while nvim-gdb marks
+# the line pdb stopped on in the script (▶, next to the breakpoint's ●). Claude proposes the fix
+# in a Neovim diff (accepted with :w), re-runs the script in the same pdb session to the same
+# breakpoint, runs it to the end and notifies the result. The model turn is scripted in
+# demo/plan.json; Neovim, nvim-gdb, Claude Code and pdb really run.
 
 # VHS 0.12.0 cannot encode videos (see record.sh), so it only writes the frames.
 Output frames/
 
 Require nvim
 Require claude
+Require python3
 
 Set Shell "bash"
 Set FontFamily "JetBrainsMono Nerd Font"
 Set FontSize 16
 # Without VHS's default extra pixel between letters the terminal is 148 columns wide.
 Set LetterSpacing 0
-# record.sh centers the frames on a 1400x800 background when it encodes them.
+# record.sh centers the frames on a 1400x900 background when it encodes them.
 Set Width 1364
-Set Height 764
+Set Height 864
 Set Padding 0
 Set Theme "Catppuccin Mocha"
 Set Framerate 25
-Set TypingSpeed 70ms
+Set TypingSpeed 60ms
 Set CursorBlink false
 
 # Hidden setup: the isolated `nvim` function, the prompt and the working directory, then Neovim
-# on the sample project, so that the first frame (all that viewers with autoplay off see)
-# already shows the code.
+# on the script, so that the first frame (all that viewers with autoplay off see) already shows
+# the code.
 Hide
 Type@1ms 'source "$DEMO_RC"; clear'
 Enter
-Wait+Screen@10s /greeter/
-Type@1ms "nvim greet.lua"
+Wait+Screen@10s /stats/
+Type@1ms "nvim stats.py"
 Enter
-Wait+Screen@20s /M\.greet/
+Wait+Screen@20s /def mean/
 Sleep 500ms
 Show
 
-# 1. Neovim on the sample project.
+# 1. The script, then Claude Code in a split below, and the question. The split and the terminal
+# open under Hide: VHS would otherwise catch Neovim's screen clear half way (one blank frame).
 Sleep 3s
-
-# 2. Claude Code in a split below the file, connected to Neovim. The split and the terminal open
-# under Hide: VHS would otherwise catch Neovim's screen clear half way (one blank frame).
 Type ":AgentToggle claude"
 Sleep 700ms
 Hide
 Enter
 Wait+Screen@60s /Claude Code/
 Show
-Wait+Screen@60s /In greet\.lua/
-Sleep 3.5s
-
-# 3. Back in the file (<C-w>k), select the function. Claude's chip follows the selection as it
-# grows.
-Ctrl+\
-Ctrl+N
-Ctrl+W
-Type "k"
-Sleep 600ms
-Type "4G"
-Sleep 400ms
-Type "V"
-Down@200ms 9
-Wait+Screen@10s /10 lines selected/
 Sleep 3s
-
-# 4. Straight from Visual mode to Claude's prompt (<C-w>j): leaving Visual mode keeps the
-# selection, so the chip still shows the lines. Ask for the change; Claude's transcript shows
-# the selected lines went along. (The switch is hidden: it would show Neovim's normal-mode
-# cursor inside Claude's prompt for a frame.)
-Hide
-Ctrl+W
-Type "j"
-Type "i"
-Sleep 300ms
-Wait+Screen@10s /10 lines selected/
-Show
-Sleep 2s
-Type "use table.concat and handle an empty list"
+Type "mean([4, 8, 6]) prints 4.67 instead of 6.0. Debug it in a pdb session with nvim-gdb"
 Sleep 1s
 Enter
-Wait+Screen@20s /Selected 10 lines from greet\.lua/
 
-# 5. The model notifies through the $NVIM controller, then proposes an edit: a diff tab opens,
-# original | proposed on top and Claude below, where Claude shows its own permission prompt for the
-# edit.
-Wait+Screen@60s /Review the diff/
+# 2. Claude starts the session (execute_command :GdbStartPDB): pdb's terminal on the right of the
+# script, whose first line nvim-gdb marks. Then it breaks in the loop and prints the variables
+# (exec_lua, nvim-gdb's :Gdb): the mark follows pdb to line 4. The user's cursor stays in
+# Claude's pane throughout.
+Wait+Screen@60s /\(Pdb\)/
+Wait+Screen@60s /\(1, 8, 0\)/
+# 3. The analysis, then the fix as a diff in a tab of its own: original | proposed on top, Claude
+# below, where Claude shows its own permission prompt for the edit.
 Wait+Screen@60s /proposed/
-Wait+Screen@20s /Opened changes in Neovim/
-Sleep 6.5s
-
-# 6. Accept the proposal with :w. Claude writes the file and the buffer reloads. The switch back
-# is hidden until both have settled: in between, Claude redraws its whole screen (and for a
-# frame still shows its permission dialog) while the editor still shows the old code. Claude's
-# Update block is taller than its 14 rows: the wait is for its last lines (its '+' line for the
-# new return), not for its 'Added N lines' header, which has scrolled out of the pane.
+Wait+Screen@30s /Do you want to make this edit/
+Sleep 6s
+Escape
 Type ":w"
 Sleep 700ms
+# Accepted: Claude writes the file, the buffer reloads, the diff's tab closes and the focus goes
+# back to Claude's pane, in Terminal mode (which also clears the ":w" from the command line).
+# Hidden until all of that has settled.
 Hide
 Enter
-Wait+Screen@60s /\d \+\s+return "Hello, "/
-Wait+Screen@10s /(?m)^\s*12 return M/
+Wait+Screen@60s /\+\s+for i in range\(len\(xs\)\):/
+Wait+Screen@10s /(?m)^.{0,3}\s*3\s+for i in range\(len\(xs\)\):/
+Wait+Screen@10s /TERMINAL/
+Sleep 300ms
 Show
-Wait+Screen@60s /instead of/
-Sleep 4s
-
-# 7. The result: back in the editor, the new greet() handles the empty list.
-Ctrl+\
-Ctrl+N
-Ctrl+W
-Type "k"
-Sleep 1s
-Type ":=require('greet').greet({})"
-Sleep 700ms
-Enter
-Wait+Screen@10s /(?m)^"Hello!"/
-Sleep 3s
+# 4. The same pdb session re-runs the fixed script to the same breakpoint (the mark is back on
+# line 4 under the fixed loop), then to the end; Claude notifies the result.
+Wait+Screen@60s /\(0, 4, 0\)/
+Wait+Screen@60s /The program finished/
+Wait+Screen@60s /= 6\.0 in the pdb session/
+Wait+Screen@60s /now prints 6\.0/
+# 5. Hold the final frame.
+Sleep 6s
 
 # Hidden teardown.
 Hide
@@ -127,4 +99,4 @@ Ctrl+\
 Ctrl+N
 Type ":qa!"
 Enter
-Wait@20s /greeter/
+Wait@20s /stats/
