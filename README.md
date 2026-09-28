@@ -49,7 +49,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   lazy = false,
   opts = {},
   keys = {
-    { '<F8>', '<cmd>AgentToggle<cr>', mode = { 'n', 'x', 't' }, desc = 'Toggle agent' },
+    { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
   },
 }
 ```
@@ -58,13 +58,11 @@ With `vim.pack` (Neovim 0.12+):
 
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
-vim.keymap.set({ 'n', 'x', 't' }, '<F8>', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
+vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
 ```
 
-The mapping works in Visual mode too, so that a selection reaches the agent when `<F8>` opens
-it (pressing `<Esc>` first would drop the selection). It works in Terminal mode as well, where a
-function key does not get in the way of typing: `<F8>` also hides the agent from inside its
-terminal.
+The mapping works in Visual mode too, so that a selection reaches the agent when `<leader>ac`
+opens it (pressing `<Esc>` first would drop the selection).
 
 ## Quick start
 
@@ -74,8 +72,8 @@ terminal.
    `:AgentToggle copilot`, `:AgentToggle gemini`). The agent connects to Neovim by itself; Gemini
    needs a [one-time setup](#gemini-cli) first.
 3. Select lines and switch to the agent straight from Visual mode: `<C-w>j` (then `i` to type), or
-   `<F8>` when the agent is hidden. The agent keeps the selection. Leaving Visual mode in the
-   file (`<Esc>`) drops it, and the agent then sees just the current file.
+   the `<leader>ac` mapping when the agent is hidden. The agent keeps the selection. Leaving Visual
+   mode in the file (`<Esc>`) drops it, and the agent then sees just the current file.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
    `<leader>aa`, reject with `<leader>ad` or by closing the tab. The tab shows the agent's
    terminal too, so you can read its prompt or answer there instead. Claude Code's default mode

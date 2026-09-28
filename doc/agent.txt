@@ -83,7 +83,7 @@ lazy.nvim: >lua
       lazy = false,
       opts = {},
       keys = {
-        { '<F8>', '<cmd>AgentToggle<cr>', mode = { 'n', 'x', 't' },
+        { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' },
           desc = 'Toggle agent' },
       },
     }
@@ -98,12 +98,10 @@ start an agent yourself.
 vim.pack (Neovim 0.12+): >lua
     vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
     require('agent').setup({})
-    vim.keymap.set({ 'n', 'x', 't' }, '<F8>', '<cmd>AgentToggle<cr>')
+    vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>')
 <
 The mappings work in Visual mode too (`x`), so that a selection reaches the
-agent when <F8> opens it: <Esc> first would drop it (|agent-context|). They
-work in Terminal mode (`t`) as well, where a function key does not get in the
-way of typing: <F8> also hides the agent from inside its terminal.
+agent when <leader>ac opens it: <Esc> first would drop it (|agent-context|).
 
 Calling setup() is optional: every command calls setup({}) the first time it
 runs, if setup() has not been called yet.
@@ -119,8 +117,8 @@ runs, if setup() has not been called yet.
    agent connects to it by itself. One agent runs at a time: starting
    another one asks first (|agent-replace|).
 3. Select lines and switch to the agent window straight from Visual mode:
-   <C-w>j (then `i` to type), or <F8> (|agent-install|) when the agent
-   is hidden. The agent keeps the selection. Leaving Visual mode in
+   <C-w>j (then `i` to type), or <leader>ac (|agent-install|) when the
+   agent is hidden. The agent keeps the selection. Leaving Visual mode in
    the file (<Esc>) drops it, and the agent then sees just the current
    file. See |agent-context|.
 4. Ask the agent to change a file. When it asks for permission, a diff tab

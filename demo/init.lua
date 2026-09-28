@@ -165,8 +165,8 @@ vim.api.nvim_create_autocmd('TermOpen', {
 -- termwin_command opens the debugger's terminal next to it. The default ('belowright new')
 -- stacks pdb under the script; 'belowright vnew' puts it on the right of the script instead,
 -- above Claude's split, which keeps its place. No new tab page: nvim-gdb opens one only for a
--- second session in the same tab page. (nvim-gdb's own keys, among them <F8> for a breakpoint,
--- are buffer-local in the source window during a session; the demo presses none of them.)
+-- second session in the same tab page. (nvim-gdb's own keys are buffer-local in the source window
+-- during a session; the demo presses none of them.)
 vim.g.nvimgdb_config_override = { termwin_command = 'belowright vnew' }
 
 -- The signs nvim-gdb places in the source window: the current line (▶) and breakpoints (●). The
@@ -225,5 +225,6 @@ require('agent').setup({
     },
   },
 })
--- The README's recommended mapping (Normal, Visual and Terminal mode).
-vim.keymap.set({ 'n', 'x', 't' }, '<F8>', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
+-- The README's recommended mapping (Normal and Visual mode).
+vim.g.mapleader = ' '
+vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
