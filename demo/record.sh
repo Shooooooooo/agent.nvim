@@ -1,5 +1,5 @@
 #!/bin/sh
-# Records the README demo: demo/agent-nvim-demo.gif and demo/agent-nvim-demo.mp4.
+# Records the README demo: demo/agent-nvim-demo.gif.
 #
 #   demo/record.sh        (or: make demo)
 #
@@ -18,10 +18,10 @@
 # VHS types demo/demo.tape into a bash that sources the generated rc file ($DEMO_RC), which
 # defines `nvim` as that isolated Neovim with demo/init.lua. VHS 0.12.0 cannot encode videos
 # itself (its ffmpeg step runs with an already cancelled context), so the tape writes PNG frames
-# and this script encodes them with ffmpeg (after replacing any frame captured as an empty screen,
-# see step 4).
+# and this script encodes the GIF with ffmpeg (after replacing any frame captured as an empty
+# screen, see step 4).
 #
-# Variables: DEMO_OUT (directory for the GIF and MP4, default demo/; use a scratch directory for
+# Variables: DEMO_OUT (directory for the GIF, default demo/; use a scratch directory for
 # trial runs, since every run differs slightly: clock, spinner words, session hash),
 # DEMO_KEEP=1 keeps the temp dir (frames, model log), DEMO_TIMEOUT (seconds for vhs, default 300).
 set -u
@@ -166,11 +166,7 @@ echo "encoding $nframes frames ($(awk "BEGIN { printf \"%.1f\", $nframes / $FPS 
 LAYERS="[0][1]overlay,pad=$W:$H:(ow-iw)/2:(oh-ih)/2:$BG"
 perl -e 'alarm shift; exec @ARGV' 600 ffmpeg -y -v error -framerate $FPS -i "$ROOT/frames/frame-text-%05d.png" \
   -framerate $FPS -i "$ROOT/frames/frame-cursor-%05d.png" \
-  -filter_complex "$LAYERS,format=yuv420p" -c:v libx264 -preset slow -crf 20 -movflags +faststart -an \
-  "$ROOT/agent-nvim-demo.mp4" || exit 1
-perl -e 'alarm shift; exec @ARGV' 600 ffmpeg -y -v error -framerate $FPS -i "$ROOT/frames/frame-text-%05d.png" \
-  -framerate $FPS -i "$ROOT/frames/frame-cursor-%05d.png" \
   -filter_complex "$LAYERS,split[a][b];[a]palettegen=max_colors=256:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
   "$ROOT/agent-nvim-demo.gif" || exit 1
-mv "$ROOT/agent-nvim-demo.mp4" "$ROOT/agent-nvim-demo.gif" "$OUT/" || exit 1
-ls -l "$OUT/agent-nvim-demo.gif" "$OUT/agent-nvim-demo.mp4"
+mv "$ROOT/agent-nvim-demo.gif" "$OUT/" || exit 1
+ls -l "$OUT/agent-nvim-demo.gif"

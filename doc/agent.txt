@@ -1232,14 +1232,14 @@ the baseline there, or "below", the plugin's default).
                                                                   *agent-demo*
 The demo ~
 `make demo` (demo/record.sh) re-records the README demo,
-demo/agent-nvim-demo.gif and demo/agent-nvim-demo.mp4, with VHS
-(https://github.com/charmbracelet/vhs), which types demo/demo.tape into a
-real Neovim running the real Claude Code 2.1.283 TUI. Only the model is fake:
-its replies come from the same local endpoint as the end-to-end test
-(tests/e2e/fake_model.mjs) playing demo/plan.json, so the recording is
-reproducible, and the model name in Claude's header is only its default.
-HOME, the XDG directories and CLAUDE_CONFIG_DIR point to a temp directory, so
-your Claude account and config are never used.
+demo/agent-nvim-demo.gif, with VHS (https://github.com/charmbracelet/vhs),
+which types demo/demo.tape into a real Neovim running the real Claude Code
+2.1.283 TUI. Only the model is fake: its replies come from the same local
+endpoint as the end-to-end test (tests/e2e/fake_model.mjs) playing
+demo/plan.json, so the recording is reproducible, and the model name in
+Claude's header is only its default. HOME, the XDG directories and
+CLAUDE_CONFIG_DIR point to a temp directory, so your Claude account and config
+are never used.
 
 The demo config, demo/init.lua, keeps the default layout (the agent in a
 split below the file), starts Claude with `--permission-mode manual` so that

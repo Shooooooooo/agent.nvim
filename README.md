@@ -4,13 +4,18 @@ Run Claude Code, OpenCode, GitHub Copilot CLI or Gemini CLI in a Neovim terminal
 itself serving the IDE integration each CLI expects from VS Code. Like
 [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim), but for four agents.
 
+**The agent can also drive Neovim.** Every agent that agent.nvim launches gets the
+[$NVIM controller](#the-nvim-controller), an MCP server connected to the Neovim hosting the agent
+(through `$NVIM`): the agent can read your unsaved buffers, open files for you, run Ex commands or
+Lua, and send you notifications.
+
 ![agent.nvim demo: lines selected in Neovim show up in Claude Code's split below the file; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller, and its edit opens in a Neovim diff tab, original and proposed side by side with Claude Code still shown below, and is accepted with :w](demo/agent-nvim-demo.gif)
 
 The demo uses the default layout, the agent in a split below the file: select lines, switch to
 Claude with `<C-w>j` and type the request. Claude notifies through the $NVIM controller, and its
 edit opens in a Neovim diff tab, with Claude still in view below, where `:w` accepts it. This is
 the real Claude Code TUI, with the model's replies scripted so that the recording is reproducible
-(see [demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
+(see [demo/](demo/)).
 
 ## Features
 
@@ -190,7 +195,7 @@ per agent with `agents.<name>.mcp = false`.
 - `:checkhealth agent`: checks the agent CLIs, the IDE servers and the controller.
 - [docs/PROTOCOLS.md](docs/PROTOCOLS.md): the four IDE protocols, for contributors.
 - Tests: `make test` (Lua specs and MCP SDK conformance), `make test-e2e` (live, real agent CLIs).
-- Demo: `make demo` re-records the GIF and MP4 (see `:help agent-demo` and `demo/record.sh`).
+- Demo: `make demo` re-records the GIF (see `:help agent-demo` and `demo/record.sh`).
 
 ## Credits
 
