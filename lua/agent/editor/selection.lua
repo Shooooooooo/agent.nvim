@@ -12,14 +12,14 @@
 --- held for a grace period of M.DEMOTE_MS. When it ends, the selection is dropped (the cursor is
 --- reported) if a file window has focus: <Esc>, y, d, >, a click in the file, another file window.
 --- If the focus went elsewhere, typically straight from Visual mode to the agent terminal (<C-w>l,
---- a `<cmd>Agent<cr>` mapping), the selection is kept for the agent until a file window has focus
---- again. Re-entering Visual mode cancels the grace period. A command line opened from Visual mode
---- (':', which leaves Visual mode first, or a search, which does not), and the command-line window
---- opened from it (q:, <C-f>), pause it: the selection is kept while they are open, and the same
---- decision is made M.DEMOTE_MS after they close, once the command has run: dropped when it left a
---- file window focused (:'<,'>s/../../, a cancelled command line), kept when it moved to the agent
---- terminal. Mode changes inside the command-line window (Insert mode, Visual mode to edit the
---- command) keep it paused.
+--- a `<cmd>AgentToggle<cr>` mapping), the selection is kept for the agent until a file window has
+--- focus again. Re-entering Visual mode cancels the grace period. A command line opened from Visual
+--- mode (':', which leaves Visual mode first, or a search, which does not), and the command-line
+--- window opened from it (q:, <C-f>), pause it: the selection is kept while they are open, and the
+--- same decision is made M.DEMOTE_MS after they close, once the command has run: dropped when it
+--- left a file window focused (:'<,'>s/../../, a cancelled command line), kept when it moved to the
+--- agent terminal. Mode changes inside the command-line window (Insert mode, Visual mode to edit
+--- the command) keep it paused.
 ---
 --- An edit decides whether the selection was consumed. When Visual mode ends, the buffer is compared
 --- with its state when the selection was last seen in Visual mode (changedtick): an edit since then

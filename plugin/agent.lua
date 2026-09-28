@@ -21,7 +21,7 @@ local function complete_agents(lead)
 end
 
 local commands = {
-  { 'Agent', { nargs = '?', complete = complete_agents,
+  { 'AgentToggle', { nargs = '?', complete = complete_agents,
     desc = 'Toggle the agent terminal (starting another agent replaces the running one)' } },
   { 'AgentOpen', { nargs = '?', complete = complete_agents, desc = 'Open (start or show) the agent terminal' } },
   { 'AgentClose', { nargs = 0, desc = 'Hide the agent terminal (the agent keeps running)' } },

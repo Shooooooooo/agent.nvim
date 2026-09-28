@@ -83,10 +83,10 @@ lazy.nvim: >lua
       main = 'agent',
       opts = {},
       keys = {
-        { '<leader>ac', '<cmd>Agent<cr>', mode = { 'n', 'x' },
+        { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' },
           desc = 'Toggle agent' },
       },
-      cmd = { 'Agent', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig',
+      cmd = { 'AgentToggle', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig',
               'AgentGeminiSetup' },
     }
 <
@@ -96,7 +96,7 @@ must already be running when you start an agent yourself.
 vim.pack (Neovim 0.12+): >lua
     vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
     require('agent').setup({})
-    vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>Agent<cr>')
+    vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>')
 <
 The mappings work in Visual mode too (`x`), so that a selection reaches the
 agent when <leader>ac opens it: <Esc> first would drop it (|agent-context|).
@@ -109,11 +109,11 @@ runs, if setup() has not been called yet.
 
 1. Run `:checkhealth agent`. It shows which agent CLIs are installed and
    whether anything blocks the IDE connection or the $NVIM controller.
-2. Run |:Agent| to open the default agent (claude) in a split below your
-   file, or `:Agent copilot`, `:Agent gemini` or `:Agent opencode`. The IDE
-   server starts with the agent, and the agent connects to it by itself.
-   One agent runs at a time: starting another one asks first
-   (|agent-replace|).
+2. Run |:AgentToggle| to open the default agent (claude) in a split below
+   your file, or `:AgentToggle copilot`, `:AgentToggle gemini` or
+   `:AgentToggle opencode`. The IDE server starts with the agent, and the
+   agent connects to it by itself. One agent runs at a time: starting
+   another one asks first (|agent-replace|).
 3. Select lines and switch to the agent window straight from Visual mode:
    <C-w>j (then `i` to type), or <leader>ac (|agent-install|) when the
    agent is hidden. The agent keeps the selection. Leaving Visual mode in
@@ -124,8 +124,8 @@ runs, if setup() has not been called yet.
    (or <leader>aa), reject with <leader>ad or by closing the tab. See
    |agent-diff|. Claude Code starts in auto mode, which applies most edits
    without asking; see |agent-claude|.
-5. Run |:Agent| again to hide the terminal. The agent keeps running. For a
-   split beside your code, set `terminal.split_side = 'right'`; to show
+5. Run |:AgentToggle| again to hide the terminal. The agent keeps running. For
+   a split beside your code, set `terminal.split_side = 'right'`; to show
    the agent in place of your file, `terminal.layout = 'current'`
    (|agent-config|).
 
@@ -136,8 +136,8 @@ run |:AgentGeminiSetup| once. See |agent-gemini|.
 5. Commands                                                   *agent-commands*
 
 One agent runs at a time. [name] defaults to the running agent, and then to
-`default_agent`. |:Agent|, |:AgentOpen| and |:AgentMcpConfig| complete agent
-names.
+`default_agent`. |:AgentToggle|, |:AgentOpen| and |:AgentMcpConfig| complete
+agent names.
 
                                                                *agent-replace*
 Starting an agent while a different one runs, hidden or visible, asks first,
@@ -147,8 +147,8 @@ nothing. If the new agent's executable is not found, the error is shown
 before the question and the running agent is kept. An agent that has already
 exited, with its terminal left open, is replaced without asking.
 
-                                                                      *:Agent*
-:Agent [name]
+                                                                *:AgentToggle*
+:AgentToggle [name]
     Toggle the agent terminal: hide it when [name] runs in it and it is
     visible in this tab page (its windows in other tab pages stay),
     otherwise open it (starting [name] if needed, see |agent-replace|) and
@@ -231,7 +231,7 @@ require('agent').open({name}, {opts})
 
                                                               *agent.toggle()*
 require('agent').toggle({name}, {opts})
-    Like |:Agent|. Arguments and return values as for |agent.open()|.
+    Like |:AgentToggle|. Arguments and return values as for |agent.open()|.
 
                                                                *agent.close()*
 require('agent').close()
@@ -352,8 +352,8 @@ log_file (nil)
     File that log lines at `log_level` and above are appended to. Use an
     absolute path.
 default_agent ("claude")
-    Agent that |:Agent|, |:AgentOpen| and |agent.open()| start when they get
-    no name and no agent is running. |:AgentMcpConfig| without a name also
+    Agent that |:AgentToggle|, |:AgentOpen| and |agent.open()| start when they
+    get no name and no agent is running. |:AgentMcpConfig| without a name also
     uses it.
 auto_start (false)
     Start every enabled IDE server at setup() and keep it running when the
@@ -366,16 +366,16 @@ terminal.layout ("split")
     a split on the `terminal.split_side` edge: by default below your code,
     as wide as the editor. "current" is described below. "none" means the
     plugin does not start agents: you run them yourself (combine it with
-    `auto_start = true`). With "tab", |:Agent| and |:AgentOpen| from a tab
-    page that does not show the terminal go to the terminal's own tab page,
-    if it still has one. The layout of one call can be given to
+    `auto_start = true`). With "tab", |:AgentToggle| and |:AgentOpen| from a
+    tab page that does not show the terminal go to the terminal's own tab
+    page, if it still has one. The layout of one call can be given to
     |agent.open()| and |agent.toggle()| (|agent-open-opts|).
 
                                                         *agent-layout-current*
     "current" shows the agent in the current window, in place of its
     buffer, as |:terminal| does. The window remembers that buffer and its
     view (cursor, scroll) in |w:agent_nvim_prev|.
-    - Hiding the agent (|:Agent|, |:AgentClose|; it keeps running),
+    - Hiding the agent (|:AgentToggle|, |:AgentClose|; it keeps running),
       stopping it (|:AgentStop|, |agent-replace|) and its exit with
       `terminal.auto_close` do not close that window, even when it is the
       last one: it shows its buffer again, with its view. When that buffer
@@ -399,8 +399,8 @@ terminal.layout ("split")
       else the largest window showing a file); when there is none, as in a
       diff tab page, to a split on `terminal.split_side`, as with "split".
       That split closes when the agent is hidden.
-    - When the agent is already shown in this tab page, |:Agent| hides it
-      and |:AgentOpen| focuses its window. When it is shown only in another
+    - When the agent is already shown in this tab page, |:AgentToggle| hides
+      it and |:AgentOpen| focuses its window. When it is shown only in another
       tab page, both show it in the current window here too.
     - The window options the terminal needs (no 'number', no 'wrap', ...)
       are set for the terminal buffer only: the window keeps yours.
@@ -426,9 +426,9 @@ terminal.split_size (0.4)
 terminal.float ({ width = 0.85, height = 0.85, border = 'rounded' })
     Size (fractions) and border of the floating window.
 terminal.start_insert (true)
-    Enter Terminal mode when agent.nvim opens or shows the terminal (|:Agent|,
-    |:AgentOpen|, |agent.open()|). Moving into its window yourself keeps
-    Normal mode.
+    Enter Terminal mode when agent.nvim opens or shows the terminal
+    (|:AgentToggle|, |:AgentOpen|, |agent.open()|). Moving into its window
+    yourself keeps Normal mode.
 terminal.auto_close (true)
     Close the terminal when the agent exits. An agent that exits non-zero
     within 5 seconds keeps its terminal open, so startup errors stay
@@ -583,9 +583,9 @@ current one.
 
 Select lines, then switch to the agent straight from Visual mode: with <C-w>j
 to the agent's split below (the default; <C-w>l to a split on the right), or
-with a Visual-mode mapping to `<cmd>Agent<cr>` (|agent-install|) when the
-agent is hidden. Where the focus is 50 ms after you leave Visual mode decides
-what happens to the selection:
+with a Visual-mode mapping to `<cmd>AgentToggle<cr>` (|agent-install|) when
+the agent is hidden. Where the focus is 50 ms after you leave Visual mode
+decides what happens to the selection:
 - A file window (<Esc>, y, d, >, a click in the file, <C-w>k to another
   file): the selection is dropped, and the agent sees just the file and the
   cursor.
@@ -1043,11 +1043,11 @@ its own split. It is one more window on the same terminal, for the "split",
   agent is hidden from its own window, its screen shrinks to this one.
 - The cursor starts in the proposal, so `:w` accepts. Move to the agent's
   window to read its prompt or to answer there instead. Hiding it from
-  there (|:Agent|, |:AgentClose|) takes the cursor back to the window you
-  came from, such as the proposal.
+  there (|:AgentToggle|, |:AgentClose|) takes the cursor back to the window
+  you came from, such as the proposal.
 - Closing the diff, however it ends, closes this window too. The agent keeps
   running in its own window.
-- |:AgentClose| there hides only this window, and |:Agent| hides it or,
+- |:AgentClose| there hides only this window, and |:AgentToggle| hides it or,
   with the "split" and "current" layouts, shows it again (on the
   `terminal.split_side` edge: the diff's windows are not given to the
   agent). The agent's window in the other tab page stays.

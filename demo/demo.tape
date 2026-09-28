@@ -1,12 +1,12 @@
 # agent.nvim README demo. Do not run this tape directly: run demo/record.sh (or `make demo`),
 # which builds the isolated environment, exports DEMO_RC and encodes the frames written here.
 #
-# Story: open Neovim on a small Lua module, start Claude Code with :Agent claude (in the default
-# split below the file; its chip shows the open file), select a function (the chip follows the
-# selection), go straight to Claude's prompt and ask for a change (Claude gets the selected lines),
-# watch the $NVIM controller's notification, review the proposed edit in a Neovim diff (a tab of
-# its own: original | proposed on top, Claude below, waiting for the review) and accept it with :w,
-# then run the new code. The model turn is scripted in demo/plan.json.
+# Story: open Neovim on a small Lua module, start Claude Code with :AgentToggle claude (in the
+# default split below the file; its chip shows the open file), select a function (the chip follows
+# the selection), go straight to Claude's prompt and ask for a change (Claude gets the selected
+# lines), watch the $NVIM controller's notification, review the proposed edit in a Neovim diff (a
+# tab of its own: original | proposed on top, Claude below, waiting for the review) and accept it
+# with :w, then run the new code. The model turn is scripted in demo/plan.json.
 
 # VHS 0.12.0 cannot encode videos (see record.sh), so it only writes the frames.
 Output frames/
@@ -46,7 +46,7 @@ Sleep 3s
 
 # 2. Claude Code in a split below the file, connected to Neovim. The split and the terminal open
 # under Hide: VHS would otherwise catch Neovim's screen clear half way (one blank frame).
-Type ":Agent claude"
+Type ":AgentToggle claude"
 Sleep 700ms
 Hide
 Enter

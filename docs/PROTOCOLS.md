@@ -44,7 +44,7 @@ IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable 
   `DEMOTE_MS` (50 ms). If a file window then has focus (`<Esc>`, `y`, `d`, a click in the file),
   it is replaced by the cursor, sent as an empty selection (Gemini: no `selectedText`). A cursor
   move or text change during the grace period drops it at once. If focus went straight to the
-  agent terminal or another non-file window (`<C-w>l`, `<cmd>Agent<cr>`), it is kept until a
+  agent terminal or another non-file window (`<C-w>l`, `<cmd>AgentToggle<cr>`), it is kept until a
   file window has focus again. Re-entering Visual mode cancels the drop. A command line opened
   from Visual mode pauses the grace period, which restarts once the command has run.
 - **Blocking tools.** A diff tool that waits for the user must be answered asynchronously. Never

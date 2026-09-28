@@ -15,7 +15,7 @@ M.defaults = {
   ---@type string|nil  Optional file path; logs are appended there in addition to vim.notify (warn+)
   log_file = nil,
 
-  ---@type string  Agent that :Agent and :AgentOpen start without an argument when no agent is running
+  ---@type string  Agent that :AgentToggle and :AgentOpen start without an argument when no agent is running
   default_agent = 'claude',
 
   ---@type boolean  Start every enabled provider at setup() and keep it running when the agent stops, so agents

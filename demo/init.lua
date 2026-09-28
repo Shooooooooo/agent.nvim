@@ -166,4 +166,4 @@ require('agent').setup({
   },
 })
 -- The README's recommended mapping (Normal and Visual mode).
-vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })
+vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })

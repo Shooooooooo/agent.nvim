@@ -648,7 +648,7 @@ local function report(ok, err, prefix)
   end
 end
 
-function commands.Agent(o)
+function commands.AgentToggle(o)
   local buf, err = M.toggle(arg1(o), { silent = true })
   report(buf ~= nil, err)
 end

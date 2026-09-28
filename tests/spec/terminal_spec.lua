@@ -689,7 +689,7 @@ describe('terminal', function()
       at_bottom(shown, 'open() in another tab page')
       more({ shown }, 'open() in another tab page')
       -- Hidden everywhere (last seen scrolled back to the top), more output, then shown again
-      -- (:Agent), in Normal mode (no start_insert).
+      -- (:AgentToggle), in Normal mode (no start_insert).
       assert.truthy(terminal.close())
       api.nvim_set_current_tabpage(tab1)
       api.nvim_win_set_cursor(main_win, { 1, 0 })
@@ -815,7 +815,7 @@ describe('terminal', function()
       local extra = assert(terminal.split_here())
       assert.eq(math.floor(vim.o.columns * 0.3), api.nvim_win_get_width(extra))
       assert.eq(3, #api.nvim_list_tabpages())
-      -- Hidden here, :Agent goes to its own tab page instead of opening another one.
+      -- Hidden here, :AgentToggle goes to its own tab page instead of opening another one.
       assert.eq(buf, terminal.toggle('fake'))
       assert.falsy(api.nvim_win_is_valid(extra))
       assert.eq(tab2, api.nvim_get_current_tabpage())
@@ -1221,7 +1221,7 @@ describe('terminal', function()
       vim.cmd('execute "normal! \\<C-^>"')
       assert.eq(a, buf_of(w2))
       assert.eq(b, alt_of(w2))
-      -- :Agent twice from there: # is b.txt again, and the window stays.
+      -- :AgentToggle twice from there: # is b.txt again, and the window stays.
       assert.eq(buf, terminal.toggle('fake'))
       assert.eq(buf, buf_of(w2))
       assert.eq(buf, terminal.toggle('fake'))

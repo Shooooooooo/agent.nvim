@@ -15,8 +15,8 @@ the real Claude Code TUI, with the model's replies scripted so that the recordin
 ## Features
 
 - The agent runs in a split (below your file by default), a float, a tab or the current window.
-  `:Agent` toggles the terminal; the agent keeps running while hidden. One agent runs at a time:
-  starting another one asks before replacing it.
+  `:AgentToggle` toggles the terminal; the agent keeps running while hidden. One agent runs at a
+  time: starting another one asks before replacing it.
 - The agent automatically sees your current file and visual selection.
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
@@ -50,9 +50,9 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   main = 'agent',
   opts = {},
   keys = {
-    { '<leader>ac', '<cmd>Agent<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
+    { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
   },
-  cmd = { 'Agent', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' },
+  cmd = { 'AgentToggle', 'AgentOpen', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' },
 }
 ```
 
@@ -60,7 +60,7 @@ With `vim.pack` (Neovim 0.12+):
 
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
-vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })
+vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
 ```
 
 The mapping works in Visual mode too, so that a selection reaches the agent when `<leader>ac`
@@ -70,9 +70,9 @@ opens it (pressing `<Esc>` first would drop the selection).
 
 1. Run `:checkhealth agent` to see which agent CLIs are installed and whether anything blocks the
    connection.
-2. Run `:Agent` to open Claude in a split below your file (or `:Agent opencode`,
-   `:Agent copilot`, `:Agent gemini`). The agent connects to Neovim by itself; Gemini needs a
-   [one-time setup](#gemini-cli) first.
+2. Run `:AgentToggle` to open Claude in a split below your file (or `:AgentToggle opencode`,
+   `:AgentToggle copilot`, `:AgentToggle gemini`). The agent connects to Neovim by itself; Gemini
+   needs a [one-time setup](#gemini-cli) first.
 3. Select lines and switch to the agent straight from Visual mode: `<C-w>j` (then `i` to type), or
    the `<leader>ac` mapping when the agent is hidden. The agent keeps the selection. Leaving Visual
    mode in the file (`<Esc>`) drops it, and the agent then sees just the current file.
@@ -80,15 +80,15 @@ opens it (pressing `<Esc>` first would drop the selection).
    `<leader>aa`, reject with `<leader>ad` or by closing the tab. The tab shows the agent's
    terminal too, so you can read its prompt or answer there instead. Claude Code's default mode
    rarely asks, see [Claude Code](#claude-code).
-5. Run `:Agent` again to hide the terminal. The agent keeps running. For a split beside your code
-   instead, set `terminal.split_side = 'right'`; to show the agent in place of your file,
+5. Run `:AgentToggle` again to hide the terminal. The agent keeps running. For a split beside your
+   code instead, set `terminal.split_side = 'right'`; to show the agent in place of your file,
    `terminal.layout = 'current'`.
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `:Agent [name]` | Toggle the agent terminal, starting the agent if needed. |
+| `:AgentToggle [name]` | Toggle the agent terminal, starting the agent if needed. |
 | `:AgentOpen [name]` | Open (start or show) the agent terminal and focus it. |
 | `:AgentClose` | Hide the terminal (in a diff tab, only there). The agent keeps running. |
 | `:AgentStop` | Stop the agent, and its IDE server unless `auto_start` is on. |

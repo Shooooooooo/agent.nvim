@@ -11,8 +11,9 @@
 --- config.terminal.split_side, as large as the terminal's own split) and declines when there is
 --- no agent terminal or its layout is float or none. It is one more window on the terminal buffer:
 --- the teardown closes it, and any other window of the diff's tab page on the agent terminal (one
---- the user showed there again with :Agent or :AgentOpen), which never stops the agent. Whenever the
---- agent terminal comes into a tab page with a diff, the original and the proposal share the rest.
+--- the user showed there again with :AgentToggle or :AgentOpen), which never stops the agent.
+--- Whenever the agent terminal comes into a tab page with a diff, the original and the proposal
+--- share the rest.
 ---  * Left: the file's own buffer when it is loaded and its text equals the file on disk; otherwise
 ---    a read-only scratch copy of the file on disk (empty for a file that does not exist yet). So an
 ---    original buffer with unsaved changes is never shown as "the original".
@@ -284,8 +285,8 @@ local function balance(d)
 end
 
 ---The windows of the diff's tab page that show the agent terminal: its own view (split_here()) and
----any other, such as one the user showed there again with :Agent or :AgentOpen, or an agent started
----there. None for a diff without a tab page of its own (open_in = 'current').
+---any other, such as one the user showed there again with :AgentToggle or :AgentOpen, or an agent
+---started there. None for a diff without a tab page of its own (open_in = 'current').
 ---@param d table
 ---@return { win: integer, buf: integer }[]
 local function agent_windows(d)
@@ -971,8 +972,9 @@ function M._stop_watchers()
   end
 end
 
----The agent terminal came into a window: in a tab page with a diff (shown there again by :Agent or
----:AgentOpen, or an agent started there), the diff's original and proposal share what it leaves.
+---The agent terminal came into a window: in a tab page with a diff (shown there again by
+---:AgentToggle or :AgentOpen, or an agent started there), the diff's original and proposal share
+---what it leaves.
 ---@param buf integer  the buffer that came into a window
 ---@param win integer
 local function on_terminal_shown(buf, win)

@@ -816,8 +816,8 @@ describe('editor.diff', function()
       assert.eq(main_height, api.nvim_win_get_height(term_win))
       assert.truthy(math.abs(api.nvim_win_get_width(orig_win) - api.nvim_win_get_width(prop_win)) <= 1)
       assert.eq(prop_win, api.nvim_get_current_win())
-      -- In the agent's window, :Agent (or :AgentClose) hides it: back in the proposal, not in the
-      -- original (Neovim's pick for the window left above), so :w accepts.
+      -- In the agent's window, :AgentToggle (or :AgentClose) hides it: back in the proposal, not in
+      -- the original (Neovim's pick for the window left above), so :w accepts.
       for _, hide in ipairs({ 'toggle', 'close' }) do
         api.nvim_set_current_win(prop_win)
         if hide == 'close' then
@@ -1039,7 +1039,7 @@ describe('editor.diff', function()
       assert.eq(0, terminal.info().exit_code)
     end)
 
-    it(':AgentClose and :Agent in the diff tab page act on its terminal window only', function()
+    it(':AgentClose and :AgentToggle in the diff tab page act on its terminal window only', function()
       local path = write('a.txt', { 'x' })
       vim.cmd('edit ' .. vim.fn.fnameescape(path))
       local buf, main_win = start_agent()
@@ -1107,7 +1107,7 @@ describe('editor.diff', function()
         api.nvim_set_current_win(vim.fn.bufwinid(diff.get(id).bufnr))
       end
 
-      -- :Agent twice: hidden, then shown again (focused); :w in the proposal.
+      -- :AgentToggle twice: hidden, then shown again (focused); :w in the proposal.
       local calls = reshown('twice', function()
         assert.eq(buf, terminal.toggle('fake'))
         assert.eq(0, #wins_of(buf, 0))
@@ -1117,7 +1117,7 @@ describe('editor.diff', function()
       vim.cmd('write')
       gone(calls, 'accepted')
 
-      -- :AgentClose, then :Agent.
+      -- :AgentClose, then :AgentToggle.
       calls = reshown('close-toggle', function()
         assert.truthy(terminal.close())
         assert.eq(buf, terminal.toggle('fake'))
@@ -1278,7 +1278,7 @@ describe('editor.diff', function()
         assert.same({ agent_win }, vim.fn.win_findbuf(buf))
       end)
 
-      it(':AgentClose and :Agent in the diff tab page: the diff windows are never given to the agent', function()
+      it(':AgentClose and :AgentToggle in the diff tab page: the diff windows are never given to the agent', function()
         local path, buf, agent_win = setup_windows()
         local job = terminal.info().job
         local calls = open({ id = 'cmd', path = path, new_contents = 'y\n' })
@@ -1288,7 +1288,7 @@ describe('editor.diff', function()
         assert.truthy(terminal.close())
         assert.eq(0, #wins_of(buf, tab))
         assert.same({ agent_win }, vim.fn.win_findbuf(buf), "the agent's own window keeps it")
-        -- :Agent from the proposal: a split on split_side, as the diff's view was.
+        -- :AgentToggle from the proposal: a split on split_side, as the diff's view was.
         assert.eq(buf, terminal.toggle('fake'))
         local here = wins_of(buf, tab)[1]
         assert.truthy(here and here ~= prop_win and here ~= orig_win)
