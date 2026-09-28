@@ -105,7 +105,9 @@ describe('terminal', function()
     vim.notify = function(msg, level)
       notes[#notes + 1] = { msg = msg, level = level }
     end
-    config.setup({ terminal = { layout = 'split', auto_close = true, start_insert = false } })
+    -- A right split: the specs below check its width and edge (the default, below, is checked in
+    -- init_spec.lua).
+    config.setup({ terminal = { layout = 'split', split_side = 'right', auto_close = true, start_insert = false } })
     terminal.setup({})
   end)
 
@@ -151,6 +153,47 @@ describe('terminal', function()
     assert.eq('session-1', info.session_id)
     assert.truthy(info.pid and info.pid > 0)
     assert.truthy(info.running)
+  end)
+
+  it('split_side = below: a full-width split at the bottom; hidden from there, back to the previous window', function()
+    config.setup({ terminal = { layout = 'split', split_side = 'below', auto_close = true, start_insert = false } })
+    local api = vim.api
+    vim.cmd('silent! only!')
+    local left = api.nvim_get_current_win()
+    vim.cmd('rightbelow vsplit')
+    local right = api.nvim_get_current_win()
+    local launch, out = fake()
+    local buf = terminal.open('fake', { launch = launch })
+    wait_ready(out)
+    local win = api.nvim_get_current_win()
+    assert.eq(buf, api.nvim_win_get_buf(win))
+    assert.same({ 'col', { { 'row', { { 'leaf', left }, { 'leaf', right } } }, { 'leaf', win } } }, vim.fn.winlayout())
+    assert.eq(math.floor(vim.o.lines * 0.4), api.nvim_win_get_height(win))
+    assert.truthy(vim.wo[win].winfixheight)
+    -- Hidden from its window (toggle, close or stop): the cursor goes back to the right window,
+    -- where it came from, not to the one Neovim picks for the space (the left one).
+    for _, hide in ipairs({ 'toggle', 'close', 'stop' }) do
+      if hide == 'toggle' then
+        assert.eq(buf, terminal.toggle('fake'))
+      elseif hide == 'close' then
+        assert.truthy(terminal.close())
+      else
+        terminal.stop()
+      end
+      assert.falsy(api.nvim_win_is_valid(win), hide)
+      assert.eq(right, api.nvim_get_current_win(), hide)
+      if hide ~= 'stop' then
+        assert.eq(buf, terminal.open('fake'))
+        win = api.nvim_get_current_win()
+        assert.eq(buf, api.nvim_win_get_buf(win))
+      end
+    end
+    -- From another window, the cursor stays there.
+    buf = terminal.open('fake', { launch = fake(), focus = false })
+    api.nvim_set_current_win(left)
+    assert.eq(buf, terminal.toggle('fake'))
+    assert.eq(left, api.nvim_get_current_win())
+    vim.cmd('silent! only!')
   end)
 
   it('opening a running agent reuses its terminal', function()
@@ -754,7 +797,9 @@ describe('terminal', function()
     end)
 
     it("with the 'tab' layout it matches no split, and show() goes to the terminal's own tab page", function()
-      config.setup({ terminal = { layout = 'tab', auto_close = true, start_insert = false, split_size = 0.3 } })
+      config.setup({
+        terminal = { layout = 'tab', split_side = 'right', auto_close = true, start_insert = false, split_size = 0.3 },
+      })
       local tab0 = api.nvim_get_current_tabpage()
       local launch = fake()
       local buf = terminal.open('fake', { launch = launch })
@@ -814,7 +859,8 @@ describe('terminal', function()
     end
 
     before_each(function()
-      config.setup({ terminal = { layout = 'current', auto_close = true, start_insert = false } })
+      -- split_side: the split it falls back to, and the view in a diff tab page, are on the right.
+      config.setup({ terminal = { layout = 'current', split_side = 'right', auto_close = true, start_insert = false } })
       vim.cmd('silent! tabonly!')
       vim.cmd('silent! only!')
       vim.cmd('enew!')

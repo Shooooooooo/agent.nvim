@@ -6,8 +6,9 @@
 --- window, such as beside the agent terminal alone, below one split off for the pair, which closes
 --- with the diff, see close_helper()).
 --- A diff's own tab page also shows the agent terminal (config.diff.show_terminal), so that the
---- agent stays in sight: original | proposed | agent. agent.terminal.split_here() places that window
---- (on config.terminal.split_side, as large as the terminal's own split) and declines when there is
+--- agent stays in sight (by default below original | proposed; original | proposed | agent with a
+--- split on the right). agent.terminal.split_here() places that window (on
+--- config.terminal.split_side, as large as the terminal's own split) and declines when there is
 --- no agent terminal or its layout is float or none. It is one more window on the terminal buffer:
 --- the teardown closes it, and any other window of the diff's tab page on the agent terminal (one
 --- the user showed there again with :Agent or :AgentOpen), which never stops the agent. Whenever the

@@ -23,12 +23,15 @@ M.defaults = {
   auto_start = false,
 
   terminal = {
-    ---@type 'split'|'float'|'tab'|'current'|'none'  'current': in the current window, in place of its
-    --- buffer (as :terminal does), which comes back when the terminal is hidden or stops
+    ---@type 'split'|'float'|'tab'|'current'|'none'  'split': a split along the split_side edge (the
+    --- default: at the bottom, full width). 'current': in the current window, in place of its buffer
+    --- (as :terminal does), which comes back when the terminal is hidden or stops
     layout = 'split',
-    ---@type 'right'|'left'|'below'|'above'
-    split_side = 'right',
-    ---@type number  Fraction of the editor width (vertical split) or height (horizontal split)
+    ---@type 'right'|'left'|'below'|'above'  Where the split goes: the 'split' layout, the agent in a
+    --- diff's tab page (diff.show_terminal), and the 'current' layout when it has no window to take
+    split_side = 'below',
+    ---@type number  Fraction of the editor width (vertical split) or height (horizontal split), for
+    --- the same splits as split_side
     split_size = 0.4,
     float = { width = 0.85, height = 0.85, border = 'rounded' },
     ---@type boolean  Enter terminal-insert mode when the terminal is focused
@@ -48,10 +51,11 @@ M.defaults = {
   diff = {
     ---@type 'tab'|'current'  Where the diff view opens
     open_in = 'tab',
-    ---@type boolean  In a diff's own tab page, show the agent terminal too (original | proposed | agent),
-    --- on terminal.split_side and as large as the terminal's split, so the agent's TUI does not reflow.
-    --- Only with the 'split', 'tab' and 'current' terminal layouts, and only when there is an agent
-    --- terminal. With 'tab' and 'current' it is terminal.split_size wide (or tall).
+    ---@type boolean  In a diff's own tab page, show the agent terminal too (by default below
+    --- original | proposed), on terminal.split_side and as large as the terminal's split, so the
+    --- agent's TUI does not reflow. Only with the 'split', 'tab' and 'current' terminal layouts, and
+    --- only when there is an agent terminal. With 'tab' and 'current' it is terminal.split_size tall
+    --- (or wide).
     show_terminal = true,
     keymaps = {
       accept = '<leader>aa',

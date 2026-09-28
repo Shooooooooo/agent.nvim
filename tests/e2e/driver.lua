@@ -8,7 +8,9 @@
 -- (tests/e2e/fake_model.mjs) or, for Gemini, from --fake-responses-non-strict.
 --
 -- The scenario, for each agent:
---   1. require('agent').setup() with the split terminal layout, then require('agent').open(<kind>)
+--   1. require('agent').setup() with the split terminal layout on the right (split_side = 'right',
+--      the baseline here; E2E_SPLIT_SIDE=below for the plugin's default, a split at the bottom),
+--      then require('agent').open(<kind>)
 --      (E2E_LAYOUT=current: the 'current' layout. The editor is split first, a.txt | a.txt, the
 --      right window as wide as the split layout's, and the agent takes it over, so that the rest
 --      runs the same way; stop() must give that window a.txt back)
@@ -16,13 +18,14 @@
 --   3. selection tracking, driven with keys as a user would, checked on the wire (the last
 --      selection agent.nvim pushed) and in the agent's TUI (Gemini's TUI does not show it):
 --      (kept) select a.txt lines 1-2 (Vj) and go straight from Visual mode to the agent window
---             (<C-w>l): the agent keeps the selection;
+--             (<C-w>l; <C-w>j to a split below): the agent keeps the selection;
 --      (dropped) back in the file window the agent sees the cursor only; select again (Vj), then
 --             <Esc>: the selection is dropped
 --   4. submit a prompt; the scripted model then
 --      (a) calls the $NVIM controller: exec_lua (sets vim.g.agent_e2e) and open_file (notes.txt)
 --      (b) edits a.txt (world -> neovim) through the IDE diff; its tab page must show the agent
---          terminal too (diff.show_terminal), and this driver accepts it
+--          terminal too (diff.show_terminal), on split_side (on the right, as wide as the agent's
+--          own split; below: at the bottom, full width and as tall), and this driver accepts it
 --   5. check the effects in Neovim and on disk; stop() the agent, which also stops its provider
 --      (its lock/discovery file goes), tear down, check that no files are left
 -- OpenCode has no IDE diff (its client is receive-only), so (b) is skipped for it.
@@ -30,6 +33,8 @@ local kind, root = arg[1], arg[2]
 assert(kind and root, 'usage: driver.lua <kind> <root>')
 local LAYOUT = (vim.env.E2E_LAYOUT or '') ~= '' and vim.env.E2E_LAYOUT or 'split'
 assert(LAYOUT == 'split' or LAYOUT == 'current', 'E2E_LAYOUT must be split or current, not ' .. LAYOUT)
+local SIDE = (vim.env.E2E_SPLIT_SIDE or '') ~= '' and vim.env.E2E_SPLIT_SIDE or 'right'
+assert(SIDE == 'right' or SIDE == 'below', 'E2E_SPLIT_SIDE must be right or below, not ' .. SIDE)
 
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h:h')
 vim.opt.rtp:prepend(repo)
@@ -444,11 +449,13 @@ if not opts then
   return finish()
 end
 opts = vim.tbl_deep_extend('force', {
-  terminal = { layout = LAYOUT, start_insert = false, auto_close = false },
+  terminal = { layout = LAYOUT, split_side = SIDE, start_insert = false, auto_close = false },
   selection = { debounce_ms = 50 },
 }, opts)
 agent.setup(opts)
-check('setup() with the ' .. LAYOUT .. ' terminal layout', require('agent.config').get().terminal.layout == LAYOUT)
+local tcfg = require('agent.config').get().terminal
+check(('setup() with the %s terminal layout, split_side = %s'):format(LAYOUT, SIDE),
+  tcfg.layout == LAYOUT and tcfg.split_side == SIDE)
 
 vim.cmd.cd(ws)
 vim.cmd.edit(ws .. '/a.txt')
@@ -614,6 +621,9 @@ end
 local shown = R.selection and (' (TUI: ' .. R.selection .. ')') or ' (ide/contextUpdate selectedText)'
 local dropped = R.no_selection and (' (TUI: ' .. R.no_selection .. ')') or ' (no selectedText)'
 local term_win = vim.fn.bufwinid(buf)
+-- The agent's window: a split below the file (the split layout, split_side = 'below'), else on its
+-- right (the split layout on the right, or the window the 'current' layout took over).
+local to_agent = (LAYOUT == 'split' and SIDE == 'below') and '<C-w>j' or '<C-w>l'
 
 -- (kept) Select lines 1-2, then go straight from Visual mode to the agent window.
 vim.api.nvim_set_current_win(main_win)
@@ -622,8 +632,8 @@ feed('Vj', 'nx!') -- Visual mode stays on
 check('Vj: the agent got the selection' .. shown, wait_until(20000, function()
   return agent_has(true)
 end, 'the selection at the agent'))
-feed('<C-w>l')
-check('<C-w>l from Visual mode: the agent window has focus', vim.api.nvim_get_current_win() == term_win,
+feed(to_agent)
+check(to_agent .. ' from Visual mode: the agent window has focus', vim.api.nvim_get_current_win() == term_win,
   vim.api.nvim_get_current_win())
 vim.wait(2000) -- well past the grace period and the debounce
 check('the selection is kept for the agent' .. shown, agent_has(true), vim.inspect(R.wire()))
@@ -675,8 +685,9 @@ if R.diff then
     local d = diff.get(diff.list()[1])
     local proposal = table.concat(vim.api.nvim_buf_get_lines(d.bufnr, 0, -1, false), '\n')
     check('(b) the diff proposes the edit', proposal == 'hello\nneovim', proposal)
-    -- The diff's tab page shows the agent too (diff.show_terminal): original | proposed | agent,
-    -- the agent as wide as its split in the main tab page, the proposal focused.
+    -- The diff's tab page shows the agent too (diff.show_terminal), on split_side: original |
+    -- proposed | agent, the agent as wide as its split in the main tab page; or, below, the agent
+    -- under original | proposed, full width and as tall as its split. The proposal is focused.
     local diff_tab = vim.api.nvim_get_current_tabpage()
     local wins = vim.api.nvim_tabpage_list_wins(diff_tab)
     local here = vim.tbl_filter(function(w)
@@ -686,14 +697,24 @@ if R.diff then
       and #here == 1 and vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()) == d.bufnr,
       ('%d windows, %d agent'):format(#wins, #here))
     local diff_term = here[1]
-    if diff_term then
+    local split_size = tcfg.split_size
+    local of = LAYOUT == 'current' and 'terminal.split_size' or 'the terminal split'
+    if diff_term and SIDE == 'right' then
       local right = vim.api.nvim_win_get_position(diff_term)[2] + vim.api.nvim_win_get_width(diff_term) == vim.o.columns
       -- 'current': the agent's own window is no split to match: terminal.split_size of the width.
-      local want = LAYOUT == 'current' and math.floor(vim.o.columns * require('agent.config').get().terminal.split_size)
-        or vim.api.nvim_win_get_width(term_win)
-      check('(b) ... on the right, as wide as ' .. (LAYOUT == 'current' and 'terminal.split_size' or 'the terminal split'),
-        right and vim.api.nvim_win_get_width(diff_term) == want,
+      local want = LAYOUT == 'current' and math.floor(vim.o.columns * split_size) or vim.api.nvim_win_get_width(term_win)
+      check('(b) ... on the right, as wide as ' .. of, right and vim.api.nvim_win_get_width(diff_term) == want,
         ('width %d vs %d'):format(vim.api.nvim_win_get_width(diff_term), want))
+    elseif diff_term then
+      -- At the bottom: the last window of the tab page's top-level column, under the diff's row.
+      local layout = vim.fn.winlayout()
+      local bottom = layout[1] == 'col' and #layout[2] == 2 and layout[2][1][1] == 'row'
+        and vim.deep_equal(layout[2][2], { 'leaf', diff_term })
+      local want = LAYOUT == 'current' and math.floor(vim.o.lines * split_size) or vim.api.nvim_win_get_height(term_win)
+      check('(b) ... at the bottom, full width, as tall as ' .. of, bottom
+        and vim.api.nvim_win_get_width(diff_term) == vim.o.columns and vim.api.nvim_win_get_height(diff_term) == want,
+        ('%s, %dx%d vs %dx%d'):format(vim.inspect(layout):gsub('%s+', ' '), vim.api.nvim_win_get_width(diff_term),
+          vim.api.nvim_win_get_height(diff_term), vim.o.columns, want))
     end
     vim.wait(500)
     local aok, aerr = agent.diff_accept()

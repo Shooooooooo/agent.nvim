@@ -681,7 +681,9 @@ describe('editor.diff', function()
     end
 
     before_each(function()
-      config.setup({ terminal = { layout = 'split', start_insert = false, auto_close = true } })
+      -- A right split (original | proposed | agent): the specs below check its columns. The default
+      -- split, below, is checked in 'follows terminal.split_side and the size of the terminal split'.
+      config.setup({ terminal = { layout = 'split', split_side = 'right', start_insert = false, auto_close = true } })
       terminal.setup({})
     end)
 
@@ -792,6 +794,48 @@ describe('editor.diff', function()
       assert.truthy(api.nvim_win_get_position(term_win)[1] > api.nvim_win_get_position(prop_win)[1], 'below the diff')
       assert.truthy(vim.wo[term_win].winfixheight)
       assert.eq(prop_win, api.nvim_get_current_win())
+    end)
+
+    it('the default split (below): the agent under the diff; hidden from there, back to the proposal', function()
+      local path = write('a.txt', { 'x' })
+      vim.cmd('edit ' .. vim.fn.fnameescape(path))
+      config.setup({ terminal = { start_insert = false, auto_close = true } })
+      local buf, main_win = start_agent()
+      local job = terminal.info().job
+      local main_height = api.nvim_win_get_height(main_win)
+      assert.eq(vim.o.columns, api.nvim_win_get_width(main_win))
+      local calls = open({ id = 'def', path = path, new_contents = 'y\n' })
+      local info = diff.get('def')
+      local orig_win = vim.fn.bufwinid(info.orig_bufnr)
+      local prop_win = vim.fn.bufwinid(info.bufnr)
+      local term_win = wins_of(buf, 0)[1]
+      -- original | proposed above, the agent below them, full width and as tall as its own split.
+      assert.same({ 'col', { { 'row', { { 'leaf', orig_win }, { 'leaf', prop_win } } }, { 'leaf', term_win } } },
+        vim.fn.winlayout())
+      assert.eq(vim.o.columns, api.nvim_win_get_width(term_win))
+      assert.eq(main_height, api.nvim_win_get_height(term_win))
+      assert.truthy(math.abs(api.nvim_win_get_width(orig_win) - api.nvim_win_get_width(prop_win)) <= 1)
+      assert.eq(prop_win, api.nvim_get_current_win())
+      -- In the agent's window, :Agent (or :AgentClose) hides it: back in the proposal, not in the
+      -- original (Neovim's pick for the window left above), so :w accepts.
+      for _, hide in ipairs({ 'toggle', 'close' }) do
+        api.nvim_set_current_win(prop_win)
+        if hide == 'close' then
+          assert.eq(buf, terminal.toggle('fake'))
+        end
+        term_win = wins_of(buf, 0)[1]
+        api.nvim_set_current_win(term_win)
+        if hide == 'toggle' then
+          assert.eq(buf, terminal.toggle('fake'))
+        else
+          assert.truthy(terminal.close())
+        end
+        assert.falsy(api.nvim_win_is_valid(term_win), hide)
+        assert.eq(prop_win, api.nvim_get_current_win(), hide)
+      end
+      agent_intact(buf, main_win, job)
+      vim.cmd('write')
+      assert.eq('accepted', calls[1].status)
     end)
 
     it('shows no terminal with show_terminal = false, a float or none layout, or without an agent', function()
@@ -1175,7 +1219,7 @@ describe('editor.diff', function()
 
     describe("with the 'current' layout", function()
       before_each(function()
-        config.setup({ terminal = { layout = 'current', start_insert = false, auto_close = true } })
+        config.setup({ terminal = { layout = 'current', split_side = 'right', start_insert = false, auto_close = true } })
       end)
 
       ---a.txt | a.txt, and the agent started in the right window, which it takes over (the cursor

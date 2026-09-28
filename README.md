@@ -6,16 +6,17 @@ itself serving the IDE integration each CLI expects from VS Code. Like
 
 ![agent.nvim demo: lines selected in Neovim show up in Claude Code's split; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller, and its edit opens in a Neovim diff tab with Claude Code still shown beside it and is accepted with :w](demo/agent-nvim-demo.gif)
 
-Select lines, switch to Claude with `<C-w>l` and type the request: Claude notifies through the
-$NVIM controller, and its edit opens in a Neovim diff tab, with Claude still in view, where `:w`
-accepts it. This is the real Claude Code TUI, with the model's replies scripted so that the
-recording is reproducible (see [demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
+The demo shows the agent in a split on the right (`terminal.split_side = 'right'`): select lines,
+switch to Claude with `<C-w>l` and type the request. Claude notifies through the $NVIM controller,
+and its edit opens in a Neovim diff tab, with Claude still in view, where `:w` accepts it. This is
+the real Claude Code TUI, with the model's replies scripted so that the recording is reproducible
+(see [demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
 
 ## Features
 
-- The agent runs in a split, float, tab or the current window. `:Agent` toggles the terminal; the
-  agent keeps running while hidden. One agent runs at a time: starting another one asks before
-  replacing it.
+- The agent runs in a split (below your file by default), a float, a tab or the current window.
+  `:Agent` toggles the terminal; the agent keeps running while hidden. One agent runs at a time:
+  starting another one asks before replacing it.
 - The agent automatically sees your current file and visual selection.
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
@@ -69,17 +70,19 @@ opens it (pressing `<Esc>` first would drop the selection).
 
 1. Run `:checkhealth agent` to see which agent CLIs are installed and whether anything blocks the
    connection.
-2. Run `:Agent` to open Claude in a split on the right (or `:Agent opencode`, `:Agent copilot`,
-   `:Agent gemini`). The agent connects to Neovim by itself; Gemini needs a
+2. Run `:Agent` to open Claude in a split below your file (or `:Agent opencode`,
+   `:Agent copilot`, `:Agent gemini`). The agent connects to Neovim by itself; Gemini needs a
    [one-time setup](#gemini-cli) first.
-3. Select lines and switch to the agent straight from Visual mode (`<C-w>l`, then `i` to type):
-   the agent keeps the selection. Leaving Visual mode in the file (`<Esc>`) drops it, and the
-   agent then sees just the current file.
+3. Select lines and switch to the agent straight from Visual mode: `<C-w>j` (then `i` to type), or
+   the `<leader>ac` mapping when the agent is hidden. The agent keeps the selection. Leaving Visual
+   mode in the file (`<Esc>`) drops it, and the agent then sees just the current file.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
    `<leader>aa`, reject with `<leader>ad` or by closing the tab. The tab shows the agent's
    terminal too, so you can read its prompt or answer there instead. Claude Code's default mode
    rarely asks, see [Claude Code](#claude-code).
-5. Run `:Agent` again to hide the terminal. The agent keeps running.
+5. Run `:Agent` again to hide the terminal. The agent keeps running. For a split beside your code
+   instead, set `terminal.split_side = 'right'`; to show the agent in place of your file,
+   `terminal.layout = 'current'`.
 
 ## Commands
 
@@ -109,12 +112,12 @@ change, with their defaults:
 require('agent').setup({
   default_agent = 'claude',
   terminal = {
-    layout = 'split',       -- 'split' | 'float' | 'tab' | 'current' | 'none'
-    split_side = 'right',   -- 'right' | 'left' | 'below' | 'above'
-    split_size = 0.4,       -- fraction of the editor width (or height)
+    layout = 'split',       -- 'split' | 'current' | 'float' | 'tab' | 'none'
+    split_side = 'below',   -- 'below' | 'right' | 'left' | 'above' (splits, diff tabs)
+    split_size = 0.4,       -- fraction of the editor height (or width)
   },
   diff = {
-    show_terminal = true,   -- show the agent terminal in diff tabs; false: full-width diff
+    show_terminal = true,   -- show the agent terminal in diff tabs too; false: the diff only
     keymaps = { accept = '<leader>aa', reject = '<leader>ad' }, -- '' or false disables a key
   },
   agents = {

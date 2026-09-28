@@ -109,20 +109,25 @@ runs, if setup() has not been called yet.
 
 1. Run `:checkhealth agent`. It shows which agent CLIs are installed and
    whether anything blocks the IDE connection or the $NVIM controller.
-2. Run |:Agent| to open the default agent (claude) in a split on the right,
-   or `:Agent copilot`, `:Agent gemini` or `:Agent opencode`. The IDE server
-   starts with the agent, and the agent connects to it by itself. One agent
-   runs at a time: starting another one asks first (|agent-replace|).
-3. Select lines and switch to the agent window straight from Visual mode
-   (<C-w>l, then `i` to type): the agent keeps the selection. Leaving Visual
-   mode in the file (<Esc>) drops it, and the agent then sees just the
-   current file. See |agent-context|.
+2. Run |:Agent| to open the default agent (claude) in a split below your
+   file, or `:Agent copilot`, `:Agent gemini` or `:Agent opencode`. The IDE
+   server starts with the agent, and the agent connects to it by itself.
+   One agent runs at a time: starting another one asks first
+   (|agent-replace|).
+3. Select lines and switch to the agent window straight from Visual mode:
+   <C-w>j (then `i` to type), or <leader>ac (|agent-install|) when the
+   agent is hidden. The agent keeps the selection. Leaving Visual mode in
+   the file (<Esc>) drops it, and the agent then sees just the current
+   file. See |agent-context|.
 4. Ask the agent to change a file. When it asks for permission, a diff tab
-   opens in Neovim, with the agent's terminal beside it. Accept with `:w`
+   opens in Neovim, with the agent's terminal in it too. Accept with `:w`
    (or <leader>aa), reject with <leader>ad or by closing the tab. See
    |agent-diff|. Claude Code starts in auto mode, which applies most edits
    without asking; see |agent-claude|.
-5. Run |:Agent| again to hide the terminal. The agent keeps running.
+5. Run |:Agent| again to hide the terminal. The agent keeps running. For a
+   split beside your code, set `terminal.split_side = 'right'`; to show
+   the agent in place of your file, `terminal.layout = 'current'`
+   (|agent-config|).
 
 Gemini needs a one-time setup first: run `/ide enable` once inside Gemini, and
 run |:AgentGeminiSetup| once. See |agent-gemini|.
@@ -147,9 +152,12 @@ exited, with its terminal left open, is replaced without asking.
     Toggle the agent terminal: hide it when [name] runs in it and it is
     visible in this tab page (its windows in other tab pages stay),
     otherwise open it (starting [name] if needed, see |agent-replace|) and
-    focus it. With the "current" layout it opens in the current window, and
-    hiding it there brings back the buffer that window showed
-    (|agent-layout-current|).
+    focus it. By default it opens in a split below, as wide as the editor
+    (`terminal.layout` and `terminal.split_side`). With the "current"
+    layout it opens in the current window, and hiding it there brings back
+    the buffer that window showed (|agent-layout-current|). When you hide
+    it from its own window, the cursor goes back to the previous window
+    (|CTRL-W_p|).
 
                                                                   *:AgentOpen*
 :AgentOpen [name]
@@ -298,9 +306,9 @@ The defaults, from lua/agent/config.lua: >lua
       default_agent = 'claude',
       auto_start = false,        -- start every IDE server at setup()
       terminal = {
-        layout = 'split',        -- 'split'|'float'|'tab'|'current'|'none'
-        split_side = 'right',    -- 'right'|'left'|'below'|'above'
-        split_size = 0.4,        -- fraction of the width (or height)
+        layout = 'split',        -- 'split'|'current'|'float'|'tab'|'none'
+        split_side = 'below',    -- 'below'|'right'|'left'|'above'
+        split_size = 0.4,        -- fraction of the height (or width)
         float = { width = 0.85, height = 0.85, border = 'rounded' },
         start_insert = true,     -- when agent.nvim opens or shows it
         auto_close = true,
@@ -354,13 +362,14 @@ auto_start (false)
     that uses it and stops when that agent stops (|:AgentStop|, a replace,
     or the agent exiting). See the note in |agent-copilot|.
 terminal.layout ("split")
-    "split", "float", "tab", "current" or "none". "none" means the plugin
-    does not start agents: you run them yourself (combine it with
+    "split", "current", "float", "tab" or "none". "split" shows the agent in
+    a split on the `terminal.split_side` edge: by default below your code,
+    as wide as the editor. "current" is described below. "none" means the
+    plugin does not start agents: you run them yourself (combine it with
     `auto_start = true`). With "tab", |:Agent| and |:AgentOpen| from a tab
     page that does not show the terminal go to the terminal's own tab page,
-    if it still has one. "current" is described below.
-    The layout of one call can be given to |agent.open()| and
-    |agent.toggle()| (|agent-open-opts|).
+    if it still has one. The layout of one call can be given to
+    |agent.open()| and |agent.toggle()| (|agent-open-opts|).
 
                                                         *agent-layout-current*
     "current" shows the agent in the current window, in place of its
@@ -400,12 +409,20 @@ terminal.layout ("split")
       would wipe it on the next key, and close the window. Hide it with
       |:AgentClose| or |:AgentStop|.
     - A terminal has the size of its largest window. In a diff tab page
-      the agent's window is `terminal.split_size` wide (or tall) and shows
-      the left part of a wider terminal (|agent-diff-terminal|).
-terminal.split_side ("right")
-    "right", "left", "below" or "above".
+      the agent's window is `terminal.split_size` tall (or wide) and shows
+      part of a larger terminal (|agent-diff-terminal|).
+terminal.split_side ("below")
+    "below", "right", "left" or "above": the edge of the tab page where the
+    agent's split goes. That is the "split" layout, the agent's view in a
+    diff tab page (|agent-diff-terminal|), and the "current" layout when it
+    has no window to take (|agent-layout-current|). A split below or above
+    is as wide as the editor; "right" keeps the agent beside your code, as
+    in the README demo (|agent-demo|).
 terminal.split_size (0.4)
-    Split size as a fraction (0 to 1) of the editor width or height.
+    Size of those splits as a fraction (0 to 1) of the editor height (below,
+    above) or width (right, left). The view in a diff tab page is as large
+    as the terminal's own split instead, when the terminal has one (the
+    "split" layout).
 terminal.float ({ width = 0.85, height = 0.85, border = 'rounded' })
     Size (fractions) and border of the floating window.
 terminal.start_insert (true)
@@ -436,15 +453,16 @@ diff.open_in ("tab")
     get their sizes back: the agent its full width.
 diff.show_terminal (true)
     Show the agent terminal in a diff's own tab page too, so that you can
-    read or answer the agent's own prompt: original | proposal | agent. It
-    goes on the `terminal.split_side` edge, as wide (or tall) as the
-    terminal's own split (else `terminal.split_size`), so the agent's screen
-    does not reflow. Only with the "split", "tab" and "current" layouts (a
-    float would cover the diff) and while there is an agent terminal. false
-    gives the diff the full width. With "tab" and "current" the window is
-    `terminal.split_size` wide (or tall): the terminal keeps the size of its
-    own window while that window shows it (the full width of its tab page,
-    for "tab"), and the diff's smaller window shows its left part. See
+    read or answer the agent's own prompt. It goes on the
+    `terminal.split_side` edge (by default below original | proposal, as
+    wide as the editor), as tall (or wide) as the terminal's own split
+    (else `terminal.split_size`), so the agent's screen does not reflow.
+    Only with the "split", "tab" and "current" layouts (a float would cover
+    the diff) and while there is an agent terminal. false gives the diff
+    the whole tab page. With "current" and "tab" the window is
+    `terminal.split_size` tall (or wide): the terminal keeps the size of its
+    own window while that window shows it (its whole tab page, for "tab"),
+    and the diff's smaller window shows only part of it. See
     |agent-diff-terminal|.
 diff.keymaps.accept ("<leader>aa")
 diff.keymaps.reject ("<leader>ad")
@@ -563,13 +581,15 @@ your visual selection to the agent as they change (`selection.track`).
 While the agent's terminal has focus, the last file you were in stays the
 current one.
 
-Select lines, then switch to the agent window straight from Visual mode, for
-example with <C-w>l. Where the focus is 50 ms after you leave Visual mode
-decides what happens to the selection:
-- A file window (<Esc>, y, d, >, a click in the file, <C-w>j to another
+Select lines, then switch to the agent straight from Visual mode: with <C-w>j
+to the agent's split below (the default; <C-w>l to a split on the right), or
+with a Visual-mode mapping to `<cmd>Agent<cr>` (|agent-install|) when the
+agent is hidden. Where the focus is 50 ms after you leave Visual mode decides
+what happens to the selection:
+- A file window (<Esc>, y, d, >, a click in the file, <C-w>k to another
   file): the selection is dropped, and the agent sees just the file and the
   cursor.
-- The agent window or another non-file window (<C-w>l, a click in the
+- The agent window or another non-file window (<C-w>j, a click in the
   terminal, a Visual-mode mapping to `<cmd>AgentOpen<cr>`): the selection is
   kept for your next prompt. It is dropped when a file window has focus
   again.
@@ -981,8 +1001,9 @@ when the current one already shows a diff):
   new file).
 - Right: the proposal, a scratch buffer named agent-diff://<id>. The winbar
   shows the accept and reject keys.
-- Beside them, in a new tab page: the agent terminal, so that you can read
-  or answer the agent's own prompt (|agent-diff-terminal|).
+- With them, in a new tab page: the agent terminal (by default below them),
+  so that you can read or answer the agent's own prompt
+  (|agent-diff-terminal|).
 
 Accept: `:w` in the proposal (or `:wq`), the accept key (<leader>aa),
         |:AgentDiffAccept|, |agent.diff_accept()|.
@@ -1010,16 +1031,20 @@ Reject: the reject key (<leader>ad), |:AgentDiffReject|, or closing the
                                                          *agent-diff-terminal*
 The agent in a diff tab page ~
 With `diff.show_terminal` (the default), a diff's own tab page also shows the
-agent terminal, on the `terminal.split_side` edge and as large as the
-terminal's own split, so the agent's screen does not reflow. It is one more
-window on the same terminal, for the "split", "tab" and "current" layouts
-(not "float"):
-- With "tab", and with "current" in a window the agent took over, this
-  window is `terminal.split_size` wide (or tall) and shows the left part of
-  the wider terminal. A terminal has the size of its largest window: while
-  the agent is hidden from its own window, its screen shrinks to this one.
+agent terminal, on the `terminal.split_side` edge. With the default split
+below, the agent is under original | proposal, as wide as the editor and as
+tall as its own split, so the agent's screen does not reflow; with a split on
+the right, it is on the right (original | proposal | agent) and as wide as
+its own split. It is one more window on the same terminal, for the "split",
+"tab" and "current" layouts (not "float"):
+- With "current" in a window the agent took over, and with "tab", this
+  window is `terminal.split_size` tall (or wide) and shows only part of a
+  larger terminal. A terminal has the size of its largest window: while the
+  agent is hidden from its own window, its screen shrinks to this one.
 - The cursor starts in the proposal, so `:w` accepts. Move to the agent's
-  window to read its prompt or to answer there instead.
+  window to read its prompt or to answer there instead. Hiding it from
+  there (|:Agent|, |:AgentClose|) takes the cursor back to the window you
+  came from, such as the proposal.
 - Closing the diff, however it ends, closes this window too. The agent keeps
   running in its own window.
 - |:AgentClose| there hides only this window, and |:Agent| hides it or,
@@ -1031,7 +1056,7 @@ window on the same terminal, for the "split", "tab" and "current" layouts
   windows, never the diff's; the diff itself closes when the agent's IDE
   connection ends. Without auto_close the finished terminal stays in view.
 - `diff.open_in = 'current'` adds no window: the terminal is already in that
-  tab page. `diff.show_terminal = false` gives the diff the full width.
+  tab page. `diff.show_terminal = false` gives the diff the whole tab page.
 
 ==============================================================================
 11. Events and variables                                        *agent-events*
@@ -1213,7 +1238,9 @@ no process, lock or temp directory is left. Everything is isolated:
 - The workspaces are temp directories.
 The header of tests/e2e/run.sh documents the variables for pointing it at
 other CLI builds (E2E_CLAUDE_BIN, E2E_COPILOT_BIN, E2E_GEMINI_JS,
-E2E_OPENCODE_BIN) and for keeping the logs (E2E_KEEP=1).
+E2E_OPENCODE_BIN), for keeping the logs (E2E_KEEP=1) and for the terminal
+(E2E_LAYOUT: "split", the default, or "current"; E2E_SPLIT_SIDE: "right",
+the baseline there, or "below", the plugin's default).
 
                                                                   *agent-demo*
 The demo ~
@@ -1227,7 +1254,8 @@ reproducible, and the model name in Claude's header is only its default.
 HOME, the XDG directories and CLAUDE_CONFIG_DIR point to a temp directory, so
 your Claude account and config are never used.
 
-The demo config, demo/init.lua, starts Claude with
+The demo config, demo/init.lua, shows the agent in a split on the right
+(`terminal.split_side = 'right'`), starts Claude with
 `--permission-mode manual` so that it asks before editing, sets
 `auto_approve = true` for the $NVIM controller, and adds the colours, the
 statusline and the notification popup.

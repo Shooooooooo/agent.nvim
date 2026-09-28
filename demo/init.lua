@@ -154,10 +154,12 @@ vim.api.nvim_create_autocmd('TermEnter', {
 
 -- agent.nvim
 require('agent').setup({
-  -- The default size: Claude gets 59 of the 148 columns. A diff opens in a tab of its own that
-  -- shows Claude too, as wide as here (diff.show_terminal, on by default), so that Claude's TUI
-  -- does not reflow: original | proposed | Claude, with about 40 columns of code on each side.
-  terminal = { split_size = 0.4 },
+  -- A split on the right (the default split is below the file), so that the demo edits side by
+  -- side with Claude, at the default size: Claude gets 59 of the 148 columns. A diff opens in a
+  -- tab of its own that shows Claude too, as wide as here (diff.show_terminal, on by default), so
+  -- that Claude's TUI does not reflow: original | proposed | Claude, with about 40 columns of code
+  -- on each side.
+  terminal = { layout = 'split', split_side = 'right', split_size = 0.4 },
   -- The demo uses :w to accept; without the key hints the proposal's winbar has more room
   -- ('accept: :w').
   diff = { keymaps = { accept = '', reject = '' } },

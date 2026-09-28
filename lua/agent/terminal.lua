@@ -306,10 +306,21 @@ local function hide_window(win, term, layout)
 end
 
 ---Hide terminal `t` in windows `wins`: its views first, so that a window kept only as the last
----one of its tab page (keeps_window()) is seen as such.
+---one of its tab page (keeps_window()) is seen as such. When that closes the current window, the
+---cursor goes back to the previous window (CTRL-W p), not to the one Neovim picks by the layout:
+---for a split below original | proposed (a diff's tab page), that would be the original, where
+---`:w` does not accept.
 ---@param t agent.Term
 ---@param wins integer[]
 local function hide_windows(t, wins)
+  local cur = vim.api.nvim_get_current_win()
+  local back
+  if vim.tbl_contains(wins, cur) then
+    back = vim.fn.win_getid(vim.fn.winnr('#'))
+    if back == 0 or back == cur or vim.tbl_contains(wins, back) or is_float(back) then
+      back = nil
+    end
+  end
   local views, others = {}, {}
   for _, w in ipairs(wins) do
     local view = vim.api.nvim_win_is_valid(w) and (is_view(w, t.bufnr) or is_float(w))
@@ -318,6 +329,10 @@ local function hide_windows(t, wins)
   end
   for _, w in ipairs(vim.list_extend(views, others)) do
     hide_window(w, t.bufnr, t.layout)
+  end
+  if back and not vim.api.nvim_win_is_valid(cur) and vim.api.nvim_win_is_valid(back)
+    and vim.api.nvim_win_get_tabpage(back) == vim.api.nvim_get_current_tabpage() then
+    pcall(vim.api.nvim_set_current_win, back)
   end
 end
 

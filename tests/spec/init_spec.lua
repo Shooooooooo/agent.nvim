@@ -487,6 +487,44 @@ describe('agent', function()
       vim.bo[b].modified = false
     end)
 
+    it('the default layout is a split below: :Agent opens the agent under the file, full width', function()
+      local defaults = require('agent.config').defaults.terminal
+      assert.same({ 'split', 'below', 0.4 }, { defaults.layout, defaults.split_side, defaults.split_size })
+      local t = agent.setup({}).terminal
+      assert.same({ 'split', 'below' }, { t.layout, t.split_side })
+      -- No terminal options: only what keeps the run off the real CLIs and ~/.claude.
+      local opts = base_opts()
+      opts.terminal = nil
+      t = agent.setup(opts).terminal
+      assert.same({ 'split', 'below' }, { t.layout, t.split_side })
+      local a = edit_in_main(ws .. '/a.txt')
+      assert.eq(1, #vim.api.nvim_list_wins())
+      local win = vim.api.nvim_get_current_win()
+      vim.cmd('Agent')
+      -- start_insert (the default) would enter Terminal mode once this test returns.
+      vim.cmd('stopinsert')
+      wait_ready('claude')
+      local buf = terminal.bufnr()
+      local tw = vim.api.nvim_get_current_win()
+      assert.eq('claude', terminal.name())
+      assert.eq('split', terminal.info().layout)
+      assert.truthy(tw ~= win, 'a window of its own, focused')
+      assert.eq(buf, vim.api.nvim_win_get_buf(tw))
+      assert.eq(a, vim.api.nvim_win_get_buf(win), 'a.txt stays in its window')
+      -- a.txt above, the agent below it, as wide as the editor.
+      assert.same({ 'col', { { 'leaf', win }, { 'leaf', tw } } }, vim.fn.winlayout())
+      assert.eq(vim.o.columns, vim.api.nvim_win_get_width(tw))
+      assert.eq(math.floor(vim.o.lines * 0.4), vim.api.nvim_win_get_height(tw), 'split_size of the height')
+      assert.truthy(vim.wo[tw].winfixheight)
+      -- :Agent again hides it; the agent runs on.
+      vim.cmd('Agent')
+      assert.falsy(vim.api.nvim_win_is_valid(tw))
+      assert.same({ win }, vim.api.nvim_list_wins())
+      assert.eq(a, vim.api.nvim_win_get_buf(win))
+      assert.falsy(terminal.is_visible())
+      assert.truthy(terminal.is_running())
+    end)
+
     it("layout = 'current': :Agent, :AgentClose and :AgentStop give the window its buffer back", function()
       setup({ terminal = { layout = 'current' } })
       write(ws .. '/b.txt', 'b\n')
