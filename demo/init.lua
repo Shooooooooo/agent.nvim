@@ -16,8 +16,7 @@ if not pcall(vim.cmd.colorscheme, 'catppuccin') then
   vim.cmd.colorscheme('habamax')
 end
 vim.o.number = true
--- The diff tab is split three ways (original | proposed | Claude): keep the code's gutter narrow,
--- so that the code fits (3 columns for the line numbers, no fold column in the diff windows).
+-- A narrow gutter (3 columns for the line numbers, no fold column in the diff windows).
 vim.o.numberwidth = 3
 vim.opt.diffopt:append('foldcolumn:0')
 vim.o.cursorline = true
@@ -26,7 +25,6 @@ vim.o.showmode = false
 vim.o.showcmd = false
 vim.o.laststatus = 3
 vim.o.showtabline = 0
-vim.o.splitright = true
 vim.o.fillchars = 'eob: ,vert:│,diff:╱'
 vim.o.shortmess = vim.o.shortmess .. 'IF'
 vim.o.wrap = false
@@ -56,25 +54,12 @@ local diff_sides = {
 }
 vim.api.nvim_create_autocmd({ 'WinEnter', 'BufWinEnter' }, {
   callback = vim.schedule_wrap(function()
-    local file -- the file under review, from the original side's winbar (' original: <file>')
-    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-      file = file or vim.wo[win].winbar:match('^ original: (.+)$')
-    end
     for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       if vim.wo[win].diff then
         -- agent.nvim's proposal is the only acwrite buffer (agent-diff://<id>) in its diff.
         local proposal = vim.bo[vim.api.nvim_win_get_buf(win)].buftype == 'acwrite'
         vim.wo[win].winhighlight = proposal and diff_sides.new or diff_sides.old
         vim.wo[win].number = true
-        -- The proposal's winbar is ' proposed: %<<title> %=accept: :w ', and Claude's title for
-        -- the diff ('✻ [Claude Code] greet.lua (<id>) ⧉') does not fit in a third of the screen:
-        -- name the file instead, as agent.nvim does for a diff without a title.
-        local bar = vim.wo[win].winbar
-        if proposal and file and bar:find('%<', 1, true) then
-          vim.wo[win].winbar = bar:gsub('%%<.*%%=', function()
-            return file .. ' %='
-          end, 1)
-        end
       end
     end
   end),
@@ -110,9 +95,11 @@ function _G.demo_statusline()
 end
 vim.o.statusline = '%{%v:lua.demo_statusline()%}'
 
--- Notifications as a small popup in the empty lower left of the editor, so that messages the
--- agent sends through the $NVIM controller's notify tool stand out (the tool passes the agent's
--- name as the title).
+-- Notifications as a small popup in the top right corner of the editor (the empty right half of
+-- the file, above Claude's split), so that messages the agent sends through the $NVIM controller's
+-- notify tool stand out (the tool passes the agent's name as the title). A popup belongs to the
+-- view it was shown in: it closes when another tab page (a diff) opens, where it would cover the
+-- proposed code.
 local titles = { [vim.log.levels.WARN] = 'Warning', [vim.log.levels.ERROR] = 'Error' }
 vim.notify = function(msg, level, opts)
   local function show()
@@ -126,16 +113,18 @@ vim.notify = function(msg, level, opts)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     local win = vim.api.nvim_open_win(buf, false, {
-      relative = 'editor', anchor = 'SW', row = vim.o.lines - 3, col = 3,
+      relative = 'editor', anchor = 'NE', row = 1, col = vim.o.columns - 2,
       width = math.min(width, vim.o.columns - 8), height = #lines,
       style = 'minimal', border = 'rounded', focusable = false, zindex = 200,
       title = ' ' .. title .. ' ', title_pos = 'left',
     })
     vim.wo[win].wrap = true
-    vim.defer_fn(function()
+    local function close()
       pcall(vim.api.nvim_win_close, win, true)
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end, 4500)
+    end
+    vim.api.nvim_create_autocmd('TabEnter', { once = true, callback = close })
+    vim.defer_fn(close, 4500)
   end
   if vim.in_fast_event() then
     vim.schedule(show)
@@ -152,17 +141,12 @@ vim.api.nvim_create_autocmd('TermEnter', {
   end,
 })
 
--- agent.nvim
+-- agent.nvim, with the default terminal layout: Claude in a split below the file, 0.4 of the
+-- editor's height (terminal.layout 'split', split_side 'below', split_size 0.4). A diff opens in a
+-- tab of its own that shows Claude too, full width below original | proposed and as tall as here
+-- (diff.show_terminal, on by default), so that Claude's TUI does not reflow. The default diff
+-- keymaps stay (<leader>aa accepts, <leader>ad rejects); the demo accepts with :w.
 require('agent').setup({
-  -- A split on the right (the default split is below the file), so that the demo edits side by
-  -- side with Claude, at the default size: Claude gets 59 of the 148 columns. A diff opens in a
-  -- tab of its own that shows Claude too, as wide as here (diff.show_terminal, on by default), so
-  -- that Claude's TUI does not reflow: original | proposed | Claude, with about 40 columns of code
-  -- on each side.
-  terminal = { layout = 'split', split_side = 'right', split_size = 0.4 },
-  -- The demo uses :w to accept; without the key hints the proposal's winbar has more room
-  -- ('accept: :w').
-  diff = { keymaps = { accept = '', reject = '' } },
   agents = {
     claude = {
       -- Claude asks before it edits a file, so the edit opens as a diff in Neovim (auto mode,
@@ -181,4 +165,5 @@ require('agent').setup({
     },
   },
 })
-vim.keymap.set('n', '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })
+-- The README's recommended mapping (Normal and Visual mode).
+vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>Agent<cr>', { desc = 'Toggle agent' })

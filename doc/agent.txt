@@ -1254,11 +1254,10 @@ reproducible, and the model name in Claude's header is only its default.
 HOME, the XDG directories and CLAUDE_CONFIG_DIR point to a temp directory, so
 your Claude account and config are never used.
 
-The demo config, demo/init.lua, shows the agent in a split on the right
-(`terminal.split_side = 'right'`), starts Claude with
-`--permission-mode manual` so that it asks before editing, sets
-`auto_approve = true` for the $NVIM controller, and adds the colours, the
-statusline and the notification popup.
+The demo config, demo/init.lua, keeps the default layout (the agent in a
+split below the file), starts Claude with `--permission-mode manual` so that
+it asks before editing, sets `auto_approve = true` for the $NVIM controller,
+and adds the colours, the statusline and the notification popup.
 
 It needs vhs, ttyd, ffmpeg, nvim, node, claude and the JetBrainsMono Nerd
 Font. `DEMO_OUT=<dir>` writes the files elsewhere. Every run differs slightly

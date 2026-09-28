@@ -4,11 +4,11 @@ Run Claude Code, OpenCode, GitHub Copilot CLI or Gemini CLI in a Neovim terminal
 itself serving the IDE integration each CLI expects from VS Code. Like
 [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim), but for four agents.
 
-![agent.nvim demo: lines selected in Neovim show up in Claude Code's split; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller, and its edit opens in a Neovim diff tab with Claude Code still shown beside it and is accepted with :w](demo/agent-nvim-demo.gif)
+![agent.nvim demo: lines selected in Neovim show up in Claude Code's split below the file; after switching to Claude and typing the request, Claude sends a notification through the $NVIM controller, and its edit opens in a Neovim diff tab, original and proposed side by side with Claude Code still shown below, and is accepted with :w](demo/agent-nvim-demo.gif)
 
-The demo shows the agent in a split on the right (`terminal.split_side = 'right'`): select lines,
-switch to Claude with `<C-w>l` and type the request. Claude notifies through the $NVIM controller,
-and its edit opens in a Neovim diff tab, with Claude still in view, where `:w` accepts it. This is
+The demo uses the default layout, the agent in a split below the file: select lines, switch to
+Claude with `<C-w>j` and type the request. Claude notifies through the $NVIM controller, and its
+edit opens in a Neovim diff tab, with Claude still in view below, where `:w` accepts it. This is
 the real Claude Code TUI, with the model's replies scripted so that the recording is reproducible
 (see [demo/](demo/)). [MP4 version](demo/agent-nvim-demo.mp4).
 
