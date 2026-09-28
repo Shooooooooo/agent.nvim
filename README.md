@@ -103,8 +103,10 @@ replaces it without asking.
 
 ## Configuration
 
-`setup()` is optional: every command calls it on first use. The options you are most likely to
-change, with their defaults:
+`setup()` is optional: every command calls it on first use.
+
+<details>
+<summary>Default configuration (the options you are most likely to change)</summary>
 
 ```lua
 require('agent').setup({
@@ -129,6 +131,8 @@ require('agent').setup({
   nvim_mcp = { enabled = true }, -- register the $NVIM controller
 })
 ```
+
+</details>
 
 Full reference: `:help agent-config`.
 
