@@ -1289,4 +1289,433 @@ describe('editor.selection', function()
     assert.eq(0, m)
     assert.falsy(pcall(api.nvim_get_autocmds, { group = 'AgentSelection' }), 'augroup deleted')
   end)
+
+  describe('capture and entry_of (:AgentSend)', function()
+    local context = require('agent.editor.context')
+    local got, showmode, virtualedit, cmdline, visual
+
+    before_each(function()
+      showmode = vim.o.showmode
+      virtualedit = vim.o.virtualedit
+      vim.o.showmode = false -- no '-- VISUAL --' on stderr
+      got, cmdline, visual = nil, nil, nil
+      -- The ':' command line being run, typed or from a ':' mapping, as init.lua records it.
+      api.nvim_create_autocmd('CmdlineLeave', {
+        group = api.nvim_create_augroup('ProbeCmdline', { clear = true }),
+        pattern = ':',
+        callback = function()
+          if not vim.v.event.abort then
+            cmdline = vim.fn.getcmdline()
+          end
+        end,
+      })
+      -- :Probe stands for :AgentSend: what it would capture with its range, the Visual area when
+      -- that command line is a :'<,'> one (as :AgentSend tells it).
+      api.nvim_create_user_command('Probe', function(o)
+        visual = (cmdline or ''):match("^[%s:]*'<%s*,%s*'>") ~= nil
+        cmdline = nil
+        got = sel.capture(o.range > 0 and { line1 = o.line1, line2 = o.line2, visual = visual } or nil)
+      end, { range = true })
+    end)
+
+    after_each(function()
+      vim.o.showmode = showmode
+      pcall(api.nvim_del_augroup_by_name, 'ProbeCmdline')
+      pcall(api.nvim_del_user_command, 'Probe')
+      pcall(vim.keymap.del, 'x', '<F2>')
+      pcall(vim.keymap.del, 'x', '<F3>')
+      vim.o.virtualedit = virtualedit
+    end)
+
+    ---Type keys as the user would, without the command-line echo on stderr.
+    local function type_keys(keys)
+      vim.cmd(('silent call feedkeys(%s, "tx")'):format(
+        vim.fn.string(api.nvim_replace_termcodes(keys, true, false, true))))
+    end
+
+    it('captures the cursor as an empty selection (at 0:0 in a buffer that is not a file)', function()
+      sel.stop() -- read now: tracking need not run
+      local b, path = edit('a.txt', { 'hello', 'world' })
+      api.nvim_win_set_cursor(0, { 2, 3 })
+      assert.same({
+        path = path, bufnr = b, text = '', is_empty = true, mode = 'n', linewise = false,
+        start = { line = 1, character = 3 }, finish = { line = 1, character = 3 }, cursor = { line = 1, character = 3 },
+        start_line = 2, end_line = 2,
+      }, sel.capture())
+      vim.cmd('enew')
+      local scratch = api.nvim_get_current_buf()
+      api.nvim_buf_set_lines(scratch, 0, -1, false, { 'x', 'y', 'z' })
+      api.nvim_win_set_cursor(0, { 3, 0 })
+      local s = sel.capture()
+      assert.eq(context.buffer_uri(scratch), s.path)
+      assert.eq(('nvim://buffer/%d/scratch'):format(scratch), s.path)
+      assert.eq('', s.text)
+      assert.eq('n', s.mode)
+      assert.same({ line = 0, character = 0 }, s.start)
+      assert.same({ line = 0, character = 0 }, s.cursor)
+      assert.eq(1, s.start_line)
+    end)
+
+    it('captures nothing from an ignored window: the agent terminal, b:agent_ignore, a floating scratch buffer', function()
+      edit('a.txt', { 'one' })
+      vim.b.agent_ignore = true
+      assert.eq(nil, sel.capture())
+      assert.eq(nil, sel.capture({ line1 = 1 }))
+      vim.b.agent_ignore = nil
+      open_agent_terminal()
+      assert.eq(nil, sel.capture())
+      local float = api.nvim_open_win(api.nvim_create_buf(false, true), true,
+        { relative = 'editor', row = 1, col = 1, width = 20, height = 3 })
+      assert.eq(nil, sel.capture())
+      api.nvim_win_close(float, true)
+    end)
+
+    it('captures the lines of a range linewise, the cursor on the last one (reversed, clamped to the buffer)', function()
+      local b, path = edit('a.txt', { 'one', 'two', 'three', 'four' })
+      api.nvim_win_set_cursor(0, { 4, 1 })
+      local s = sel.capture({ line1 = 2, line2 = 3 })
+      -- As a V selection made downwards has it, not the window's cursor.
+      assert.same({
+        path = path, bufnr = b, text = 'two\nthree', is_empty = false, mode = 'V', linewise = true,
+        start = { line = 1, character = 0 }, finish = { line = 2, character = 5 }, cursor = { line = 2, character = 0 },
+        start_line = 2, end_line = 3,
+      }, s)
+      assert.same(s, sel.capture({ line1 = 3, line2 = 2 }), 'reversed')
+      s = sel.capture({ line1 = 3, line2 = 99 })
+      assert.eq('three\nfour', s.text)
+      assert.eq(3, s.start_line)
+      assert.eq(4, s.end_line)
+      assert.same({ line = 3, character = 0 }, s.cursor)
+      s = sel.capture({ line1 = 0 })
+      assert.eq('one', s.text)
+      assert.eq('V', s.mode)
+      assert.same({ line = 0, character = 0 }, s.cursor)
+      s = sel.capture({ line1 = 2 })
+      assert.eq('two', s.text)
+      assert.eq(2, s.start_line)
+      assert.eq(2, s.end_line)
+      assert.same({ line = 1, character = 0 }, s.cursor)
+      assert.same({ 4, 1 }, api.nvim_win_get_cursor(0), 'the cursor does not move')
+    end)
+
+    it('captures an empty line as an empty selection at that line, not at the cursor (a buffer: at 0:0)', function()
+      local b, path = edit('a.txt', { 'one', '', 'three' })
+      api.nvim_win_set_cursor(0, { 3, 2 })
+      assert.same({
+        path = path, bufnr = b, text = '', is_empty = true, mode = 'n', linewise = false,
+        start = { line = 1, character = 0 }, finish = { line = 1, character = 0 }, cursor = { line = 1, character = 0 },
+        start_line = 2, end_line = 2,
+      }, sel.capture({ line1 = 2 }))
+      assert.same({ 3, 2 }, api.nvim_win_get_cursor(0))
+      -- A buffer that is not a file: its cursor is always reported at 0:0.
+      vim.cmd('enew')
+      api.nvim_buf_set_lines(0, 0, -1, false, { 'x', '', 'z' })
+      api.nvim_win_set_cursor(0, { 3, 0 })
+      local s = sel.capture({ line1 = 2 })
+      assert.eq(('nvim://buffer/%d/scratch'):format(api.nvim_get_current_buf()), s.path)
+      assert.truthy(s.is_empty)
+      assert.same({ line = 0, character = 0 }, s.start)
+      assert.eq(1, s.start_line)
+    end)
+
+    it('captures the live Visual selection exactly (charwise, linewise, blockwise), whatever the range', function()
+      edit('a.txt', { 'héllo world', 'second' })
+      api.nvim_win_set_cursor(0, { 1, 0 })
+      feed('vl', 'x!')
+      local s = sel.capture({ line1 = 2, line2 = 2 })
+      assert.eq('v', api.nvim_get_mode().mode, 'Visual mode is not left')
+      assert.eq('hé', s.text)
+      assert.eq('v', s.mode)
+      assert.same({ line = 0, character = 0 }, s.start)
+      assert.same({ line = 0, character = 3 }, s.finish)
+      assert.same(s, sel.capture())
+      feed('<Esc>')
+      feed('Vj', 'x!')
+      s = sel.capture()
+      assert.eq('V', s.mode)
+      assert.eq('héllo world\nsecond', s.text)
+      feed('<Esc>')
+      api.nvim_win_set_cursor(0, { 1, 0 })
+      feed('<C-v>jl', 'x!')
+      s = sel.capture()
+      assert.eq('\22', s.mode)
+      assert.eq('hé\nse', s.text)
+      feed('<Esc>')
+    end)
+
+    it(":'<,'> typed from Visual mode captures the selection as made (charwise, blockwise), tracking or not", function()
+      sel.stop() -- the '< and '> marks only
+      local b = edit('a.txt', { 'abcdef', 'ghijkl', 'mnopqr' })
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vjl:Probe<CR>') -- ':' in Visual mode inserts '<,'>
+      assert.truthy(visual)
+      assert.eq('n', api.nvim_get_mode().mode)
+      assert.eq('v', got.mode)
+      assert.eq('cdef\nghij', got.text)
+      assert.same({ line = 0, character = 2 }, got.start)
+      assert.same({ line = 1, character = 4 }, got.finish)
+      assert.eq(b, got.bufnr)
+      -- Blockwise.
+      api.nvim_win_set_cursor(0, { 2, 1 })
+      type_keys('<C-v>jl:Probe<CR>')
+      assert.eq('\22', got.mode)
+      assert.eq('hi\nno', got.text)
+      assert.same({ line = 1, character = 1 }, got.start)
+      assert.same({ line = 2, character = 3 }, got.finish)
+      -- Linewise: the same lines either way.
+      api.nvim_win_set_cursor(0, { 1, 3 })
+      type_keys('Vj:Probe<CR>')
+      assert.eq('V', got.mode)
+      assert.eq('abcdef\nghijkl', got.text)
+      -- Typed with other lines than those of the marks: linewise.
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vjl<Esc>')
+      type_keys(':2,3Probe<CR>')
+      assert.eq('V', got.mode)
+      assert.eq('ghijkl\nmnopqr', got.text)
+      -- With tracking running: the same.
+      sel.start()
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vjl:Probe<CR>')
+      assert.eq('v', got.mode)
+      assert.eq('cdef\nghij', got.text)
+    end)
+
+    it(":'<,'> typed after a $ block extends it to the end of every line; a plain block followed by $ is not", function()
+      sel.stop()
+      edit('a.txt', { 'abcdef', 'gh', 'mnopqr' })
+      -- $ on the shorter line: its corner is past the end of that line.
+      api.nvim_win_set_cursor(0, { 1, 1 })
+      type_keys('<C-v>j$:Probe<CR>')
+      assert.eq('\22', got.mode)
+      assert.eq('bcdef\nh', got.text, 'as y yanks it')
+      -- Made upwards: the corner on the first line.
+      api.nvim_win_set_cursor(0, { 2, 0 })
+      type_keys('<C-v>k$:Probe<CR>')
+      assert.eq('abcdef\ngh', got.text)
+      -- A plain block, then $ in Normal mode (the cursor wants the end of the line, not the block),
+      -- then :'<,'> typed in full.
+      api.nvim_win_set_cursor(0, { 1, 1 })
+      type_keys('<C-v>j<Esc>$')
+      assert.eq(vim.v.maxcol, vim.fn.getcurpos()[5])
+      type_keys(":'<,'>Probe<CR>")
+      assert.eq('\22', got.mode)
+      assert.eq('b\nh', got.text)
+      -- A $ block over three lines, typed in full after <Esc>.
+      api.nvim_win_set_cursor(0, { 1, 1 })
+      type_keys('<C-v>jj$<Esc>')
+      type_keys(":'<,'>Probe<CR>")
+      assert.eq('bcdef\nh\nnopqr', got.text)
+    end)
+
+    it("a ':' mapping in Visual mode runs :'<,'>: the selection as made, held by tracking or from the marks", function()
+      edit('a.txt', { 'abcdef', 'ghijkl', 'mnopqr' })
+      vim.keymap.set('x', '<F2>', ':Probe<CR>')
+      -- Tracking runs (as it does while a provider runs): the selection just left, held.
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vjl<F2>')
+      assert.truthy(visual, "the mapping's command line is :'<,'>Probe")
+      assert.eq('v', got.mode)
+      assert.eq('cdef\nghij', got.text)
+      api.nvim_win_set_cursor(0, { 2, 1 })
+      type_keys('<C-v>jl<F2>')
+      assert.eq('\22', got.mode)
+      assert.eq('hi\nno', got.text)
+      vim.wait(sel.DEMOTE_MS + 150) -- the grace period ends: nothing is held
+      -- Without tracking: the marks.
+      sel.stop()
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vjl<F2>')
+      assert.truthy(visual)
+      assert.eq('v', got.mode)
+      assert.eq('cdef\nghij', got.text)
+      api.nvim_win_set_cursor(0, { 2, 1 })
+      type_keys('<C-v>jl<F2>')
+      assert.eq('\22', got.mode)
+      assert.eq('hi\nno', got.text)
+    end)
+
+    it("range.visual: the marks, and gv tells a $ block from a plain one that ends past a short line", function()
+      edit('a.txt', { 'abcdef', 'gh', 'mnopqr' })
+      -- (With 'virtualedit' all, getregion() pads the short lines of a block with spaces.)
+      local function trim(t)
+        return (t:gsub(' +\n', '\n'):gsub(' +$', ''))
+      end
+      for _, ve in ipairs({ '', 'block', 'all', 'onemore' }) do
+        vim.o.virtualedit = ve
+        -- A $ block, typed as one run of keys (no CursorMoved after the $).
+        api.nvim_win_set_cursor(0, { 1, 1 })
+        type_keys('<C-v>j$:Probe<CR>')
+        assert.truthy(visual)
+        assert.eq('\22', got.mode, ve)
+        assert.eq('bcdef\nh', trim(got.text), ve .. ': to the end of every line')
+        vim.wait(sel.DEMOTE_MS + 150) -- the grace period ends: nothing is held
+        type_keys(":'<,'>Probe<CR>")
+        assert.eq('bcdef\nh', trim(got.text), ve .. ': later, from the marks')
+        -- A plain block whose corner is past the end of 'gh', as a $ block's is.
+        api.nvim_win_set_cursor(0, { 1, 1 })
+        type_keys('<C-v>jl<Esc>')
+        type_keys(":'<,'>Probe<CR>")
+        assert.eq('\22', got.mode, ve)
+        assert.eq('bc', vim.split(got.text, '\n')[1], ve .. ': not to the end of the line')
+      end
+      -- gv leaves the window as it was.
+      vim.o.virtualedit = ''
+      api.nvim_win_set_cursor(0, { 3, 4 })
+      local view = vim.fn.winsaveview()
+      type_keys(":'<,'>Probe<CR>")
+      assert.same(view, vim.fn.winsaveview())
+      assert.eq('n', api.nvim_get_mode().mode)
+      -- Neither the marks nor the held selection have the lines of the range: linewise.
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vl<Esc>') -- on line 1
+      local s = sel.capture({ line1 = 2, line2 = 3, visual = true })
+      assert.eq('V', s.mode)
+      assert.eq('gh\nmnopqr', s.text)
+      assert.same({ line = 2, character = 0 }, s.cursor)
+      assert.eq('v', sel.capture({ line1 = 1, line2 = 1, visual = true }).mode, 'the marks have line 1')
+      assert.eq('cd', sel.capture({ line1 = 1, visual = true }).text)
+    end)
+
+    it("range.visual over blank lines: the empty selection at the first one, as for other ranges", function()
+      edit('a.txt', { 'x', '', '', 'y' })
+      api.nvim_win_set_cursor(0, { 2, 0 })
+      type_keys('Vj:Probe<CR>')
+      assert.truthy(visual)
+      assert.eq('n', got.mode)
+      assert.eq('', got.text)
+      assert.eq(2, got.start_line)
+    end)
+
+    it("a range that is not the Visual area is linewise, even on the lines of the marks and of the held selection", function()
+      edit('a.txt', { 'abcdef', 'ghijkl', 'mnopqr' })
+      api.nvim_win_set_cursor(0, { 1, 2 })
+      type_keys('vjl<Esc>') -- held by tracking, and in the marks
+      assert.same({ 1, 2 }, { vim.fn.line("'<"), vim.fn.line("'>") })
+      -- Not a command line (vim.cmd(), a <cmd> mapping): not the Visual area, though its range is.
+      vim.cmd("'<,'>Probe")
+      assert.falsy(visual)
+      assert.eq('V', got.mode)
+      assert.eq('abcdef\nghijkl', got.text)
+      assert.same({ line = 1, character = 0 }, got.cursor)
+      -- The lines of the marks, typed as numbers.
+      type_keys(':1,2Probe<CR>')
+      assert.falsy(visual)
+      assert.eq('V', got.mode)
+      -- The Lua API without `visual`.
+      assert.eq('V', sel.capture({ line1 = 1, line2 = 2 }).mode)
+      assert.eq('v', sel.capture({ line1 = 1, line2 = 2, visual = true }).mode)
+      -- Without tracking: the marks alone, the same.
+      vim.wait(sel.DEMOTE_MS + 150)
+      sel.stop()
+      vim.cmd("'<,'>Probe")
+      assert.eq('V', got.mode)
+      assert.eq('abcdef\nghijkl', got.text)
+      assert.eq('v', sel.capture({ line1 = 1, line2 = 2, visual = true }).mode)
+    end)
+
+    it('a range of blank lines is the empty selection at its first line (the Visual area too, when linewise)', function()
+      local b, path = edit('a.txt', { 'one', '', '', 'four' })
+      api.nvim_win_set_cursor(0, { 4, 2 })
+      local empty = {
+        path = path, bufnr = b, text = '', is_empty = true, mode = 'n', linewise = false,
+        start = { line = 1, character = 0 }, finish = { line = 1, character = 0 }, cursor = { line = 1, character = 0 },
+        start_line = 2, end_line = 2,
+      }
+      assert.same(empty, sel.capture({ line1 = 2, line2 = 3 }))
+      assert.same(empty, sel.capture({ line1 = 3, line2 = 2 }), 'reversed')
+      assert.same(empty, sel.capture({ line1 = 2, line2 = 3, visual = true }), 'no Visual area on those lines')
+      assert.same({ 4, 2 }, api.nvim_win_get_cursor(0), 'the cursor does not move')
+      -- With a line that is not blank: the lines.
+      local s = sel.capture({ line1 = 2, line2 = 4 })
+      assert.eq('\n\nfour', s.text)
+      assert.eq('V', s.mode)
+      assert.eq(2, s.start_line)
+    end)
+
+    it(':. after viwy (the marks are left on that line) captures the line, tracking or not', function()
+      edit('a.txt', { 'one two three', 'four' })
+      api.nvim_win_set_cursor(0, { 1, 5 })
+      type_keys('viwy')
+      assert.eq('two', vim.fn.getreg('"'))
+      assert.same({ 1, 1 }, { vim.fn.line("'<"), vim.fn.line("'>") })
+      vim.wait(sel.DEMOTE_MS + 150) -- the user takes a while to type the command
+      type_keys(':.Probe<CR>')
+      assert.eq('V', got.mode)
+      assert.eq('one two three', got.text)
+      sel.stop()
+      type_keys('viwy')
+      type_keys(':.Probe<CR>')
+      assert.eq('V', got.mode)
+      assert.eq('one two three', got.text)
+      -- The whole buffer (no range): the cursor.
+      type_keys(':Probe<CR>')
+      assert.truthy(got.is_empty)
+      assert.eq('n', got.mode)
+    end)
+
+    it('same: path, text and range; not the mode or the cursor', function()
+      local _, path = edit('a.txt', { 'one', 'two' })
+      local s = sel.capture({ line1 = 1, line2 = 2 })
+      assert.truthy(sel.same(nil, nil))
+      assert.truthy(sel.same(s, s))
+      assert.falsy(sel.same(s, nil))
+      assert.falsy(sel.same(nil, s))
+      local other = vim.tbl_extend('force', vim.deepcopy(s), { mode = 'v', cursor = { line = 0, character = 0 } })
+      assert.truthy(sel.same(s, other))
+      assert.truthy(sel.same(s, sel.capture({ line1 = 2, line2 = 1 })))
+      assert.falsy(sel.same(s, vim.tbl_extend('force', vim.deepcopy(s), { path = path .. 'x' })))
+      assert.falsy(sel.same(s, vim.tbl_extend('force', vim.deepcopy(s), { text = 'one\ntwo!' })))
+      assert.falsy(sel.same(s, vim.tbl_extend('force', vim.deepcopy(s), { start = { line = 0, character = 1 } })))
+      assert.falsy(sel.same(s, vim.tbl_extend('force', vim.deepcopy(s), { finish = { line = 1, character = 2 } })))
+      assert.falsy(sel.same(s, sel.capture({ line1 = 1 })))
+      -- The cursor as an empty selection: its position counts.
+      api.nvim_win_set_cursor(0, { 2, 1 })
+      local c = sel.capture()
+      assert.truthy(sel.same(c, sel.capture()))
+      api.nvim_win_set_cursor(0, { 2, 2 })
+      assert.falsy(sel.same(c, sel.capture()))
+    end)
+
+    it('entry_of: the active recent-files entry, 1-based line and UTF-16 column, text truncated', function()
+      local c, pc = edit('c.txt', { 'héllo wörld', 'x' })
+      api.nvim_win_set_cursor(0, { 1, 7 }) -- on 'w', after the 2-byte 'é'
+      local before = sel.recent_files()[1].timestamp
+      local e = sel.entry_of(sel.capture())
+      assert.eq(pc, e.path)
+      assert.eq(c, e.bufnr)
+      assert.eq(true, e.is_active)
+      assert.same({ line = 1, character = 7 }, e.cursor)
+      assert.eq(nil, e.selected_text, 'no text for the cursor only')
+      assert.truthy(e.timestamp > before, 'newer than every recent file')
+      local keys = vim.tbl_keys(e)
+      table.sort(keys)
+      assert.same({ 'bufnr', 'cursor', 'is_active', 'path', 'timestamp' }, keys)
+      assert.truthy(sel.entry_of(sel.capture()).timestamp > e.timestamp, 'strictly increasing')
+
+      feed('v4l', 'x!')
+      local s = sel.capture()
+      feed('<Esc>')
+      e = sel.entry_of(s)
+      assert.eq('wörld', e.selected_text)
+      assert.same({ line = 1, character = 11 }, e.cursor, "on 'd': 10 UTF-16 units before it")
+      assert.eq('wö... [TRUNCATED]', sel.entry_of(s, 2).selected_text)
+      assert.eq('wörld', sel.entry_of(s, 5).selected_text, 'exactly the limit: kept')
+      s = sel.capture({ line1 = 1, line2 = 2 })
+      assert.eq('héllo wörld\nx', sel.entry_of(s).selected_text)
+      assert.same({ line = 2, character = 1 }, sel.entry_of(s).cursor, 'a range: at the start of its last line')
+      assert.eq(string.rep('é', 16384) .. '... [TRUNCATED]',
+        sel.entry_of({ path = pc, bufnr = c, text = string.rep('é', 20000), is_empty = false, mode = 'v',
+          cursor = { line = 0, character = 0 } }).selected_text, 'default: 16384 UTF-16 units')
+
+      -- A buffer that is not a file: its id, at 1:1.
+      vim.cmd('enew')
+      api.nvim_buf_set_lines(0, 0, -1, false, { 'a', 'b' })
+      api.nvim_win_set_cursor(0, { 2, 1 })
+      e = sel.entry_of(sel.capture())
+      assert.eq(('nvim://buffer/%d/scratch'):format(api.nvim_get_current_buf()), e.path)
+      assert.same({ line = 1, character = 1 }, e.cursor)
+      assert.eq(nil, e.selected_text)
+    end)
+  end)
 end)

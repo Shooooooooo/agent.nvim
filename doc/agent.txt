@@ -40,9 +40,9 @@ serves the IDE protocol the CLI connects to:
   Gemini CLI     Gemini IDE companion: MCP Streamable HTTP on 127.0.0.1,
                  discovery file in $TMPDIR/gemini/ide
 
-With the IDE connection |:AgentSend| puts your selection, or a whole file,
-in the agent's prompt as an @-mention (|agent-context|), proposed edits open
-as a diff in Neovim for you to accept or reject, and the agent can read your
+With the IDE connection |:AgentSend| gives the agent your selection, or a
+whole file, for your next prompt (|agent-context|), proposed edits open as a
+diff in Neovim for you to accept or reject, and the agent can read your
 diagnostics.
 
 The $NVIM controller (|agent-nvim-mcp|) is a stdio MCP server that agent.nvim
@@ -122,10 +122,10 @@ runs, if setup() has not been called yet.
    agent connects to it by itself. One agent runs at a time: starting
    another one asks first (|agent-replace|).
 3. Select lines and press <leader>as (|agent-install|), which runs
-   |:AgentSend|. The agent's prompt gets a mention of those lines
-   (`@a.txt#L3-5` in Claude) and the cursor moves to the agent's prompt:
-   type your request. In Normal mode it mentions the whole file. See
-   |agent-context|.
+   |:AgentSend|. The agent gets those lines through the IDE connection
+   (Claude shows "3 lines selected") and the cursor moves to the agent's
+   prompt: type your request, and the lines go with it. In Normal mode it
+   sends the whole file. See |agent-context|.
 4. Ask the agent to change a file. When it asks for permission, a diff tab
    opens in Neovim, with the agent's terminal in it too. Accept with `:w`
    (or <leader>aa), reject with <leader>ad or by closing the tab. See
@@ -173,15 +173,20 @@ exited, with its terminal left open, is replaced without asking.
 
                                                                   *:AgentSend*
 :[range]AgentSend [name]
-    @-mention lines of the current buffer in the agent's prompt, then switch
-    to the agent terminal: show it when it is hidden, start [name] when no
-    agent runs, as |:AgentOpen| does (a different running agent is replaced
-    only when you confirm, |agent-replace|). The lines are the Visual
-    selection when it runs from Visual mode (a `<cmd>AgentSend<cr>`
-    mapping, which also ends Visual mode), else [range], else the whole file
-    or buffer. A buffer that is not a file is named by its
-    `nvim://buffer/<n>/<label>` id. The mention is not submitted: type your
-    request after it. See |agent-context| for what each agent gets.
+    Send the current file or buffer, or the selection in it, to the agent
+    through the IDE connection, as the automatic mode does
+    (|agent-context-auto|), then switch to the agent terminal: show it when
+    it is hidden, start [name] when no agent runs, as |:AgentOpen| does (a
+    different running agent is replaced only when you confirm,
+    |agent-replace|). It sends the Visual selection when it runs from
+    Visual mode (a `<cmd>AgentSend<cr>` mapping, which also ends Visual
+    mode), else the lines of [range] (`:'<,'>AgentSend` typed, or run by a
+    `:` mapping in Visual mode, sends the selection as you made it), else
+    the whole file or buffer. A buffer that is not a file is named by its
+    `nvim://buffer/<n>/<label>` id. Nothing is typed into the prompt
+    (unless it cannot go through the IDE connection): type your request,
+    and the agent attaches what you sent. See |agent-context| for what
+    each agent gets.
     From the agent's own terminal, a diff buffer (agent-diff://), a floating
     window or a buffer with |b:agent_ignore| it only shows why there is
     nothing to send.
@@ -256,11 +261,15 @@ require('agent').open({name}, {opts})
 require('agent').send({opts})
     Like |:AgentSend|. {opts} (all optional): `name` (the agent), `line1`
     and `line2` (a range of the current buffer; ignored in Visual mode,
-    where the selection's lines are sent), `confirm` (see
-    |agent-open-opts|). Returns true and how the mention went: "sent"
-    (through the IDE connection), "typed" (into the prompt), or "pending"
-    (delivered once the agent is connected, |agent-context|). Otherwise
-    false and why; false and nil when the replace question was answered No.
+    where the selection is sent), `visual` (true: the range is the last
+    Visual area, and its selection is sent as you made it, as
+    `:'<,'>AgentSend` does; default false, its lines), `confirm` (see
+    |agent-open-opts|).
+    Returns true and how it went: "sent" (through the IDE connection),
+    "typed" (a reference typed into the prompt, when it cannot go through
+    the IDE connection), or "pending" (sent once the agent is connected,
+    or typed later, |agent-context|). Otherwise false and why; false and
+    nil when the replace question was answered No.
 
                                                               *agent.toggle()*
 require('agent').toggle({name}, {opts})
@@ -601,11 +610,15 @@ Any extra entry under `agents` becomes an agent. It needs `cmd` and
 8. Agents                                                       *agent-agents*
 
                  Claude       OpenCode     Copilot         Gemini ~
-  :AgentSend     @f#L3-5      f#3-5        @f:3-5          @f (lines 3-5),
-                                                           typed
-  Automatic      file,        file,        selection       recent files,
-  mode           selection    selection    (file: tool)    cursor,
-                                                           selection
+  Selection      3 lines      f#3-5        @f:3-5          not shown
+  shown as       selected
+  Model gets     selection    selection    selection       file, cursor,
+                 or file      or file      (file: tool)    selection;
+                                                           recent files
+                                                           in the
+                                                           automatic mode
+  Kept for       the next     the next     every prompt,   IDE context,
+                 prompt       prompt       until replaced  until replaced
   Diffs          yes,         no           yes,            yes,
                  editable                  read-only       editable
   Diagnostics    yes          no           yes             no
@@ -615,50 +628,86 @@ Any extra entry under `agents` becomes an agent. It needs `cmd` and
                                                                *agent-context*
 What the agent sees ~
 You choose what the agent sees: |:AgentSend| (<leader>as, |agent-install|)
-puts an @-mention of the current file or buffer, or of lines of it, in the
-agent's prompt, and moves the cursor to the agent. The mention is not
-submitted: type your request after it.
-- A file is mentioned by its path (relative to the agent's working
-  directory when it is inside it), and so is a buffer named after a file on
+sends the current file or buffer, or the selection in it, to the agent
+through the IDE connection, and moves the cursor to the agent. It is the
+message the automatic mode sends as you move (|agent-context-auto|), and
+the agent attaches it to your next prompt. Nothing is typed into the
+prompt (unless it cannot go through the IDE connection, below), and
+nothing is submitted: type your request.
+- From Visual mode the selection is sent as it is (characterwise, linewise
+  or blockwise). `:'<,'>AgentSend` sends it as you made it too, when you
+  type it (`:` in Visual mode inserts the range) or a Visual-mode mapping
+  runs `:AgentSend<CR>`. A block made with $ then extends to the end of
+  every line.
+- Any other [range] sends its lines (also `:.AgentSend` after a Visual
+  yank), and so does `:'<,'>AgentSend` run by |vim.cmd()| or a `<cmd>`
+  mapping outside Visual mode (from Lua, |agent.send()| with `visual`
+  sends the selection as you made it). A range of empty lines, or a Visual
+  selection of them, only sends the file, as with no range.
+- Otherwise the file is sent with no selection, which stands for the whole
+  file.
+- A file goes by its path, and so does a buffer named after a file on
   disk, such as a |:help| file.
-- Any other buffer is mentioned as `nvim://buffer/<n>/<label>`: a terminal
-  other than the agent's, a quickfix list, a file explorer, a scratch
-  buffer. The label is the program a terminal runs ("fish"), else the
-  'filetype' ("qf", "NvimTree"), else the last part of the buffer name, else
-  "scratch". Such an id is always typed into the prompt, for example
-  `nvim://buffer/3/fish lines 10-20`: Claude and Copilot turn an id they get
-  through the IDE connection into `@nvim:/buffer/3/fish`, which nothing can
-  read. The agent reads the buffer with the $NVIM controller's read_buffer,
-  which takes the id (|agent-nvim-mcp-tools|); a terminal's last 200 lines
-  by default.
+- Any other buffer goes as `nvim://buffer/<n>/<label>`: a terminal other
+  than the agent's, a quickfix list, a file explorer, a scratch buffer. The
+  label is the program a terminal runs ("fish"), else the 'filetype' ("qf",
+  "NvimTree"), else the last part of the buffer name, else "scratch". The
+  agent reads the buffer with the $NVIM controller's read_buffer, which
+  takes the id (|agent-nvim-mcp-tools|); a terminal's last 200 lines by
+  default.
 - Nothing is sent from the agent's own terminal, a diff buffer
   (agent-diff://, |agent-diff|), a floating window, or a buffer with
   |b:agent_ignore|: |:AgentSend| says so and does nothing.
 
 What each agent gets:
-- Claude inserts `@a.txt#L3-5` (the IDE protocol's at_mentioned), OpenCode
-  `a.txt#3-5` (at_mentioned; a whole file as lines 1 to N), Copilot
-  `@a.txt:3-5` (add_file_reference). On submit they attach those lines, or
-  the file. The mention goes only to the agent in agent.nvim's terminal,
-  matched by its process id; OpenCode reports none, and gets it when it is
-  the only OpenCode connected. With several OpenCodes connected, the
-  reference is typed into the prompt after 15 seconds instead.
-- Gemini's IDE protocol has no mention: `@a.txt (lines 3-5)` is typed into
-  its prompt. Gemini's @ includes the whole file; the range is plain text
-  for the model. Spaces and special characters in the path are escaped.
-- Claude, OpenCode and Copilot get the mention once they are connected to
-  Neovim. Until then (right after the agent starts, and |:AgentSend| starts
-  it when none runs, or while it asks whether to trust the folder) the
-  mention waits, however long that takes. Nothing is typed meanwhile: it
-  would go into the agent's dialog. After 15 seconds a message says
-  "<agent> has not connected to Neovim yet: the mention will be inserted
-  when it connects". A mention still waiting when the agent stops or is
-  replaced is dropped. Mentions arrive in the order they were sent.
-- With the agent's IDE server disabled (`providers.<name>.enabled`), the
-  reference is typed into the prompt instead, in the agent's own syntax as
-  above.
-- Gemini's reference waits until Gemini is connected, or 15 seconds after
-  its start, then is typed. A reference is typed only into a terminal at
+- Claude shows "3 lines selected" by its prompt ("In a.txt" for a whole
+  file, "In fish" for a terminal). Your next prompt carries the lines with
+  their text ("The user selected the lines 3 to 5 from <path>: ..."), or
+  for a whole file a note that you opened it (the model reads the file
+  when it needs to). Claude clears it when you submit that prompt.
+- OpenCode shows a.txt#3-5 (a.txt for a whole file) and attaches the
+  lines, or a note that you opened the file, to your next prompt only.
+- Copilot's footer shows @a.txt:3-5 (@a.txt for a whole file). It attaches
+  a non-empty selection, with its file and lines, to every prompt you
+  submit until the next |:AgentSend| or, in the automatic mode, until your
+  file or selection changes. For a whole file it attaches nothing: its
+  model can read the file with its ide-get_selection tool.
+- Gemini shows nothing (/ide status lists the file). Its model gets the
+  file as the active file of its IDE context, with the cursor and the
+  selected text (in the automatic mode the recently focused files follow),
+  until the next |:AgentSend| or, in the automatic mode, until your file
+  or selection changes.
+- For Claude and OpenCode, run |:AgentSend| again to send the same
+  selection with a later prompt. Copilot and Gemini get it again when they
+  reconnect to Neovim; Claude and OpenCode do not.
+- It goes only to the agent in agent.nvim's terminal: Claude and Copilot
+  are matched by their process id. OpenCode reports none: it gets it when
+  it is the only OpenCode that connected to this Neovim since the agent
+  started (one that connected before is never taken for the agent's). With
+  several, which one is the agent cannot be told: the reference is typed
+  into its prompt instead (below), once the agent has run for 15 seconds.
+  Every Gemini connected to this Neovim gets it, but none when the agent's
+  Gemini has IDE mode off (below).
+- The agent gets it once it is connected to Neovim. Until then (right
+  after the agent starts, and |:AgentSend| starts it when none runs, or
+  while it asks whether to trust the folder) it waits, however long that
+  takes. After 15 seconds a message says "<agent> has not connected to
+  Neovim yet: the context will be sent when it connects". It is dropped
+  when the agent stops or is replaced. A newer |:AgentSend| replaces one
+  still waiting, and so does, in the automatic mode, a change of your file
+  or selection made after it (one made before it does not): the agent
+  then gets the current one when it connects.
+- When the agent it was sent to ends, it is forgotten: an agent that
+  connects later does not get it.
+- A reference is typed into the prompt instead when the agent cannot
+  connect to Neovim: its IDE server is disabled (`providers.<name>.enabled`)
+  or not running, or Gemini's IDE mode was off in its settings when
+  agent.nvim started it (|agent-gemini-setup|); and with several OpenCodes
+  connected (above). It is in the agent's own syntax: Claude
+  `@a.txt#L3-5`, OpenCode `@a.txt#3-5`, Copilot `@a.txt:3-5`, Gemini
+  `@a.txt (lines 3-5)` (the range is plain text for the model; special
+  characters in the path are escaped), another buffer
+  `nvim://buffer/3/fish lines 3-5`. It is typed only into a terminal at
   least 3 seconds old, so that the agent's screen takes it.
 
                                                           *agent-context-auto*
@@ -736,12 +785,12 @@ server stops with the agent and starts again, so Claude reconnects on its own
 after a dropped connection.
 
 What works ~
-- Mentions: |:AgentSend| inserts "@a.txt#L3-5 " (or "@a.txt ") at the
-  cursor in Claude's prompt, and Claude attaches those lines (or the file)
-  when you submit.
-- Selection (|agent-context-auto|): Claude shows the selection ("2 lines
-  selected") and attaches it to your next prompt. With nothing selected it
-  shows and attaches the current file ("In a.txt").
+- Selection (|:AgentSend|, |agent-context-auto|): Claude shows the
+  selection ("2 lines selected") and attaches it to your next prompt. With
+  nothing selected it shows and attaches the current file ("In a.txt").
+  Claude clears it when you submit that prompt: for a later prompt, send
+  it again with |:AgentSend| (also when it has not changed). It is not
+  sent again when Claude reconnects.
 - Diffs: when Claude's Edit or Write tool asks for permission, a diff opens
   in Neovim. You can edit the proposal before accepting; Claude writes
   exactly what you accept. The terminal prompt stays active too, and
@@ -798,11 +847,13 @@ lock is rewritten, so its modification time is the newest. When several
 Neovims serve the same folder, OpenCode picks the newest lock.
 
 What works ~
-- Mentions: |:AgentSend| inserts the file with its lines (a.txt#3-5; a
-  whole file is sent as lines 1 to N).
-- Selection (|agent-context-auto|): OpenCode shows the file and selection
-  label (file#3-5) and attaches it to your next prompt. With nothing
-  selected it attaches a note that you opened the file.
+- Selection (|:AgentSend|, |agent-context-auto|): OpenCode shows the file
+  and selection label (file#3-5) and attaches it to your next prompt only.
+  With nothing selected it attaches a note that you opened the file. For a
+  later prompt, send it again with |:AgentSend| (also when it has not
+  changed: OpenCode ignores a selection it already has, even one it had
+  before it reconnected, so agent.nvim first sends it with other text).
+  It is not sent again when OpenCode reconnects.
 
 Limitations ~
 - OpenCode only receives: it never calls the IDE tools. There are no diffs
@@ -811,6 +862,11 @@ Limitations ~
 - Line offset: the Claude protocol sends 0-based lines, and OpenCode shows
   and reads them as 1-based. agent.nvim adds `agents.opencode.line_offset`
   (default 1) to what it sends to OpenCode.
+- OpenCode does not report its process id. One that connected to this
+  Neovim before the agent started is never taken for the agent's. With
+  several connected since, |:AgentSend| cannot tell which one runs in
+  agent.nvim's terminal: it types the reference into the prompt instead,
+  once OpenCode has run for 15 seconds (|agent-context|).
 - Setting `providers.claude.lock_dir` to anything other than ~/.claude/ide
   hides the lock from OpenCode.
 - Lock files: OpenCode does not check whether a lock's process is alive, so
@@ -834,11 +890,13 @@ lock's folder, so agent.nvim starts it in the resolved path of the launch
 directory.
 
 What works ~
-- Mentions: |:AgentSend| inserts "@a.txt:3-5 " into the prompt, and
-  Copilot tags those lines (or the file) when you submit.
-- Selection (|agent-context-auto|): the footer shows @file:3-5. When you
-  submit a prompt with a non-empty selection, Copilot attaches it. The
-  current selection is sent again whenever Copilot (re)connects.
+- Selection (|:AgentSend|, |agent-context-auto|): the footer shows
+  @file:3-5 (@file with no selection). Copilot attaches a non-empty
+  selection to every prompt you submit, not only the next one, until
+  another one replaces it: the next |:AgentSend| or, in the automatic
+  mode, the next change of your file or selection. With no selection (a
+  whole file) nothing is attached. The selection is sent again whenever
+  Copilot (re)connects.
 - Diffs: when Copilot shows a permission prompt for a file write, a diff
   opens in Neovim. The proposal is read-only: after an accept Copilot writes
   its own content, so edits there would be lost. Accept or reject in Neovim,
@@ -900,8 +958,11 @@ One-time setup ~
    settings, and no flag or environment variable can change that. Run
    `/ide enable` once inside Gemini; Gemini saves it in its own user
    settings. agent.nvim never writes your Gemini settings. It reads them and
-   shows a hint while IDE mode is off. Answering "Yes" to Gemini's "connect
-   Neovim?" prompt does not enable it (Gemini has no installer for Neovim).
+   shows a hint while IDE mode is off; |:AgentSend| then types
+   `@a.txt (lines 3-5)` into Gemini's prompt instead, and sends it to no
+   other Gemini connected to Neovim (|agent-context|).
+   Answering "Yes" to Gemini's "connect Neovim?" prompt does not enable it
+   (Gemini has no installer for Neovim).
 2. $NVIM controller: Gemini has no per-run way to add an MCP server, so
    agent.nvim uses a linked Gemini extension. Run |:AgentGeminiSetup| once.
    It asks for confirmation, writes
@@ -914,10 +975,12 @@ One-time setup ~
    no tools.
 
 What works ~
-- Mentions: the protocol has none. |:AgentSend| types "@a.txt (lines 3-5) "
-  into Gemini's prompt, once Gemini is connected (|agent-context|).
-- Context (|agent-context-auto|): Gemini receives the recently focused files
-  (up to 10), with the cursor and selected text of the active one.
+- Context (|:AgentSend|, |agent-context-auto|): Gemini receives the file
+  you sent, or in the automatic mode the recently focused files (up to 10),
+  with the cursor and selected text of the active one. Its prompt does not
+  show them. What |:AgentSend| sent stays in the context until the next
+  |:AgentSend| or, in the automatic mode, the next change of your file or
+  selection, and is sent again when Gemini reconnects.
 - Diffs: when Gemini asks to confirm write_file or replace, a diff opens in
   Neovim. Accept there and Gemini writes the proposal, with your edits.
   Reject (or close the diff) and the tool call is cancelled. Answering in
@@ -971,10 +1034,10 @@ read_buffer
     -1, the last line). A header "<path> (lines a-b of N)", then numbered
     lines. Includes unsaved changes; a path with no buffer is read from disk.
     buffer also takes the `nvim://buffer/<n>[/<label>]` ids under which
-    |:AgentSend| and the IDE connection name buffers that are not files
-    (|agent-context|), and fails for a buffer that no longer exists and for
-    buffer 0 in such an id. For a terminal, the default range is its last
-    200 lines, up to the last one with text.
+    the IDE connection (|:AgentSend|, the automatic mode) names buffers
+    that are not files (|agent-context|), and fails for a buffer that no
+    longer exists and for buffer 0 in such an id. For a terminal, the
+    default range is its last 200 lines, up to the last one with text.
 open_file
     path, line?, column?, end_line?, split? ("none", "horizontal",
     "vertical", "tab"). Opens in the main editor window (never in the agent
@@ -1070,9 +1133,10 @@ server runs only while the agent agent.nvim started uses it. Then:
   deterministically.
 Once connected, it gets your file and selection in the automatic mode
 (|agent-context-auto|). |:AgentSend| starts the agent in agent.nvim's
-terminal instead, except with `terminal.layout = 'none'`: then the mention
-goes to the connected agent of that kind (typed references need a
-terminal, so there is nothing for Gemini or a buffer that is not a file).
+terminal instead, except with `terminal.layout = 'none'`: then it sends to
+the agents of that kind connected to Neovim, and fails when none is. A
+Copilot it reached gets it again when it reconnects; a Copilot that
+connects later does not.
 
                                                               *agent-security*
 Security ~
@@ -1296,17 +1360,19 @@ The agent does not see the selection ~
     example with <Esc>), when you go back to a file window or to another
     reported buffer (a terminal that is not the agent's) and when its text
     changes: select again and switch to the agent straight from Visual
-    mode. Copilot attaches only a non-empty selection.
-:AgentSend typed the reference instead of mentioning it ~
-    The agent's IDE server is disabled (|:AgentStatus|). The typed
-    reference works the same for Claude, OpenCode and Copilot. Buffers that
-    are not files, and every Gemini reference, are always typed
-    (|agent-context|).
-"<agent> has not connected to Neovim yet: the mention will be ..." ~
-    The mention waits for the agent's IDE connection (|agent-context|).
+    mode. Copilot attaches only a non-empty selection. Claude and OpenCode
+    use a selection for one prompt: |:AgentSend| it again for the next.
+:AgentSend typed a reference into the prompt ~
+    There is no IDE connection to send it through (|agent-context|): the
+    agent's IDE server is disabled or not running (|:AgentStatus|), or
+    Gemini's IDE mode is off (run /ide enable in Gemini). Or several
+    OpenCodes connected to this Neovim since the agent started, and which
+    one is the agent cannot be told (|agent-opencode|).
+"<agent> has not connected to Neovim yet: the context will be ..." ~
+    |:AgentSend| waits for the agent's IDE connection (|agent-context|).
     Answer the agent's dialog, such as Claude's question whether to trust
-    the folder, and the mention appears. Otherwise see why the agent does
-    not connect (below "Claude does not connect" and the next entries).
+    the folder, and the agent gets it. Otherwise see why the agent does not
+    connect (above "Claude does not connect" and the next entries).
 "agent.nvim: nothing to send ..." ~
     It does not send the agent's own terminal, a diff buffer, a floating
     window or a buffer with |b:agent_ignore|: run it in the file.
@@ -1355,14 +1421,17 @@ The live end-to-end test runs the real agent CLIs and is not part of
 <
 For each agent a headless Neovim opens the agent, waits for the IDE
 connection, selects two lines and sends them with a Visual-mode
-`<cmd>AgentSend<cr>` mapping, checks that the focus moved to the agent and
-that its prompt shows the mention, and submits a prompt. A scripted model
-turn then calls the $NVIM controller and proposes an edit, which the driver
-accepts in the Neovim diff (after checking that the diff tab page shows the
-agent terminal too). Then the driver stops the agent with |agent.stop()| and
-checks that its IDE server stopped and removed its lock or discovery file,
-tears down, and checks that no process, lock or temp directory is left.
-Everything is isolated:
+`<cmd>AgentSend<cr>` mapping. It checks that the focus moved to the agent,
+that the lines went through the IDE connection (and show in the agent's
+TUI, where it shows them) and that nothing was typed into the prompt, then
+submits a prompt, whose request to the model must carry the lines. A
+scripted model turn then calls the $NVIM controller and proposes an edit,
+which the driver accepts in the Neovim diff (after checking that the diff
+tab page shows the agent terminal too). |:AgentSend| from a scratch buffer
+must then reach the model by its `nvim://buffer/` id. Then the driver stops
+the agent with |agent.stop()| and checks that its IDE server stopped and
+removed its lock or discovery file, tears down, and checks that no process,
+lock or temp directory is left. Everything is isolated:
 - HOME, the XDG directories, CLAUDE_CONFIG_DIR, COPILOT_HOME and
   GEMINI_CLI_HOME point to a temp directory, and the environment is rebuilt
   with env -i.

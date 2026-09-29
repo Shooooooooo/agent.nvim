@@ -739,73 +739,271 @@ describe('selection_changed', function()
   end)
 end)
 
-describe('at_mentioned (:AgentSend)', function()
+describe('send_context (:AgentSend)', function()
+  local selection = require('agent.editor.selection')
   local file
   before_each(function()
     assert.truthy(P.start())
-    file = TMP .. '/mention.txt'
-    write(file, 'one\ntwo\nthree\nfour\n')
+    -- Nothing tracked: a client that becomes ready gets only what is sent here.
+    selection._reset()
+    vim.b.agent_ignore = true
+    file = TMP .. '/send.txt'
+    write(file, 'one\ntwo\n\nfour\n')
   end)
 
-  it('sends 0-based lines to Claude, and omits them for a whole file', function()
-    local c = track(claude_client())
-    wait_ready(1)
-    c.clear()
-    assert.truthy(P.at_mention(file, 5, 10))
-    assert.same({ filePath = file, lineStart = 4, lineEnd = 9 }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(file, 3))
-    assert.same({ filePath = file, lineStart = 2, lineEnd = 2 }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(file))
-    local whole = c.take('at_mentioned')
-    assert.same({ filePath = file }, whole.params)
-    assert.falsy(vim.json.encode(whole.params):find('null', 1, true), 'no null keys')
-  end)
+  ---What :AgentSend captures in the file (selection.capture()): the lines of `range`, else the
+  ---cursor. Focus then returns to an ignored buffer (as it moves to the agent terminal).
+  local function capture(range, cursor)
+    vim.cmd.edit(vim.fn.fnameescape(file))
+    if cursor then
+      vim.api.nvim_win_set_cursor(0, cursor)
+    end
+    local s = assert(selection.capture(range))
+    vim.cmd('enew')
+    vim.b.agent_ignore = true
+    return s
+  end
 
-  it('sends 1-based lines to OpenCode (line_offset), and a whole file as 1..N', function()
-    local c = track(opencode_client())
-    wait_ready(1)
-    c.clear()
-    assert.truthy(P.at_mention(file, 5, 10, { kind = 'opencode' }))
-    assert.same({ filePath = file, lineStart = 5, lineEnd = 10 }, c.take('at_mentioned').params)
-    assert.truthy(P.at_mention(file, nil, nil, { kind = 'opencode' }))
-    assert.same({ filePath = file, lineStart = 1, lineEnd = 4 }, c.take('at_mentioned').params)
-    setup_config({ agents = { opencode = { line_offset = 0 } } })
-    assert.truthy(P.at_mention(file, 2, 3))
-    assert.same({ filePath = file, lineStart = 1, lineEnd = 2 }, c.take('at_mentioned').params)
-  end)
+  ---Replay Claude's connect sequence up to ide_connected: connecting, not ready yet.
+  local function connecting_claude(pid)
+    local c = track(connect())
+    c.raw(CLAUDE_INITIALIZE)
+    c.response(0)
+    c.raw(CLAUDE_INITIALIZED)
+    c.raw('{"jsonrpc":"2.0","method":"ide_connected","params":{"pid":' .. pid .. '}}')
+    wait_for(function()
+      return P.client_state({ kind = 'claude', pid = pid }) == 'connecting'
+    end, 2000, 'connecting')
+    return c
+  end
 
-  it('goes only to the client in the agent terminal, matched by pid; an OpenCode when it is the only one', function()
+  it('sends selection_changed as Claude renders it, to the ready client of the agent terminal only (by pid)', function()
     local a = track(claude_client({ pid = 1111 }))
     local b = track(claude_client({ pid = 2222 }))
-    local o = track(opencode_client())
-    wait_ready(3)
-    for _, x in ipairs({ a, b, o }) do
-      x.clear()
-    end
-    assert.truthy(P.at_mention(file, 2, 2, { kind = 'claude', pid = 2222 }))
-    assert.same({ filePath = file, lineStart = 1, lineEnd = 1 }, b.take('at_mentioned').params)
+    wait_ready(2)
+    a.clear()
+    b.clear()
+    -- Lines 2-3, the last one empty: Claude would drop an end at column 0, so it ends at {3, 0}.
+    local s = capture({ line1 = 2, line2 = 3 })
+    assert.truthy(P.send_context(s, { kind = 'claude', pid = 2222 }))
+    assert.same({
+      text = 'two\n',
+      filePath = file,
+      fileUrl = 'file://' .. file,
+      selection = { start = { line = 1, character = 0 }, ['end'] = { line = 3, character = 0 }, isEmpty = false },
+    }, b.take('selection_changed').params)
+    -- The cursor only: the file as a whole ("In send.txt").
+    assert.truthy(P.send_context(capture(nil, { 4, 2 }), { kind = 'claude', pid = 2222 }))
+    assert.same({
+      text = '',
+      filePath = file,
+      fileUrl = 'file://' .. file,
+      selection = { start = { line = 3, character = 2 }, ['end'] = { line = 3, character = 2 }, isEmpty = true },
+    }, b.take('selection_changed').params)
     -- The terminal job may be an ancestor of Claude (a wrapper script, a shell).
     local c = track(claude_client({ pid = vim.fn.getpid() }))
-    wait_ready(4)
+    wait_ready(3)
     c.clear()
-    assert.truthy(P.at_mention(file, 1, 1, { kind = 'claude', pid = vim.api.nvim_get_proc(vim.fn.getpid()).ppid }))
-    c.take('at_mentioned')
-    -- Never to a Claude that reported another pid.
-    assert.falsy(P.at_mention(file, 2, 3, { kind = 'claude', pid = 3333 }))
-    -- OpenCode reports no pid: the only OpenCode client is the agent's.
-    assert.truthy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
-    assert.same({ filePath = file, lineStart = 2, lineEnd = 2 }, o.take('at_mentioned').params)
-    -- Two of them: which one runs in the terminal is unknown, so neither gets it.
-    local o2 = track(opencode_client())
-    wait_ready(5)
-    o2.clear()
-    assert.falsy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
+    assert.truthy(P.send_context(s, { kind = 'claude', pid = vim.api.nvim_get_proc(vim.fn.getpid()).ppid }))
+    assert.eq('two\n', c.take('selection_changed').params.text)
+    -- Never to a Claude that reported another pid, nor to an OpenCode.
+    local o = track(opencode_client())
+    wait_ready(4)
+    o.clear()
+    assert.falsy(P.send_context(s, { kind = 'claude', pid = 3333 }))
     vim.wait(100)
-    assert.eq(0, #a.notifications('at_mentioned'))
-    assert.eq(0, #o.notifications('at_mentioned'))
-    assert.eq(0, #o2.notifications('at_mentioned'))
+    for _, x in ipairs({ a, b, c, o }) do
+      assert.eq(0, #x.notifications('selection_changed'))
+    end
+    assert.eq(0, #b.notifications('at_mentioned'), 'at_mentioned is never sent')
+  end)
+
+  it('sends Claude an unchanged selection again, as is (Claude drops it when a prompt is submitted)', function()
+    local c = track(claude_client({ pid = 1111 }))
+    wait_ready(1)
+    c.clear()
+    local s = capture({ line1 = 1, line2 = 2 })
+    assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
+    local first = c.take('selection_changed').params
+    assert.eq('one\ntwo', first.text)
+    -- Claude attaches it to the next prompt only: the same :AgentSend after that prompt must reach
+    -- it again, so it is sent again.
+    assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
+    assert.same(first, c.take('selection_changed').params)
+    vim.wait(100)
+    assert.eq(0, #c.notifications('selection_changed'), 'once: Claude gets no copy')
+    -- Tracking still sends a selection once.
+    P.on_selection(s)
+    vim.wait(100)
+    assert.eq(0, #c.notifications('selection_changed'), 'the same selection event: not resent')
+    -- Tracked first, then sent by :AgentSend: both reach Claude.
+    local cur = capture(nil, { 4, 0 })
+    P.on_selection(cur)
+    local tracked = c.take('selection_changed').params
+    assert.eq('', tracked.text)
+    assert.truthy(P.send_context(cur, { kind = 'claude', pid = 1111 }))
+    assert.same(tracked, c.take('selection_changed').params)
+    vim.wait(100)
+    assert.eq(0, #c.notifications('selection_changed'))
+  end)
+
+  it('sends OpenCode its rendering (line_offset), always right after a copy with other text', function()
+    local cl = track(claude_client({ pid = 1111 }))
+    local o = track(opencode_client())
+    wait_ready(2)
+    cl.clear()
+    o.clear()
+    local s = capture({ line1 = 1, line2 = 2 })
+    -- OpenCode reports no pid: the only OpenCode is the agent's.
+    assert.eq('ready', P.client_state({ kind = 'opencode', pid = 4242 }))
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    local want = {
+      text = 'one\ntwo',
+      filePath = file,
+      fileUrl = 'file://' .. file,
+      selection = { start = { line = 1, character = 1 }, ['end'] = { line = 2, character = 4 }, isEmpty = false },
+    }
+    -- OpenCode ignores a selection whose file, range and text did not change, attaches a selection to
+    -- one prompt only, and keeps it across reconnects (a new connection may still have it): a copy
+    -- with other text first makes it take it anew, even the first time on this connection.
+    assert.same(vim.tbl_extend('force', want, { text = '' }), o.take('selection_changed').params)
+    assert.same(want, o.take('selection_changed').params)
+    vim.wait(100)
+    assert.eq(0, #o.notifications('selection_changed'), 'two messages')
+    -- The same again: the same two.
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    assert.same(vim.tbl_extend('force', want, { text = '' }), o.take('selection_changed').params)
+    assert.same(want, o.take('selection_changed').params)
+    vim.wait(100)
+    assert.eq(0, #o.notifications('selection_changed'))
+    -- The cursor only (no text): the copy has a space.
+    local cur = capture(nil, { 2, 1 })
+    assert.truthy(P.send_context(cur, { kind = 'opencode', pid = 4242 }))
+    local copy = o.take('selection_changed').params
+    local empty = o.take('selection_changed').params
+    assert.eq('', empty.text)
+    assert.same({ start = { line = 2, character = 2 }, ['end'] = { line = 2, character = 2 }, isEmpty = true },
+      empty.selection)
+    assert.same(vim.tbl_extend('force', empty, { text = ' ' }), copy)
+    vim.wait(100)
+    assert.eq(0, #o.notifications('selection_changed'))
+    assert.truthy(P.send_context(cur, { kind = 'opencode', pid = 4242 }))
+    assert.same(copy, o.take('selection_changed').params)
+    assert.same(empty, o.take('selection_changed').params)
+    -- Tracked already (selection.track = true), then sent: the copy first too. Tracking sends no copy.
+    P.on_selection(s)
+    assert.same(want, o.take('selection_changed').params)
+    assert.eq('one\ntwo', cl.take('selection_changed').params.text, 'tracking sends it to every client')
+    vim.wait(100)
+    assert.eq(0, #o.notifications('selection_changed'), 'tracking: one message')
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    assert.same(vim.tbl_extend('force', want, { text = '' }), o.take('selection_changed').params)
+    assert.same(want, o.take('selection_changed').params)
+    setup_config({ agents = { opencode = { line_offset = 0 } } })
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    assert.eq('', o.take('selection_changed').params.text, 'another rendering: the copy too')
+    local zero = o.take('selection_changed').params
+    assert.same({ line = 0, character = 0 }, zero.selection.start)
+    assert.eq('one\ntwo', zero.text)
+    vim.wait(100)
+    assert.eq(0, #o.notifications('selection_changed'))
+    assert.eq(0, #cl.notifications('selection_changed'), ':AgentSend: not to Claude')
+    assert.eq(0, #o.notifications('at_mentioned'), 'at_mentioned is never sent')
+  end)
+
+  it('sends the copy first to a new connection of OpenCode too (it kept the selection of the last one)', function()
+    local o = track(opencode_client())
+    wait_ready(1)
+    o.clear()
+    local s = capture({ line1 = 1, line2 = 2 })
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    assert.eq('', o.take('selection_changed').params.text)
+    assert.eq('one\ntwo', o.take('selection_changed').params.text)
+    -- OpenCode reconnects (its server restarted, or the IDE server did): a new session.
+    o.close()
+    wait_for(function()
+      return P.client_state({ kind = 'opencode', pid = 4242 }) == nil
+    end, 2000, 'disconnected')
+    local o2 = track(opencode_client())
+    wait_ready(1)
+    o2.clear()
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    assert.eq('', o2.take('selection_changed').params.text, 'the copy first')
+    assert.eq('one\ntwo', o2.take('selection_changed').params.text)
+    vim.wait(100)
+    assert.eq(0, #o2.notifications('selection_changed'))
+  end)
+
+  it('sends nothing when two OpenCodes are connected (ambiguous: which one is the agent\'s is unknown)', function()
+    local o = track(opencode_client())
+    local o2 = track(opencode_client())
+    local cl = track(claude_client({ pid = 1111 }))
+    wait_ready(3)
+    for _, x in ipairs({ o, o2, cl }) do
+      x.clear()
+    end
+    local s = capture({ line1 = 1, line2 = 2 })
     assert.eq('ambiguous', P.client_state({ kind = 'opencode', pid = 4242 }))
+    assert.falsy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    vim.wait(100)
+    for _, x in ipairs({ o, o2, cl }) do
+      assert.eq(0, #x.notifications('selection_changed'))
+    end
+    -- A Claude is told apart by its pid.
+    assert.eq('ready', P.client_state({ kind = 'claude', pid = 1111 }))
+    -- With no pid (no agent terminal, terminal.layout = 'none'), any OpenCode will do.
     assert.eq('ready', P.client_state({ kind = 'opencode' }))
+    -- Once the other one is gone, the only OpenCode left is the agent's.
+    o2.close()
+    wait_for(function()
+      return P.client_state({ kind = 'opencode', pid = 4242 }) == 'ready'
+    end, 2000, 'a single OpenCode')
+    assert.truthy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    assert.eq('', o.take('selection_changed').params.text, 'the copy')
+    assert.eq('one\ntwo', o.take('selection_changed').params.text)
+  end)
+
+  it('an OpenCode connected before the agent terminal started (opts.started) is not the agent\'s', function()
+    local util = require('agent.util')
+    local old = track(opencode_client())
+    wait_ready(1)
+    old.clear()
+    vim.wait(10)
+    local started = util.now_ms() -- the agent's terminal starts
+    local s = capture({ line1 = 1, line2 = 2 })
+    local o = { kind = 'opencode', pid = 4242, started = started }
+    assert.eq(nil, P.client_state(o), 'the only OpenCode connected before: not a candidate')
+    assert.falsy(P.send_context(s, o))
+    -- Without `started` (the old rule): the only OpenCode is the agent's.
+    assert.eq('ready', P.client_state({ kind = 'opencode', pid = 4242 }))
+    -- The agent's OpenCode connects: the one candidate, not ambiguous with the older one.
+    local new = track(opencode_client())
+    wait_ready(2)
+    new.clear()
+    assert.eq('ready', P.client_state(o))
+    assert.truthy(P.send_context(s, o))
+    assert.eq('', new.take('selection_changed').params.text, 'the copy')
+    assert.eq('one\ntwo', new.take('selection_changed').params.text)
+    vim.wait(100)
+    assert.eq(0, #old.notifications('selection_changed'), 'not to the older OpenCode')
+    -- Without `started`, the two cannot be told apart.
+    assert.eq('ambiguous', P.client_state({ kind = 'opencode', pid = 4242 }))
+    assert.falsy(P.send_context(s, { kind = 'opencode', pid = 4242 }))
+    -- Nor with a later start (another agent terminal): neither is its agent's.
+    vim.wait(10)
+    assert.eq(nil, P.client_state({ kind = 'opencode', pid = 4242, started = util.now_ms() }))
+    -- A Claude is matched by its pid, whenever it connected.
+    local cl = track(claude_client({ pid = 1111 }))
+    wait_ready(3)
+    cl.clear()
+    vim.wait(10)
+    local later = { kind = 'claude', pid = 1111, started = util.now_ms() }
+    assert.eq('ready', P.client_state(later))
+    assert.truthy(P.send_context(s, later))
+    assert.eq('one\ntwo', cl.take('selection_changed').params.text)
+    vim.wait(100)
+    assert.eq(0, #old.notifications('selection_changed'))
+    assert.eq(0, #new.notifications('selection_changed'))
   end)
 
   it('client_state: connecting until the post-connect delay is over, then ready; nil for another agent', function()
@@ -821,17 +1019,69 @@ describe('at_mentioned (:AgentSend)', function()
     c.raw('{"jsonrpc":"2.0","method":"ide_connected","params":{"pid":1111}}')
     vim.wait(20)
     assert.eq('connecting', P.client_state({ kind = 'claude', pid = 1111 }))
-    assert.falsy(P.at_mention(file, 1, 1, { kind = 'claude', pid = 1111 }), 'not ready: not sent')
     wait_ready(1)
     assert.eq('ready', P.client_state({ kind = 'claude', pid = 1111 }))
     assert.eq(nil, P.client_state({ kind = 'claude', pid = 2222 }))
     assert.eq(nil, P.client_state({ kind = 'opencode', pid = 1111 }))
   end)
 
-  it('returns false with no ready client, and when stopped', function()
-    assert.falsy(P.at_mention(file, 1, 2))
+  it('is not replayed: a client that becomes ready later, or reconnects, does not get it', function()
+    setup_config({ selection = { track = false } })
+    local s = capture({ line1 = 1, line2 = 2 })
+    local c = connecting_claude(1111)
+    assert.falsy(P.send_context(s, { kind = 'claude', pid = 1111 }), 'not ready: not sent')
+    local o = track(opencode_client())
+    assert.falsy(P.send_context(s, { kind = 'claude', pid = 1111 }), 'still not ready')
+    c.raw(CLAUDE_TOOLS_LIST)
+    c.response(1)
+    wait_ready(2)
+    vim.wait(150)
+    assert.eq(0, #c.notifications('selection_changed'), 'nothing once ready')
+    assert.eq(0, #o.notifications('selection_changed'))
+    -- (init.lua sends it again once the client is ready.)
+    assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
+    assert.eq('one\ntwo', c.take('selection_changed').params.text)
+    -- A new session of the same Claude (a reconnect): nothing either.
+    c.close()
+    local c2 = track(claude_client({ pid = 1111 }))
+    wait_ready(2)
+    vim.wait(150)
+    assert.eq(0, #c2.notifications('selection_changed'))
+    assert.eq(0, #o.notifications('selection_changed'))
+  end)
+
+  it('with selection.track = true, a client that becomes ready gets the tracked selection, not the sent one', function()
+    P.on_selection(sel({ path = '/p/a.lua', start = { line = 7, character = 3 } }))
+    local c = track(claude_client({ pid = 1111 }))
+    assert.eq('/p/a.lua', c.take('selection_changed', 2000).params.filePath)
+    assert.truthy(P.send_context(capture({ line1 = 1, line2 = 2 }), { kind = 'claude', pid = 1111 }))
+    assert.eq('one\ntwo', c.take('selection_changed').params.text)
+    -- Selection events go on.
+    P.on_selection(sel({ path = '/p/b.lua', start = { line = 1, character = 0 } }))
+    assert.eq('/p/b.lua', c.take('selection_changed').params.filePath)
+    -- The agent's next client: the tracked selection only.
+    assert.truthy(P.send_context(capture({ line1 = 4 }), { kind = 'claude', pid = 1111 }))
+    assert.eq('four', c.take('selection_changed').params.text)
+    local c2 = track(claude_client({ pid = 1111 }))
+    assert.eq('/p/b.lua', c2.take('selection_changed', 2000).params.filePath)
+    vim.wait(150)
+    assert.eq(0, #c2.notifications('selection_changed'))
+  end)
+
+  it('returns false with no ready client, no selection, and when stopped; nothing is remembered', function()
+    setup_config({ selection = { track = false } })
+    local s = capture({ line1 = 1 })
+    assert.falsy(P.send_context(s, { kind = 'claude', pid = 1111 }))
+    assert.falsy(P.send_context(s))
+    assert.falsy(P.send_context(nil, { kind = 'claude', pid = 1111 }))
+    assert.falsy(P.send_context({ text = 'x' }, { kind = 'claude', pid = 1111 }), 'no path')
+    assert.eq(nil, P.clear_context, 'nothing to forget when the agent ends')
+    local c = track(claude_client({ pid = 1111 }))
+    wait_ready(1)
+    vim.wait(150)
+    assert.eq(0, #c.notifications('selection_changed'))
     P.stop()
-    assert.falsy(P.at_mention(file, 1, 2))
+    assert.falsy(P.send_context(s, { kind = 'claude', pid = 1111 }))
     assert.eq(nil, P.client_state())
   end)
 end)

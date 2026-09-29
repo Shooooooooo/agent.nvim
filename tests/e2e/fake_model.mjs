@@ -20,6 +20,10 @@
 // prompt names with @path) do not shift the script. A step's tool is a regex matched against the tool names in the
 // request; when none matches (a side request such as a title, or a missing tool) the answer is a
 // plain text "OK" and the miss is logged.
+// Each request of the scripted turn logs, as `input`, the text of the messages after the model's
+// last answer: the prompt and what the agent attached to it (its IDE context, such as the selection
+// sent with :AgentSend; Claude Code puts it in a system message after the prompt), which
+// tests/e2e/driver.lua checks.
 import http from 'node:http';
 import fs from 'node:fs';
 
@@ -59,6 +63,16 @@ function progress(api, body) {
     }
   }
   return { step: results.length, results, triggered };
+}
+
+// The text of the user and system messages after the last assistant message (tool results and a
+// leading system prompt left out).
+function inputText(body) {
+  const msgs = body.messages || [];
+  let i = msgs.length;
+  while (i > 0 && msgs[i - 1].role !== 'assistant') i--;
+  if (i === 0 && msgs[0]?.role === 'system') i = 1;
+  return msgs.slice(i).filter((m) => m.role === 'user' || m.role === 'system').map((m) => textOf(m.content)).join('\n');
 }
 
 function toolNames(api, body) {
@@ -164,8 +178,9 @@ const server = http.createServer((req, res) => {
       return res.end(req.method === 'HEAD' ? undefined : JSON.stringify({ error: { message: 'not found' } }));
     }
     const d = decide(api, body);
+    const input = progress(api, body).triggered ? inputText(body).slice(0, 50000) || undefined : undefined;
     log({ kind: 'REQ', api, url, model: body.model, stream: !!body.stream, nmsgs: (body.messages || []).length,
-      ntools: toolNames(api, body).length, step: d.step, results: d.results, why: d.why, tools: d.tools });
+      ntools: toolNames(api, body).length, step: d.step, results: d.results, why: d.why, tools: d.tools, input });
     log({ kind: 'RESP', api, step: d.step, tool: d.tool, text: d.text, delay: d.delay || undefined });
     const answer = () => (api === 'openai' ? openai(body, res, d) : anthropic(body, res, d));
     if (d.delay > 0) setTimeout(answer, d.delay);

@@ -25,7 +25,7 @@ local commands = {
     desc = 'Toggle the agent terminal (starting another agent replaces the running one)' } },
   { 'AgentOpen', { nargs = '?', complete = complete_agents, desc = 'Open (start or show) the agent terminal' } },
   { 'AgentSend', { nargs = '?', range = true, complete = complete_agents,
-    desc = 'Mention the selection (or the whole buffer) in the agent prompt and focus the agent' } },
+    desc = 'Send the selection (or the buffer) to the agent as context and focus the agent' } },
   { 'AgentClose', { nargs = 0, desc = 'Hide the agent terminal (the agent keeps running)' } },
   { 'AgentStop', { nargs = 0, desc = 'Stop the agent (and its IDE server, unless auto_start is on)' } },
   { 'AgentDiffAccept', { nargs = 0, desc = 'Accept the proposed change in the current diff' } },
@@ -35,6 +35,9 @@ local commands = {
     desc = 'Print the MCP config for registering the Neovim controller by hand' } },
   { 'AgentGeminiSetup', { nargs = 0, desc = 'Link the agent.nvim extension into Gemini CLI (one time)' } },
 }
+
+-- :'<,'>AgentSend is told from other ranges by its command line.
+require('agent.editor.cmdline').start()
 
 for _, c in ipairs(commands) do
   -- `bar` lets commands be chained with `|` (e.g. in mappings), like built-in Ex commands.

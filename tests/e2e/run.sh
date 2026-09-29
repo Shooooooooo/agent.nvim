@@ -10,12 +10,18 @@
 # For each agent, a headless Neovim runs tests/e2e/driver.lua: it calls require('agent').setup()
 # and require('agent').open(<agent>) (a split on the right, or see E2E_LAYOUT and E2E_SPLIT_SIDE
 # below), waits for the agent's IDE connection, selects lines in the editor and sends them with
-# :AgentSend (a Visual-mode <cmd>AgentSend<cr> mapping), checks that the focus went to the agent
-# and that its prompt shows the mention, and submits a prompt. A scripted model turn then (a)
-# calls the $NVIM controller (exec_lua and open_file) and (b) proposes an edit that goes through
-# the IDE diff, which the driver accepts in Neovim. The driver checks the effects in Neovim and
-# on disk, stops the agent (its provider stops with it and removes its lock/discovery file),
-# tears down, and checks that no lock/discovery files or temp dirs are left.
+# :AgentSend (a Visual-mode <cmd>AgentSend<cr> mapping), checks that the focus went to the agent,
+# that the selection went through the IDE connection (as selection.track sends it) and shows in
+# its TUI, and that nothing was typed into its prompt; then submits a prompt, whose model request
+# must carry the selected text. A scripted model turn then (a) calls the $NVIM controller
+# (exec_lua and open_file) and (b) proposes an edit that goes through the IDE diff, which the
+# driver accepts in Neovim. The driver checks the effects in Neovim and on disk, sends lines of a
+# scratch buffer (by its nvim://buffer/ id) the same way, with one more prompt, then the same lines
+# again once that prompt was answered, whose next prompt must carry them again (Claude and OpenCode
+# use a selection for one prompt only), then a charwise Visual selection with a typed :'<,'>AgentSend
+# (the characters selected must reach the agent, not whole lines), stops the agent (its provider
+# stops with it and removes its lock/discovery file), tears down, and checks that no
+# lock/discovery files or temp dirs are left.
 # This script then checks that no process started by the run is still alive.
 #
 # Isolation: nothing touches your real agent configs or accounts.
@@ -23,7 +29,8 @@
 #     temp dir, and the environment is rebuilt from scratch (env -i), so no inherited CLAUDE_*,
 #     ANTHROPIC_*, COPILOT_*, GEMINI_* or NVIM variable leaks in.
 #   * Model turns come from a local fake endpoint (tests/e2e/fake_model.mjs, 127.0.0.1 only) or,
-#     for Gemini, from --fake-responses-non-strict. Dummy API keys only.
+#     for Gemini, from --fake-responses-non-strict (its model requests are read from its local
+#     telemetry outfile). Dummy API keys only.
 #   * The workspaces are temp dirs, never this repository.
 #
 # Requirements: nvim (0.11+), node, and the agent CLIs to test:
@@ -34,7 +41,8 @@
 # Agents that are not found are reported as SKIP.
 #
 # Other variables: E2E_TMP (parent of the temp dir; default $TMPDIR or /tmp), E2E_KEEP=1 (keep
-# the temp dir with the logs: <agent>.driver.log, <agent>.model.jsonl, <agent>.tty.txt),
+# the temp dir with the logs: <agent>.driver.log, <agent>.model.jsonl or gemini.telemetry.log,
+# <agent>.tty.txt, and <agent>.tty-send.txt, the TUI after the last :AgentSend),
 # E2E_TIMEOUT (seconds per agent, default 300), E2E_LAYOUT (terminal.layout: split, the default,
 # or current), E2E_SPLIT_SIDE (terminal.split_side: right, the baseline here, or below, the
 # plugin's default; the diff tab page must show the agent on that side: on the right as wide as

@@ -471,25 +471,33 @@ describe('copilot provider (replaying Copilot CLI 1.0.88)', () => {
       assert.equal('current' in e.data.params, false);
     });
 
-    test('add_file_reference (:AgentSend): whole file (null selection and selectedText) and a line range', async () => {
-      writeFileSync(path.join(ws(), 'r.txt'), 'l1\nl2\nl3\nl4\nl5\n');
-      assert.deepEqual(await fx.cmd('mention', { path: path.join(ws(), 'r.txt') }), { sent: true, state: 'ready' });
-      const whole = await cli.nextEvent(stream);
-      assert.deepEqual(whole.data, {
+    test('send_context (:AgentSend): selection_changed to the CLI in the agent terminal (its parent pid), never add_file_reference', async () => {
+      const r = path.join(ws(), 'r.txt');
+      writeFileSync(r, 'l1\nl2\nl3\nl4\nl5\n');
+      // A range (or :'<,'> after V): its lines. The CLI attaches them to the next prompt.
+      assert.deepEqual(await fx.cmd('send', { path: r, line1: 3, line2: 5, pid: 5000 }), { sent: true, state: 'ready' });
+      assert.deepEqual((await cli.nextEvent(stream)).data, {
         jsonrpc: '2.0',
-        method: 'add_file_reference',
-        params: { filePath: path.join(ws(), 'r.txt'), fileUrl: 'file://' + path.join(ws(), 'r.txt'), selection: null, selectedText: null },
+        method: 'selection_changed',
+        params: {
+          text: 'l3\nl4\nl5',
+          filePath: r,
+          fileUrl: 'file://' + r,
+          selection: { start: { line: 2, character: 0 }, end: { line: 4, character: 2 }, isEmpty: false },
+        },
       });
-      assert.deepEqual(await fx.cmd('mention', { path: path.join(ws(), 'r.txt'), start: 3, end: 5, pid: 5000 }), { sent: true, state: 'ready' });
-      const range = await cli.nextEvent(stream);
-      assert.deepEqual(range.data.params, {
-        filePath: path.join(ws(), 'r.txt'),
-        fileUrl: 'file://' + path.join(ws(), 'r.txt'),
-        selection: { start: { line: 2, character: 0 }, end: { line: 4, character: 2 } },
-        selectedText: 'l3\nl4\nl5',
+      // The cursor only (the file as a whole), for the CLI's own pid.
+      assert.deepEqual(await fx.cmd('send', { path: r, cursor: [2, 1], pid: 5001 }), { sent: true, state: 'ready' });
+      assert.deepEqual((await cli.nextEvent(stream)).data.params, {
+        text: '',
+        filePath: r,
+        fileUrl: 'file://' + r,
+        selection: { start: { line: 1, character: 1 }, end: { line: 1, character: 1 }, isEmpty: true },
       });
       // Another pid: another CLI, not this one.
-      assert.deepEqual(await fx.cmd('mention', { path: path.join(ws(), 'r.txt'), pid: 1 }), { sent: false, state: null });
+      assert.deepEqual(await fx.cmd('send', { path: r, line1: 1, pid: 1 }), { sent: false, state: null });
+      await sleep(150);
+      assert.deepEqual(stream.events, []);
     });
 
     test('update_session_name (as sent after the first prompt)', async () => {
@@ -693,6 +701,105 @@ describe('copilot provider (replaying Copilot CLI 1.0.88)', () => {
       await fx.cmd('select', { path: path.join(ws(), 'a.txt'), start: [1, 0], end: [1, 6] });
       assert.equal((await cli.nextEvent(stream)).data.params.text, 'second');
     });
+  });
+
+  test('send_context before the CLI connects: replayed when its stream opens and after a re-initialize, not to another CLI, until its agent ends', async () => {
+    const file = path.join(fx.ws, 'late.txt');
+    writeFileSync(file, 'first\nsecond\n');
+    const want = {
+      text: 'second',
+      filePath: file,
+      fileUrl: 'file://' + file,
+      selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 6 }, isEmpty: false },
+    };
+    // What a stream got once the replay is over.
+    const settled = async (stream) => {
+      await sleep(150);
+      return stream.events.splice(0).map((e) => e.data);
+    };
+    const sentIn = (msgs) => msgs.filter((m) => m.params.filePath === file);
+    assert.deepEqual(await fx.cmd('send', { path: file, line1: 2, pid: 6000 }), { sent: false, state: null });
+    const cli = new FakeCli(lock, { pid: 6001, ppid: 6000 });
+    const other = new FakeCli(lock, { pid: 7001, ppid: 7000 });
+    const c = await cli.connect();
+    const o = await other.connect();
+    // The tracked selection first (selection.track = true in the fixture), then the sent one.
+    let got = await settled(c.stream);
+    assert.deepEqual(got[got.length - 1], { jsonrpc: '2.0', method: 'selection_changed', params: want });
+    assert.equal(sentIn(got).length, 1);
+    assert.deepEqual(sentIn(await settled(o.stream)), [], 'another CLI');
+    // DELETE + re-initialize (a new MCP session of the same CLI): again.
+    await cli.delete();
+    const again = await cli.connect();
+    got = await settled(again.stream);
+    assert.deepEqual(got[got.length - 1].params, want);
+    // Another agent terminal ends: kept. Its own ends: forgotten, the next session gets the tracked
+    // selection only.
+    assert.deepEqual(await fx.cmd('forget', { pid: 7000 }), { ok: true });
+    await cli.delete();
+    const fourth = await cli.connect();
+    got = await settled(fourth.stream);
+    assert.deepEqual(got[got.length - 1].params, want);
+    assert.deepEqual(await fx.cmd('forget', { pid: 6000 }), { ok: true });
+    await cli.delete();
+    const fifth = await cli.connect();
+    got = await settled(fifth.stream);
+    assert.deepEqual(sentIn(got), []);
+    assert.ok(got.length > 0, 'the tracked selection');
+    // Sent again, then a selection event replaces it: the next stream gets the tracked selection only.
+    assert.deepEqual(await fx.cmd('send', { path: file, line1: 2, pid: 6000 }), { sent: true, state: 'ready' });
+    assert.deepEqual(sentIn(await settled(fifth.stream)), [{ jsonrpc: '2.0', method: 'selection_changed', params: want }]);
+    await fx.cmd('select', { path: path.join(fx.ws, 'a.txt'), start: [0, 0], end: [0, 5] });
+    await cli.delete();
+    const third = await cli.connect();
+    got = await settled(third.stream);
+    assert.deepEqual(sentIn(got), []);
+    assert.equal(got[got.length - 1].params.text, 'hello');
+    await cli.delete();
+    await other.delete();
+    cli.close();
+    other.close();
+    await waitFor(async () => (await fx.cmd('stats')).clients === 0, 2000);
+  });
+
+  test('send_context with no pid (terminal.layout = none): every CLI now, replayed only to the CLIs it was sent to', async () => {
+    const file = path.join(fx.ws, 'nopid.txt');
+    writeFileSync(file, 'first\nsecond\n');
+    const settled = async (stream) => {
+      await sleep(150);
+      return stream.events.splice(0).map((e) => e.data);
+    };
+    const sentIn = (msgs) => msgs.filter((m) => m.params.filePath === file).map((m) => m.params.text);
+    const cli = new FakeCli(lock, { pid: 8001, ppid: 8000 });
+    const other = new FakeCli(lock, { pid: 8101, ppid: 8100 });
+    const c = await cli.connect();
+    const o = await other.connect();
+    await settled(c.stream);
+    await settled(o.stream);
+    assert.deepEqual(await fx.cmd('send', { path: file, line1: 1 }), { sent: true, state: 'ready' });
+    assert.deepEqual(sentIn(await settled(c.stream)), ['first']);
+    assert.deepEqual(sentIn(await settled(o.stream)), ['first']);
+    // A session it was sent to opens its stream again: replayed.
+    const s2 = await cli.openStream();
+    assert.equal(s2.status, 200);
+    assert.deepEqual(sentIn(await settled(s2)), ['first']);
+    // A CLI that connects later: not. One it was sent to that reconnects (a new MCP session, the
+    // same X-Copilot-Session-Id; the CLI clears its cache): again.
+    const later = new FakeCli(lock, { pid: 8201, ppid: 8200 });
+    const l = await later.connect();
+    assert.deepEqual(sentIn(await settled(l.stream)), [], 'a CLI it was not sent to');
+    await other.delete();
+    const again = await other.connect();
+    assert.deepEqual(sentIn(await settled(again.stream)), ['first'], 'the same CLI, reconnected');
+    // Forgotten with the agent it was sent for (none: clear_context(nil)).
+    assert.deepEqual(await fx.cmd('forget', {}), { ok: true });
+    const s3 = await cli.openStream();
+    assert.deepEqual(sentIn(await settled(s3)), []);
+    for (const x of [cli, other, later]) {
+      await x.delete();
+      x.close();
+    }
+    await waitFor(async () => (await fx.cmd('stats')).clients === 0, 2000);
   });
 
   test('takeover: re-initialize with the same X-Copilot-Session-Id -> 409 while streaming, takeover after the stream closed', async () => {

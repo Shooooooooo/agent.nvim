@@ -1033,66 +1033,235 @@ describe('notifications', function()
     assert.truthy(ok, err)
   end)
 
-  it('at_mention sends add_file_reference to the CLI in the agent terminal (its pid or its parent\'s)', function()
-    local file = util.realpath(ws) .. '/a.txt'
-    write(file, 'one\ntwo\nthrée\nfour\n')
-    local old, sent_old = streaming_session({ last_activity = 1, copilot_pid = 11, copilot_parent_pid = 10 })
-    local new, sent_new = streaming_session({ last_activity = 2, copilot_pid = 21, copilot_parent_pid = 20 })
+  describe('send_context (:AgentSend)', function()
+    local selection = require('agent.editor.selection')
+    local file
 
-    -- Without a pid: the most recently active CLI. A whole file: null selection and selectedText.
-    assert.truthy(P.at_mention(file))
-    assert.eq(0, #sent_old)
-    assert.eq(1, #sent_new)
-    local whole = vim.json.decode(vim.json.encode(sent_new[1]))
-    assert.eq('add_file_reference', whole.method)
-    assert.same({ filePath = file, fileUrl = vim.uri_from_fname(file), selection = vim.NIL, selectedText = vim.NIL },
-      whole.params)
-    -- Both keys must be present as JSON null.
-    assert.matches('"selection":null', vim.json.encode(sent_new[1].params))
-    assert.matches('"selectedText":null', vim.json.encode(sent_new[1].params))
+    before_each(function()
+      file = util.realpath(ws) .. '/a.txt'
+      write(file, 'one\ntwo\nthrée\nfour\n')
+      vim.cmd('edit ' .. vim.fn.fnameescape(file))
+    end)
 
-    -- A line range (file not loaded: read from disk), for the terminal job's pid (the CLI's parent).
-    assert.truthy(P.at_mention(file, 2, 3, { pid = 10 }))
-    assert.eq(1, #sent_old)
-    assert.same({
-      filePath = file, fileUrl = vim.uri_from_fname(file),
-      selection = { start = { line = 1, character = 0 }, ['end'] = { line = 2, character = 5 } },
-      selectedText = 'two\nthrée',
-    }, sent_old[1].params)
+    -- A connected CLI (initialized) without an event stream yet.
+    local function connected_session(info)
+      local session, sent = open_session(info)
+      session.initialized = true
+      P._state().binding._sessions[session.id] = session
+      return session, sent
+    end
 
-    -- Loaded buffer: UTF-16 end column; a reversed range is normalized; the CLI's own pid.
-    vim.cmd('edit ' .. vim.fn.fnameescape(file))
-    assert.truthy(P.at_mention(file, 3, 2, { pid = 21 }))
-    local p = sent_new[#sent_new].params
-    assert.same({ start = { line = 1, character = 0 }, ['end'] = { line = 2, character = 5 } }, p.selection)
-    assert.eq('two\nthrée', p.selectedText)
+    -- Its GET stream opens (again), as the binding reports it.
+    local function open_stream(session)
+      local b = P._state().binding
+      b._streams[session] = { res = { closed = false } }
+      b:_hook('on_stream_open', session, b)
+    end
 
-    -- Never to another CLI.
-    assert.falsy(P.at_mention(file, 1, 1, { pid = 999 }))
-    assert.eq(1, #sent_old)
-    assert.eq(2, #sent_new)
-    old:close()
-    new:close()
-  end)
+    it('sends selection_changed to the CLI in the agent terminal (its pid or its parent\'s), not to others', function()
+      local s = selection.capture({ line1 = 2, line2 = 3 })
+      local old, sent_old = streaming_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      local new, sent_new = streaming_session({ copilot_pid = 21, copilot_parent_pid = 20 })
+      local idle, sent_idle = connected_session({ copilot_pid = 12, copilot_parent_pid = 10 })
 
-  it('client_state: ready with an event stream, connecting without one, else nil', function()
-    assert.eq(nil, P.client_state({ pid = 10 }))
-    local s = open_session({ copilot_pid = 11, copilot_parent_pid = 10 })
-    s.initialized = true
-    P._state().binding._sessions[s.id] = s
-    assert.eq('connecting', P.client_state({ pid = 10 }))
-    assert.eq(nil, P.client_state({ pid = 20 }))
-    assert.falsy(P.at_mention(ws .. '/a.txt', 1, 1, { pid = 10 }), 'no stream: not delivered')
-    P._state().binding._streams[s] = { res = { closed = false } }
-    assert.eq('ready', P.client_state({ pid = 10 }))
-    assert.eq('ready', P.client_state())
-    s:close()
-  end)
+      -- The terminal job's pid (the CLI's parent): lines 2-3, UTF-16 end column.
+      assert.truthy(P.send_context(s, { pid = 10 }))
+      assert.eq(1, #sent_old)
+      assert.eq('selection_changed', sent_old[1].method)
+      assert.same({
+        text = 'two\nthrée', filePath = file, fileUrl = vim.uri_from_fname(file),
+        selection = { start = { line = 1, character = 0 }, ['end'] = { line = 2, character = 5 }, isEmpty = false },
+      }, sent_old[1].params)
+      assert.same({}, sent_new)
+      assert.same({}, sent_idle, 'no stream: nothing')
 
-  it('at_mention returns false without a connected CLI or when stopped', function()
-    assert.falsy(P.at_mention(ws .. '/a.txt'))
-    P.stop()
-    assert.falsy(P.at_mention(ws .. '/a.txt'))
-    assert.eq(nil, P.client_state())
+      -- The CLI's own pid; the cursor only stands for the whole file.
+      api.nvim_win_set_cursor(0, { 3, 5 }) -- after 'thré' (é is 2 bytes, 1 UTF-16 unit)
+      assert.truthy(P.send_context(selection.capture(), { pid = 21 }))
+      assert.same({
+        text = '', filePath = file, fileUrl = vim.uri_from_fname(file),
+        selection = { start = { line = 2, character = 4 }, ['end'] = { line = 2, character = 4 }, isEmpty = true },
+      }, sent_new[1].params)
+
+      -- Never to another CLI.
+      assert.falsy(P.send_context(s, { pid = 999 }))
+      assert.eq(1, #sent_old)
+      assert.eq(1, #sent_new)
+      -- No pid (no agent terminal, terminal.layout = 'none'): every CLI with a stream.
+      assert.truthy(P.send_context(s))
+      assert.eq(2, #sent_old)
+      assert.eq(2, #sent_new)
+      assert.same({}, sent_idle)
+      for _, m in ipairs(vim.list_extend(vim.list_extend({}, sent_old), sent_new)) do
+        assert.eq('selection_changed', m.method, 'add_file_reference is never sent')
+      end
+      old:close()
+      new:close()
+      idle:close()
+    end)
+
+    it('client_state: ready with an event stream, connecting without one, else nil', function()
+      assert.eq(nil, P.client_state({ pid = 10 }))
+      local s = connected_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      assert.eq('connecting', P.client_state({ pid = 10 }))
+      assert.eq(nil, P.client_state({ pid = 20 }))
+      assert.falsy(P.send_context(selection.capture(), { pid = 10 }), 'no stream: not delivered')
+      P._state().binding._streams[s] = { res = { closed = false } }
+      assert.eq('ready', P.client_state({ pid = 10 }))
+      assert.eq('ready', P.client_state())
+      s:close()
+    end)
+
+    it('is replayed when a stream of that CLI opens (every reconnect); with selection.track = false, nothing else', function()
+      local s = selection.capture({ line1 = 2 })
+      local want = P.selection_params(s)
+      assert.eq('two', want.text)
+      assert.falsy(P.send_context(s, { pid = 10 }), 'no CLI yet')
+      local a, sent_a = connected_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      local b, sent_b = connected_session({ copilot_pid = 21, copilot_parent_pid = 20 })
+      open_stream(a)
+      open_stream(b)
+      assert.eq(1, #sent_a)
+      assert.eq('selection_changed', sent_a[1].method)
+      assert.same(want, sent_a[1].params)
+      assert.same({}, sent_b, 'another CLI')
+      open_stream(a) -- the CLI clears its cache on every reconnect
+      assert.eq(2, #sent_a)
+      assert.same(want, sent_a[2].params)
+      -- Sent with no pid: every CLI with a stream now, and replayed to those sessions only.
+      assert.truthy(P.send_context(s))
+      assert.eq(3, #sent_a)
+      assert.eq(1, #sent_b)
+      open_stream(b)
+      assert.eq(2, #sent_b)
+      assert.same(want, sent_b[2].params)
+      local c, sent_c = connected_session({ copilot_pid = 31, copilot_parent_pid = 30 })
+      open_stream(c)
+      assert.same({}, sent_c, 'a session it was not sent to')
+      a:close()
+      b:close()
+      c:close()
+    end)
+
+    it('sent with no pid (terminal.layout = \'none\'): replayed only to the sessions it was sent to', function()
+      local s = selection.capture({ line1 = 2 })
+      local want = P.selection_params(s)
+      local a, sent_a = streaming_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      local b, sent_b = streaming_session({ copilot_pid = 21, copilot_parent_pid = 20 })
+      local idle, sent_idle = connected_session({ copilot_pid = 31, copilot_parent_pid = 30 })
+      assert.truthy(P.send_context(s))
+      assert.same({ want }, vim.tbl_map(function(m)
+        return m.params
+      end, sent_a))
+      assert.eq(1, #sent_b)
+      assert.same({}, sent_idle, 'no stream: not sent')
+      -- A stream of a session it was sent to opens again (the CLI reconnects): it gets it again.
+      open_stream(a)
+      open_stream(b)
+      assert.eq(2, #sent_a)
+      assert.same(want, sent_a[2].params)
+      assert.eq(2, #sent_b)
+      -- A session that had no stream then, or a new one (even of the same CLI): nothing.
+      open_stream(idle)
+      assert.same({}, sent_idle)
+      local new, sent_new = connected_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      open_stream(new)
+      assert.same({}, sent_new, 'a new session of the CLI in a: not sent to it')
+      -- Sent again with a pid: its CLI's sessions, the new one included, from now on.
+      assert.truthy(P.send_context(s, { pid = 10 }))
+      assert.eq(3, #sent_a)
+      assert.eq(1, #sent_new)
+      assert.eq(2, #sent_b)
+      open_stream(b)
+      assert.eq(2, #sent_b, 'b: it is for the CLI with pid 10 now')
+      open_stream(new)
+      assert.eq(2, #sent_new)
+      a:close()
+      b:close()
+      idle:close()
+      new:close()
+    end)
+
+    it('with selection.track = true, it follows the tracked selection on replay until on_selection replaces it', function()
+      setup({ selection = { track = true } })
+      local buf = api.nvim_get_current_buf()
+      local tracked = { path = file, bufnr = buf, text = 'one', start = { line = 0, character = 0 },
+        finish = { line = 0, character = 3 }, is_empty = false }
+      P.on_selection(tracked)
+      local s = selection.capture({ line1 = 2 })
+      local a, sent_a = streaming_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      assert.truthy(P.send_context(s, { pid = 10 }))
+      assert.eq('two', sent_a[1].params.text)
+      -- A new stream of that CLI: the tracked selection, then what was sent (the latest).
+      local b, sent_b = connected_session({ copilot_pid = 12, copilot_parent_pid = 10 })
+      open_stream(b)
+      assert.same({ 'one', 'two' }, vim.tbl_map(function(m)
+        return m.params.text
+      end, sent_b))
+      -- The next selection event replaces it, for good.
+      P.on_selection(vim.tbl_extend('force', tracked, { text = 'on', finish = { line = 0, character = 2 } }))
+      assert.eq(nil, P._state().context)
+      assert.eq('on', sent_a[2].params.text)
+      local c, sent_c = connected_session({ copilot_pid = 13, copilot_parent_pid = 10 })
+      open_stream(c)
+      assert.same({ 'on' }, vim.tbl_map(function(m)
+        return m.params.text
+      end, sent_c))
+      a:close()
+      b:close()
+      c:close()
+    end)
+
+    it('clear_context(pid) forgets it when the agent terminal with that job pid ends: no replay then', function()
+      local s = selection.capture({ line1 = 2 })
+      assert.falsy(P.send_context(s, { pid = 10 }))
+      -- Another agent (terminal) ended: kept.
+      P.clear_context(20)
+      P.clear_context(nil)
+      local a, sent_a = connected_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+      open_stream(a)
+      assert.eq(1, #sent_a)
+      assert.eq('two', sent_a[1].params.text)
+      -- Its own ended: forgotten. The next stream of that CLI, or of the one started next, gets nothing.
+      P.clear_context(10)
+      assert.eq(nil, P._state().context)
+      open_stream(a)
+      assert.eq(1, #sent_a)
+      local b, sent_b = connected_session({ copilot_pid = 12, copilot_parent_pid = 10 })
+      open_stream(b)
+      assert.same({}, sent_b)
+      -- Sent with no pid (no agent terminal, terminal.layout = 'none'): a pid does not forget it.
+      assert.truthy(P.send_context(s))
+      assert.eq(1, #sent_b)
+      P.clear_context(10)
+      open_stream(b)
+      assert.eq(2, #sent_b)
+      P.clear_context(nil)
+      open_stream(b)
+      assert.eq(2, #sent_b)
+      assert.eq(2, #sent_a, 'sent to every CLI once')
+      -- Safe when stopped.
+      a:close()
+      b:close()
+      P.stop()
+      P.clear_context(10)
+    end)
+
+    it('returns false without a connected CLI or when stopped; stop() forgets it', function()
+      local s = selection.capture()
+      assert.falsy(P.send_context(s))
+      assert.falsy(P.send_context(nil))
+      assert.falsy(P.send_context({ path = '' }))
+      assert.truthy(P._state().context, 'remembered for a CLI that connects later')
+      P.stop()
+      assert.falsy(P.send_context(s))
+      assert.eq(nil, P.client_state())
+      P.start()
+      assert.eq(nil, P._state().context)
+      local a, sent_a = connected_session({})
+      open_stream(a)
+      assert.same({}, sent_a)
+      a:close()
+    end)
   end)
 end)

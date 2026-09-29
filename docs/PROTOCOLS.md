@@ -39,25 +39,96 @@ IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable 
   lines. OpenCode reads Claude-protocol lines as 1-based. Gemini's cursor is 1-based. The
   controller's tools are 1-based and inclusive. Columns are byte offsets except where noted
   (Copilot and Gemini use UTF-16 when the buffer is loaded).
-- **Mentions (`:AgentSend`).** The user sends the current file or buffer, or lines of it, and the
-  focus goes to the agent terminal (the agent is shown, or started, first). Claude and OpenCode get
-  `at_mentioned`, Copilot `add_file_reference`, each only for the client in the agent terminal
-  (matched by pid). Gemini has no mention in its protocol: `@<path> (lines a-b)` is typed into its
-  prompt as a bracketed paste. Until the Claude, OpenCode or Copilot client in the terminal is
-  connected (ready), init.lua keeps the mention queued (polling every 250 ms, mentions in the order
-  they were sent) for as long as it takes, and never types: before connecting, Claude may show its
-  folder trust dialog, which would take the typed text (verified live, Claude Code 2.1.284: the
-  reference went into the dialog and was lost). After 15 s it says so once. A mention queued for an
-  agent that stops or is replaced is dropped. Only with the agent's provider disabled or stopped is
-  the reference typed in the agent's own syntax. Gemini's reference is typed once its client is
-  connected, or 15 s after the start. References are typed only into a terminal at least 3 s old.
-  A buffer that is not a file is always **typed** as its id (`nvim://buffer/3/sh lines 1-2`), never sent: Claude and
-  Copilot make a mention's `filePath` relative to their cwd (Node's `path.relative`), which turns
-  `nvim://buffer/3/sh` into `nvim:/buffer/3/sh` (verified live, Claude Code 2.1.284 and Copilot CLI
-  1.0.88 with the fake model: the prompt shows `@nvim:/buffer/3/sh#L1-2` or
-  `@nvim:/buffer/3/sh:1-2`, nothing is attached, and `read_buffer` with that text fails with "no
-  buffer or readable file"). Typed, the id reaches the model verbatim, and `read_buffer` with it
-  returns the lines.
+- **`:AgentSend`.** The user sends the current file or buffer, or the selection in it, and the
+  focus goes to the agent terminal (the agent is shown, or started, first). It is sent as the IDE
+  context that `selection.track = true` sends as the user moves (the next bullet), whatever
+  `selection.track`: Claude, OpenCode and Copilot get `selection_changed`, Gemini an
+  `ide/contextUpdate` with it as the active file. `at_mentioned` and `add_file_reference` are no
+  longer sent (their sections below keep what is known about them).
+  - What is sent is `selection.capture(range)`, read when the command runs (tracking need not run):
+    - In Visual mode (a `<cmd>AgentSend<cr>` mapping): the live selection as it is (charwise,
+      linewise, blockwise; a `$` block to the end of every line).
+    - With a range that is the Visual area (`range.visual`), the Visual selection as it was made
+      (charwise, blockwise), when the `'<` and `'>` marks are on the range's lines. The marks
+      cannot tell a block made with `$` (a block may end past a short line without it); the
+      `'curswant'` it had can, and `gv` restores it: `capture()` runs `noautocmd normal! gv`,
+      reads `getcurpos()[5] == v:maxcol`, leaves Visual mode the same way and restores the view.
+      - `:AgentSend` sets `range.visual` when the command line that runs it starts with `'<,'>`
+        (spaces allowed) or `*`. agent.editor.cmdline records a line that contains `Agent` on
+        `CmdlineLeave` (pattern `:`, not when `v:event.abort`), from plugin/agent.lua on (so
+        before the first command, which runs `setup()`), and clears it with `vim.schedule`. The
+        command reads it once (`take_visual()`), and only when `nvim_parse_cmd()` says the line
+        runs `:AgentSend`. Neovim inserts `'<,'>` when `:` is pressed in Visual mode, so the line
+        typed and a `:` mapping in Visual mode count; `vim.cmd()`, a `<cmd>` mapping and the Lua
+        API never do (no command line; `agent.send()` takes `opts.visual`). The command history
+        is not used: a mapping's command line never enters it, and an older entry would count.
+      - The marks stay after any Visual operation, so `:.AgentSend` after `viwy` must not use
+        them: it is linewise.
+    - Else, with a range, its lines, linewise, with the cursor on the last one (as a `V` selection
+      made downwards has it; Gemini gets the cursor, not the lines). A range whose text is only
+      newlines (empty lines), the Visual area's too, gives an empty selection at its first line
+      (not at the window's cursor).
+    - Otherwise the cursor, as an empty selection that stands for the whole file or buffer (at
+      line 0, character 0 in a buffer that is not a file, as tracking reports it).
+  - A buffer that is not a file goes by its `nvim://buffer/<n>/<label>` id, which the clients pass
+    to the model verbatim and the model reads with `read_buffer` (the mention messages would not
+    do: Claude and Copilot make their `filePath` relative to their cwd with Node's
+    `path.relative`, which turns `nvim://buffer/3/sh` into `nvim:/buffer/3/sh`; verified live,
+    Claude Code 2.1.284 and Copilot CLI 1.0.88 with the fake model: the prompt shows
+    `@nvim:/buffer/3/sh#L1-2` or `@nvim:/buffer/3/sh:1-2`, nothing is attached, and `read_buffer`
+    with that text fails with "no buffer or readable file").
+  - init.lua hands it to the agent's provider (`P.send_context(selection, {kind, pid, started})`,
+    true once a ready client of the agent has it; the pid is the agent terminal's job pid,
+    `started` its `util.now_ms()` start; `client_state()` takes the same opts). While it cannot,
+    the send stays pending and `attempt()` runs again every 250 ms. The deadline (`SEND_WAIT_MS`)
+    is 15 s after the agent's start, or after the send when a client was connecting then.
+    - `P.ide_mode_off()` (Gemini's IDE mode was off in its settings when agent.nvim launched it,
+      and still is, see the Gemini protocol): the provider is not tried at all. The agent's Gemini never
+      connects, and Gemini's `send_context` goes to every connected Gemini, so another one (started
+      outside agent.nvim) would take it. The reference is typed as for a disabled provider, once
+      the terminal is 3 s old.
+    - Else `send_context`; when it did not reach the client and `client_state()` is `ambiguous`
+      (two OpenCodes connected, which cannot be told apart, see the Claude protocol): it waits
+      until the deadline, then types the reference (below), with no notice.
+    - Otherwise it waits for as long as it takes, and nothing is typed: before connecting, Claude
+      may show its folder trust dialog, which would take the typed text (verified live, Claude
+      Code 2.1.284: a typed reference went into the dialog and was lost). Past the deadline it
+      says so once.
+  - One send is pending at a time: a newer `:AgentSend` replaces it. It is dropped when the agent
+    stops or is replaced, and, with `selection.track = true`, when a selection event differs from
+    it (`selection.same()`, in `forward_selection`): the newer tracked selection wins, and the
+    client gets that one when it connects. Only an event newer than the send drops it: with
+    `selection.track = true`, `M.send()` flushes the tracker (`selection.flush()`, when it runs)
+    right before the send becomes pending, so that events still debounced (such as the tracker's
+    first one, when it started with the agent) are forwarded first, also before `send_context`
+    (the Copilot and Gemini providers' `on_selection` clears what they remember of a send).
+  - What a client does with it differs (read in the CLIs' code). Claude 2.1.284 clears its IDE
+    selection when a prompt is submitted (`consumeIdeSelection`), and OpenCode attaches a
+    selection to one prompt (`selectionSent`): each uses it for the next prompt only, and
+    `:AgentSend` of the same selection after a prompt must reach it again. Copilot 1.0.88 never
+    consumes it: the latest non-empty selection goes with every prompt until another replaces it.
+    Gemini keeps the active file, cursor and selected text in its IDE context. So:
+    - The Claude provider (Claude, OpenCode) remembers nothing and replays nothing (init.lua waits
+      for the client instead), and sends even a selection the client has (per protocol below).
+    - The Copilot and Gemini providers remember the last one with its pid, and give it to a
+      client that connects or reconnects (per protocol below; Copilot, when no pid was given,
+      only to a session it was sent to), until the next `:AgentSend`, the next tracked selection
+      event, `stop()`, or `clear_context(pid)` with that pid. init.lua's
+      `forget_context()` calls `clear_context` when the agent it was sent to ends: in
+      `stop_agent()` (with the pid `terminal.info()` gave before stopping) and in the launcher's
+      `on_exit(code, info)` (`info.pid`), so that no later client gets it.
+  - A reference is typed into the prompt (a bracketed paste, into a terminal at least 3 s old)
+    only when the agent's provider is disabled or not running, when Gemini's IDE mode is off, and
+    when the client stays ambiguous past the deadline (above). It is in the agent's own syntax:
+    Claude `@a.txt#L2-4`, OpenCode `@a.txt#2-4`, Copilot `@a.txt:2-4`, Gemini `@a.txt (lines 2-4)`
+    (the path escaped with `\`), a buffer that is not a file `nvim://buffer/7/sh lines 1-2`; no
+    range for an empty selection.
+  - With `terminal.layout = 'none'` and no agent terminal it is sent with no pid, to the agent's
+    connected clients, and only when `client_state()` is `ready` then, so that no provider
+    remembers a send that reached no client; otherwise it fails at once. The focus stays in the
+    file, so with `selection.track = true` the selection just sent from Visual mode would be
+    dropped when its grace period ends: `selection.keep_held()` keeps it until the cursor moves or
+    the text changes, as the move to the agent terminal does in the other layouts.
 - **Selection.** `lua/agent/editor/selection.lua` feeds all four protocols (the pushed notifications
   and the pull tools). It runs whenever a provider runs, for the pull tools; its changes are pushed
   only with `selection.track = true` (the automatic mode; the default is `false`). Files are
@@ -216,7 +287,8 @@ Claude 2.1.283, in order (captured):
   - Never use `serverInfo.name = "Claude Code JetBrains Plugin"`, which disables Claude's
     diagnostics baseline.
 - `ide_connected.pid` is Claude's pid. It maps a client to the agent terminal (`jobpid()` of the
-  terminal job is that pid or a close ancestor), so that `at_mentioned` goes to that Claude only.
+  terminal job is that pid or a close ancestor), so that what `:AgentSend` sends goes to that
+  Claude only.
 - Claude registers its notification handlers **after** the connection completes, and drops
   earlier notifications. The server waits 600 ms after the last of `notifications/initialized`,
   `ide_connected` and `tools/list` before the first notification. OpenCode can be notified right
@@ -263,30 +335,60 @@ after `openDiff` and `close_tab`, right before the write.
     selection it is sent at `{line: 0, character: 0}` (empty) wherever its cursor is, so that a
     terminal whose cursor follows its output is not resent on every debounce.
   - Never send `selection: null`, and never send a `source` key (OpenCode drops the message).
-  - Sent to a client when it becomes ready and on every change. With `selection.track = false`
-    nothing is sent, not even on connect. The pull tools `getCurrentSelection` and
-    `getLatestSelection` still answer.
-- `at_mentioned` `{filePath, lineStart?, lineEnd?}` (`:AgentSend`)
+  - With `selection.track = true`: sent to a client when it becomes ready and on every change
+    (not when unchanged: `sel_key`, the last one sent to the session). With
+    `selection.track = false` it is sent only for `:AgentSend` (below), never on connect. The pull
+    tools `getCurrentSelection` and `getLatestSelection` answer either way.
+  - Claude 2.1.284 stores `{lineStart: start.line + 1, lineCount, text, filePath}` and attaches it
+    to the next prompt: "The user selected the lines <a> to <b> from <filePath>:\n<text>\n\nThis
+    may or may not be related to the current task." (empty `text`: "The user opened the file
+    <filePath> in the IDE. This may or may not be related to the current task."). Its footer shows
+    `⧉ N lines selected` or `In <basename>`. When a prompt is submitted it clears the selection
+    (`consumeIdeSelection`, read in the code): a selection goes with one prompt, tracked or sent.
+  - OpenCode shows `<path>#<a>-<b>` (or the path) and attaches the selection, or a note that the
+    file is open, to one prompt only (`selectionSent`). It ignores a `selection_changed` whose key
+    (`filePath`, range, `text`) did not change (read in the code).
+  - **`:AgentSend`.** `send_context(s, {kind, pid, started})` renders the captured selection per
+    client kind exactly as tracking renders it, and sends it to the ready targets (after the
+    600 ms delay for Claude), **also when it is the session's last one** (`sel_key`), since the
+    client may have used it up. An OpenCode always first gets a copy with `text` changed (`''` to
+    `' '`, else to `''`), then the real one, so that it takes it again: OpenCode keeps its last
+    selection across reconnects, while `sel_key` is per connection, so a match cannot be told
+    from it. A tracked selection gets no copy, and is not resent when unchanged.
+  - Targets (`context_targets({kind, pid, started})`): the sessions of the agent's kind whose
+    `ide_connected.pid` is the terminal job's pid or a close descendant of it (`pid_matches`),
+    never a Claude that reported another pid; with none matched, the only initialized session of
+    the kind that reports no pid (OpenCode reports none) and that completed `initialize` since the
+    agent's terminal started (`data.opened_ms >= started`, both `util.now_ms()`): an OpenCode
+    connected before is not the agent's, and does not count. With none matched and more than one
+    such session, `client_state()` is `ambiguous` and `send_context` sends nothing: two OpenCodes
+    cannot be told apart, and the other one would attach the selection to its next prompt
+    (init.lua types the reference instead, see Conventions). Otherwise `client_state()` tells
+    init.lua whether the client is `ready`, `connecting` (a connection, or a matching client not
+    ready yet) or absent.
+  - Nothing is remembered or replayed: a client that connects later gets only the tracked
+    selection (`mark_ready`, with `selection.track = true`), and init.lua waits for the agent's
+    client before sending. There is no `clear_context`.
+  - With `terminal.layout = 'none'` (no agent.nvim terminal) it carries no pid and no `started`:
+    every initialized session of the kind is a target.
+- `at_mentioned` `{filePath, lineStart?, lineEnd?}`: **not sent** (`:AgentSend` sent it before it
+  switched to `selection_changed`). What is known of it:
   - Lines are 0-based. Claude inserts `@<relative path>#L<a>[-<b>] ` at the cursor (a space first
     when the character before it is not one). Both keys are omitted (never `null`) for a whole
     file. Verified with 2.1.284: `@a.txt#L1-2` in the prompt, and on submit Claude adds a Read of
     those lines to the request.
   - OpenCode requires both lines, treats them as **1-based**, and inserts `@<path>#<a>[-<b>]`. A
     whole file is sent as lines 1..N.
-  - **Targeting.** A mention carries the agent terminal's job pid. It goes only to the Claude
-    whose `ide_connected.pid` is that pid or a close descendant of it, never to a Claude that
-    reported another pid. OpenCode reports no pid: it gets the mention when it is the only
-    OpenCode client. Only ready clients get it (after the 600 ms delay for Claude);
-    `client_state()` tells init.lua whether the client is `ready`, `connecting` (a connection, or
-    a matching client not ready yet) or absent.
-  - With `terminal.layout = 'none'` (no agent.nvim terminal) the mention carries no pid and goes
-    to the ready clients of the agent's kind.
+  - Claude makes `filePath` relative to its cwd, so an `nvim://buffer/` id becomes
+    `@nvim:/buffer/...`, which nothing can read (see Conventions).
 
 | Aspect | Claude Code | OpenCode |
 |---|---|---|
 | First notification | at least 600 ms after the connection completes | right after `initialize` |
 | Lines and characters | 0-based | + `agents.opencode.line_offset` (default 1) |
-| Whole-file mention | `{filePath}` | `{filePath, lineStart: 1, lineEnd: N}` |
+| `selection_changed` shown as | `⧉ 2 lines selected`, `In a.txt` | `a.txt#1-2`, `a.txt` |
+| A selection goes with | the next prompt (cleared on submit) | the next prompt (`selectionSent`) |
+| An unchanged `selection_changed` | taken again | ignored, also after a reconnect (`:AgentSend` always sends a copy with other `text` first) |
 | Tools and diffs | yes | none; OpenCode's edit tool writes files directly |
 
 ### Launch environment
@@ -441,26 +543,41 @@ The server name `ide` is reserved.
 ### Notifications (on the GET stream only)
 
 - `selection_changed` `{text, filePath, fileUrl, selection: {start, end, isEmpty}}`. All fields
-  are required, and lines are 0-based. Not sent (not even replayed) with
-  `selection.track = false`. A buffer that is not a file has `filePath` = `fileUrl` =
-  `nvim://buffer/<n>/<label>`; its characters are UTF-16 from the buffer's lines, as for a file.
-  With no selection it is sent at line 0, character 0 (empty), wherever its cursor is.
-  1.0.88 attaches such a selection as `File: nvim://buffer/3/sh (lines 1-2)` (live, with the fake
-  model), and its model read the buffer with `nvim-read_buffer`.
-  - The footer shows `@file:L1[-L2]`. A non-empty selection is attached to the next prompt
-    automatically.
-  - It is sent to every session, and replayed when a GET stream opens (the CLI clears its cache on
-    every reconnect).
+  are required, and lines are 0-based. With `selection.track = false` only `:AgentSend` sends it
+  (below). A buffer that is not a file has `filePath` = `fileUrl` = `nvim://buffer/<n>/<label>`;
+  its characters are UTF-16 from the buffer's lines, as for a file. With no selection it is sent
+  at line 0, character 0 (empty), wherever its cursor is. 1.0.88 attaches such a selection as
+  `File: nvim://buffer/3/sh (lines 1-2)` (live, with the fake model), and its model read the
+  buffer with `nvim-read_buffer`.
+  - The footer shows `@<file>:<L1>[-<L2>]` (`@<file>` for an empty selection). A non-empty
+    selection is attached to the prompt automatically, inside `<ide_selection>` as
+    `File: <path> (lines a-b)` and the text in a code block (1.0.88). 1.0.88 never consumes it
+    (read in the code): the latest selection, when it is not empty, is attached to **every**
+    prompt until another replaces it. An empty one attaches nothing (a whole-file `:AgentSend`:
+    the footer shows `@<file>`, and the model can read the file with `ide-get_selection`).
+  - With `selection.track = true` it is sent to every session, and replayed when a GET stream
+    opens (the CLI clears its cache on every reconnect).
   - Do not send an empty selection just because focus moved into the terminal.
-- `add_file_reference` `{filePath, fileUrl, selection: {start, end} | null, selectedText: string | null}`
-  (`:AgentSend`).
+  - **`:AgentSend`.** `send_context(s, {pid})`: `selection_params()` of the captured selection,
+    sent (also when unchanged) to every initialized session whose `x-copilot-pid` or
+    `x-copilot-parent-pid` is the terminal job's pid and that has an open GET stream (with no pid,
+    `terminal.layout = 'none'`: every session with a stream). `client_state()` is `ready` once
+    such a session has a stream, `connecting` before.
+  - The last one (`st.context`: params, pid and the CLIs it was sent to) is replayed by
+    `replay_selection` when a GET stream opens, after the tracked selection, since the CLI clears
+    it on every reconnect: to a session matching the pid, or, when no pid was recorded
+    (`terminal.layout = 'none'`), only to a CLI it was sent to, by `X-Copilot-Session-Id`, which
+    stays the same across its reconnects (`c.clients`; a CLI that connects later never had it). The next tracked selection event, `stop()` and
+    `clear_context(pid)` with the recorded pid (the agent it was sent to ended) clear it.
+- `add_file_reference` `{filePath, fileUrl, selection: {start, end} | null, selectedText: string | null}`:
+  **not sent** (`:AgentSend` sent it before it switched to `selection_changed`). What is known of
+  it:
   - `selection` and `selectedText` **must be present even when null** (encode `vim.NIL`),
     otherwise the message is dropped. A whole file is sent with both null.
   - The CLI inserts `@<relative path>[:L1[-L2]] ` (the absolute path when it is outside its cwd)
     and, on submit, lists the file with those lines under `<tagged_files>` (verified with 1.0.88).
-  - It targets one session: the CLI in the agent terminal, matched by `x-copilot-pid` or
-    `x-copilot-parent-pid` against the terminal's job pid, with an open GET stream. Without a pid
-    (`terminal.layout = 'none'`), the most recently active session.
+    It makes `filePath` relative to its cwd, so an `nvim://buffer/` id becomes
+    `@nvim:/buffer/...` (see Conventions).
 - `diagnostics_changed` and `add_selection` are not sent. 1.0.88 has no handler for the first,
   and the second is an alias of `add_file_reference`.
 
@@ -489,6 +606,13 @@ to 0.63-nightly.
     the launch, `:AgentGeminiSetup` and `:checkhealth` alike.
 - Gemini's "Do you want to connect Neovim?" nudge does not enable IDE mode for Neovim: "Yes" runs
   `/ide install`, which has no installer for `neovim`.
+- `before_spawn` records whether IDE mode is off for the launch: the launcher's
+  `gemini-ide-disabled` warning in `spec.warnings`, else `ide_enabled()` with the job's
+  environment. `ide_mode_off()` reads the settings again while it is off (with that environment),
+  so `/ide enable` in the running Gemini, which writes `ide.enabled`, ends it. It tells init.lua, which then types `:AgentSend`'s reference (after
+  the 3 s grace, as for a disabled provider) instead of waiting for a connection that never comes,
+  and never calls `send_context`: it would reach every connected Gemini, none of which is the
+  agent's. The one-time hint is unchanged.
 
 ### Discovery
 
@@ -603,8 +727,9 @@ disconnects the IDE client for the rest of the process.** Optional fields are om
 - `ide/contextUpdate` `{workspaceState: {openFiles: [{path, timestamp, isActive?, cursor?: {line, character}, selectedText?}]}}`
   - Up to 10 recently focused files. Exactly one, the newest, has `isActive: true`, with a 1-based
     cursor (UTF-16 character).
-  - `selectedText` appears only while there is a selection: in Visual mode, or kept after a switch
-    from Visual mode straight to the agent terminal (see Conventions). Truncated to 16384.
+  - `selectedText` appears only while there is a selection: in Visual mode, kept after a switch
+    from Visual mode straight to the agent terminal (see Conventions), or sent with `:AgentSend`
+    (below). Truncated to 16384.
   - When the user was last in a buffer that is not a file (a terminal other than the agent's), it
     is the first entry instead: `isActive`, the newest `timestamp` (Gemini sorts by it and clears
     `isActive` unless the newest entry has it), path `nvim://buffer/<n>/<label>`, cursor
@@ -615,12 +740,24 @@ disconnects the IDE client for the rest of the process.** Optional fields are om
     and read it with `mcp_nvim_read_buffer`.
   - With no files, send `{"workspaceState":{"openFiles":[]}}`. Debounced 50 ms, broadcast to every
     session.
-  - With `selection.track = false` (the default) that empty context is all Gemini gets, also on
-    stream open.
+  - With `selection.track = false` (the default) that empty context is all Gemini gets until
+    `:AgentSend`, also on stream open.
   - `isTrusted` is omitted: sending `true` would override Gemini's folder trust.
-- There is no mention notification. `:AgentSend` types `@<path> (lines a-b) ` into Gemini's prompt
-  (a bracketed paste; the path relative to its cwd, special characters escaped with `\`), once a
-  GET stream is open (Gemini's TUI takes input by then) or 15 s after the start.
+  - **`:AgentSend`.** There is no mention notification: `send_context(s, {pid})` makes the
+    captured selection the active entry (`selection.entry_of()`: 1-based cursor line, 1-based
+    UTF-16 character, `selectedText` truncated as above, `isActive`; for a linewise range the
+    cursor is on its last line), sent in an `ide/contextUpdate` to every session with an open
+    stream (not resent when the text equals the session's last one). With
+    `selection.track = false` it is the only entry. With `true` the recently focused files follow,
+    without `isActive`, `cursor` or `selectedText`, and the sent entry's `timestamp` is made newer
+    than theirs (Gemini sorts by it); a buffer that is not a file is never among them.
+    `client_state()` is `ready` once a stream is open.
+  - It stays in every later update (`build_context`), and so in the one each new stream gets
+    (`state.context`, with `state.context_pid`), until the next `:AgentSend`, the next selection
+    event (`selection.track = true`), `stop()`, or `clear_context(pid)` with the recorded pid (the
+    agent it was sent to ended), which also schedules an update without it for the sessions left.
+    Gemini's TUI does not show it (`/ide status` lists the file); the model gets the active file,
+    cursor and selected text as IDE context.
 - `ide/diffAccepted` `{filePath, content}`
   - `filePath` exactly as received in `openDiff`; a different spelling is ignored.
   - `content` must be non-empty, or Gemini writes the model's proposal instead. The diff module

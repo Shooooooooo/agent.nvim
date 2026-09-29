@@ -1151,6 +1151,18 @@ function M.subscribe(fn, opts)
   end
 end
 
+---Whether two selections are the same: path, text and range.
+M.same = same
+
+---Keep the selection held since Visual mode ended (what :AgentSend just sent) when its grace
+---period ends in a reported window: until the cursor moves or the text changes, as when the focus
+---went to the agent terminal.
+function M.keep_held()
+  if state.held then
+    stop_demote_timer()
+  end
+end
+
 ---Run the debounced update now (skips the wait). Subscribers are called if anything changed.
 function M.flush()
   fire()
@@ -1166,6 +1178,81 @@ function M.current()
     return s, true
   end
   return state.latest, false
+end
+
+---The buffer's last Visual selection was a block made with $ (to the end of every line): the marks
+---cannot tell (a block may end past a short line without it), the 'curswant' it had can, and gv
+---restores it. Read in the current window, which is then left as it was.
+---@return boolean
+local function visual_dollar()
+  local view = vim.fn.winsaveview()
+  local ok, want = pcall(function()
+    vim.cmd('noautocmd silent normal! gv')
+    local w = vim.fn.getcurpos()[5]
+    vim.cmd('noautocmd silent normal! \27')
+    return w
+  end)
+  vim.fn.winrestview(view)
+  return ok and want == MAXCOL
+end
+
+---Only newlines: a range of blank lines, which stands for nothing more than the file.
+---@param s agent.Selection|nil
+---@return boolean
+local function blank(s)
+  return not s or s.text:match('^\n*$') ~= nil
+end
+
+---The selection :AgentSend sends from the current window, read now (tracking need not run): the
+---live Visual selection; else the lines of `range` (linewise, the cursor on the last one), or, when
+---the range is the Visual area (`range.visual`: :'<,'>AgentSend), the Visual selection as it was
+---made (charwise, blockwise); else the cursor, an empty selection that stands for the file or
+---buffer as a whole (at line 0, column 0 in a buffer that is not a file, as tracking reports it; at
+---the first line of a range of blank lines). nil when the window is ignored (kind()).
+---@param range { line1: integer, line2?: integer, visual?: boolean }|nil  1-based, inclusive
+---@return agent.Selection|nil
+function M.capture(range)
+  local win = api.nvim_get_current_win()
+  local buf = api.nvim_win_get_buf(win)
+  if not reportable(buf, win) then
+    return nil
+  end
+  local kind = visual_kind(api.nvim_get_mode().mode)
+  if kind then
+    local s = region_selection(buf, win, vim.fn.getpos('v'), vim.fn.getpos('.'), kind, dollar_block(kind))
+    if s and not s.is_empty then
+      return s
+    end
+    return cursor_selection(buf, win)
+  end
+  if not (range and range.line1) then
+    return cursor_selection(buf, win)
+  end
+  local n = api.nvim_buf_line_count(buf)
+  local l1 = math.min(math.max(1, math.floor(range.line1)), n)
+  local l2 = math.min(math.max(1, math.floor(range.line2 or range.line1)), n)
+  if l2 < l1 then
+    l1, l2 = l2, l1
+  end
+  local s
+  if range.visual then
+    local vk = visual_kind(vim.fn.visualmode())
+    local p1, p2 = vim.fn.getpos("'<"), vim.fn.getpos("'>")
+    if vk and p1[2] == l1 and p2[2] == l2 then
+      s = region_selection(buf, win, p1, p2, vk, vk == '\22' and visual_dollar())
+    end
+  end
+  if blank(s) then
+    s = region_selection(buf, win, { 0, l1, 1, 0 }, { 0, l2, 1, 0 }, 'V', false)
+    if s then
+      -- As a V selection made downwards would have it (Gemini gets the cursor, not the lines).
+      s.cursor = { line = l2 - 1, character = 0 }
+    end
+  end
+  if blank(s) then
+    return cursor_selection(buf, win, { l1, 0 })
+  end
+  return s
 end
 
 ---@param which integer|string|nil  bufnr, path or nvim://buffer/ id; nil = current buffer
@@ -1335,6 +1422,26 @@ function M.recent_files(opts)
     end
   end
   return out
+end
+
+---The recent-files entry (Gemini `openFiles`) of a selection :AgentSend sent: the active entry,
+---timestamped now, with the selection's cursor and its text, as recent_files() gives them.
+---@param s agent.Selection
+---@param max_selected? integer  UTF-16 units (default 16384; '... [TRUNCATED]' is appended)
+---@return agent.RecentFile
+function M.entry_of(s, max_selected)
+  local e = { path = s.path, bufnr = s.bufnr, timestamp = next_timestamp(), is_active = true }
+  local c = s.cursor
+  if c then
+    local line = api.nvim_buf_is_loaded(s.bufnr) and api.nvim_buf_get_lines(s.bufnr, c.line, c.line + 1, false)[1]
+      or ''
+    local ok, col16 = pcall(vim.str_utfindex, line, 'utf-16', math.min(c.character, #line), false)
+    e.cursor = { line = c.line + 1, character = (ok and col16 or c.character) + 1 }
+  end
+  if not s.is_empty and s.mode ~= 'n' then
+    e.selected_text = truncate_utf16(s.text, max_selected or 16384)
+  end
+  return e
 end
 
 ---Reset all state and subscribers (tests).

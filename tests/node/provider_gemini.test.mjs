@@ -551,6 +551,66 @@ describe('gemini provider', () => {
     assert.deepEqual(c.stream.errors, []);
   });
 
+  test('send_context (:AgentSend): the active entry, first and newest, in every new stream, until a selection event', async () => {
+    /** The files of the latest ide/contextUpdate on `sse`, once they satisfy `pred`. */
+    const waitCtx = async (sse, pred, what, ms = 3000) => {
+      const end = Date.now() + ms;
+      for (;;) {
+        const all = sse.of('ide/contextUpdate');
+        const files = all.length ? all[all.length - 1].params.workspaceState.openFiles : undefined;
+        if (files && pred(files)) return files;
+        if (Date.now() > end) throw new Error(`timeout waiting for ${what}; got ${JSON.stringify(all[all.length - 1])}`);
+        await sleep(10);
+      }
+    };
+    const other = wsFile('other.txt', 'x\n');
+    const f = wsFile('sent.txt', 'alpha\nbéta \u{1F600}\ngamma\n');
+    await fx.cmd({ cmd: 'edit', file: other });
+    await fx.cmd({ cmd: 'edit', file: f, line: 2, col: 6 });
+    const c = newClient();
+    await c.connect();
+    await c.stream.waitFor('ide/contextUpdate');
+    assert.deepEqual(await fx.cmd({ cmd: 'send', from: 1, to: 2 }), { ok: true, sent: true });
+    let files = await waitCtx(c.stream, (l) => l[0]?.path === f && l[0].selectedText !== undefined, 'the sent entry');
+    // A range: the cursor at the start of its last line (as a V selection made downwards has it).
+    assert.deepEqual(files[0], { path: f, timestamp: files[0].timestamp, isActive: true, cursor: { line: 2, character: 1 }, selectedText: 'alpha\nbéta \u{1F600}' });
+    assert.ok(files.some((x) => x.path === other), 'the recent files follow (selection.track = true)');
+    for (const x of files.slice(1)) {
+      assert.deepEqual(Object.keys(x).sort(), ['path', 'timestamp']);
+      assert.ok(x.timestamp < files[0].timestamp, 'the sent entry is the newest');
+    }
+    // A new stream (another Gemini, or a reconnect) gets it in its first update.
+    const c2 = newClient();
+    await c2.connect();
+    const first = (await c2.stream.waitFor('ide/contextUpdate')).params.workspaceState.openFiles;
+    assert.equal(first[0].path, f);
+    assert.equal(first[0].selectedText, 'alpha\nbéta \u{1F600}');
+    // With selection.track = false it is the only entry. The cursor only: no selectedText; on the
+    // emoji, byte column 6 after "béta " (é = 2 bytes / 1 UTF-16 unit) is 1-based character 6.
+    await fx.cmd({ cmd: 'track', on: false });
+    assert.deepEqual(await fx.cmd({ cmd: 'send', pid: 4242 }), { ok: true, sent: true });
+    for (const x of [c, c2]) {
+      files = await waitCtx(x.stream, (l) => l.length === 1, 'the sent entry alone');
+      assert.deepEqual(files, [{ path: f, timestamp: files[0].timestamp, isActive: true, cursor: { line: 2, character: 6 } }]);
+    }
+    // Another agent terminal ended: kept, nothing sent. Its own: forgotten, the Geminis updated.
+    const count = (x) => x.stream.of('ide/contextUpdate').length;
+    const before = [count(c), count(c2)];
+    await fx.cmd({ cmd: 'forget', pid: 1111 });
+    await sleep(150);
+    assert.deepEqual([count(c), count(c2)], before);
+    await fx.cmd({ cmd: 'forget', pid: 4242 });
+    for (const x of [c, c2]) await waitCtx(x.stream, (l) => l.length === 0, 'no files once forgotten');
+    // A selection event replaces it too (with selection.track = false: no files at all).
+    assert.deepEqual(await fx.cmd({ cmd: 'send', from: 3, to: 3, pid: 4242 }), { ok: true, sent: true });
+    for (const x of [c, c2]) await waitCtx(x.stream, (l) => l.length === 1 && l[0].selectedText === 'gamma', 'sent again');
+    await fx.cmd({ cmd: 'onselection' });
+    for (const x of [c, c2]) await waitCtx(x.stream, (l) => l.length === 0, 'no files');
+    await fx.cmd({ cmd: 'track', on: true });
+    assert.deepEqual(c.stream.errors, []);
+    assert.deepEqual(c2.stream.errors, []);
+  });
+
   test('request validation: Host, Origin, Bearer, DELETE, sessions', async () => {
     const init = '{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"0"}},"jsonrpc":"2.0","id":0}';
     const base = { authorization: `Bearer ${fx.token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };

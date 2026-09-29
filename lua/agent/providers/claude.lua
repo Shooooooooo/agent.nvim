@@ -13,8 +13,9 @@
 --- everything else is treated as Claude Code: 0-based lines, notifications only after a short
 --- delay once the connection is complete (Claude registers its handlers late, §6.3).
 ---
---- Notifications: selection_changed (config.selection.track) and at_mentioned (:AgentSend, sent to
---- the client of the agent terminal only, matched by its pid; see M.at_mention()).
+--- Notifications: selection_changed, as the selection changes (config.selection.track) and for
+--- :AgentSend (to the client of the agent terminal only, matched by its pid, and sent again even
+--- when unchanged; see M.send_context()). at_mentioned is not sent.
 local uv = vim.uv or vim.loop
 local config = require('agent.config')
 local util = require('agent.util')
@@ -337,20 +338,31 @@ local function render_selection(s, kind)
   }
 end
 
+---Send a selection to a client, unless it was the last one sent to it (`force`: send it again).
+---Claude clears the selection when a prompt is submitted, so :AgentSend sends it again; OpenCode
+---keeps it but ignores one that does not change (file, range and text), and attaches it only once,
+---so it first gets a copy with other text (always: it keeps its selection across reconnects).
 ---@param session agent.mcp.Session
 ---@param s agent.Selection|nil
-local function notify_selection(session, s)
+---@param force? boolean
+---@return boolean sent  sent now, or (without `force`) before
+local function notify_selection(session, s, force)
   if not s or not s.path or not s.start or not s.finish then
-    return
+    return false
   end
   local params = render_selection(s, session.data.kind)
   local key = vim.json.encode(params)
-  if key == session.data.sel_key then
-    return
+  if key == session.data.sel_key and not force then
+    return true
+  end
+  if force and session.data.kind == 'opencode' then
+    session:notify('selection_changed', vim.tbl_extend('force', params, { text = params.text == '' and ' ' or '' }))
   end
   if session:notify('selection_changed', params) then
     session.data.sel_key = key
+    return true
   end
+  return false
 end
 
 ---Open sessions that completed initialize and are ready for notifications.
@@ -369,22 +381,8 @@ local function ready_sessions()
 end
 
 -- ---------------------------------------------------------------------------
--- At-mentions (at_mentioned, :AgentSend)
+-- :AgentSend (selection_changed to the agent terminal's client)
 -- ---------------------------------------------------------------------------
-
----@param path string
----@return integer
-local function file_line_count(path)
-  local b = context.find_buf(path, { loaded = true })
-  if b then
-    return vim.api.nvim_buf_line_count(b)
-  end
-  local ok, lines = pcall(vim.fn.readfile, path)
-  if ok and type(lines) == 'table' then
-    return #lines
-  end
-  return 1
-end
 
 ---Is `pid` the client's own pid or one of its close ancestors (a wrapper script or shell)?
 ---@param session agent.mcp.Session
@@ -405,45 +403,48 @@ local function pid_matches(session, pid)
   return false
 end
 
----@class agent.claude.MentionOpts
+---@class agent.claude.TargetOpts
 ---@field kind? 'claude'|'opencode'  only clients of this kind
 ---@field pid? integer  only the client in the terminal with this job pid: the Claude whose pid (or a
----  close ancestor of it) is this pid, else the only client of the kind that reports no pid (OpenCode)
+---  close ancestor of it) is this pid, else the client of the kind that reports no pid (OpenCode)
+---@field started? number  util.now_ms() when that terminal started: a client that reports no pid and
+---  connected before cannot be its agent
 
 ---Open, initialized sessions that may be the agent `o` describes (ready or not), and the sessions
----of the kind that report no pid when none matched.
----@param o agent.claude.MentionOpts|nil
+---of the kind that report no pid when none matched. An OpenCode reports no pid: it is the agent's
+---client when it is the only such client (two cannot be told apart, and the other one would
+---attach the selection to its next prompt).
+---@param o agent.claude.TargetOpts|nil
 ---@return agent.mcp.Session[] targets, agent.mcp.Session[] pidless
-local function mention_targets(o)
+local function context_targets(o)
   o = o or {}
   local out, pidless = {}, {}
   for _, s in ipairs(state.srv and state.srv:sessions() or {}) do
     if not s.closed and s.initialized and (not o.kind or s.data.kind == o.kind) then
       if not o.pid or pid_matches(s, o.pid) then
         out[#out + 1] = s
-      elseif not s.data.pid then
+      elseif not s.data.pid and (not o.started or (s.data.opened_ms or 0) >= o.started) then
         pidless[#pidless + 1] = s
       end
     end
   end
-  -- An OpenCode reports no pid: it is the agent's client when it is the only such client.
   if #out == 0 and #pidless == 1 then
     out[1] = pidless[1]
   end
   return out, pidless
 end
 
----The state of the IDE client of the agent `o` describes: 'ready' (a mention is delivered now),
+---The state of the IDE client of the agent `o` describes: 'ready' (it takes a selection now),
 ---'connecting' (a client that may be it has connected, and is not ready yet), 'ambiguous' (several
 ---clients of the kind report no pid, so which one it is cannot be told), or nil.
----@param o agent.claude.MentionOpts|nil
+---@param o agent.claude.TargetOpts|nil
 ---@return 'ready'|'connecting'|'ambiguous'|nil
 function M.client_state(o)
   if not state.srv then
     return nil
   end
   local connecting = false
-  local targets, pidless = mention_targets(o)
+  local targets, pidless = context_targets(o)
   for _, s in ipairs(targets) do
     if s.data.ready then
       return 'ready'
@@ -461,41 +462,21 @@ function M.client_state(o)
   return connecting and 'connecting' or nil
 end
 
----Insert an @-mention of a file, or of lines of it, into the prompt of the agent `o` describes
----(at_mentioned). Lines are 1-based and inclusive; nil means the whole file. Claude gets 0-based
----lines (none for a whole file) and inserts `@<path>#L<a>-<b>`; OpenCode gets 1-based ones (1..N
----for a whole file, agents.opencode.line_offset) and inserts `<path>#<a>-<b>`.
----@param path string  a file: Claude makes it relative to its cwd, which turns an nvim://buffer/ id
----  into `@nvim:/buffer/...` (agent.nvim types those ids instead)
----@param start_line integer|nil
----@param end_line integer|nil
----@param o agent.claude.MentionOpts|nil
----@return boolean sent  false when no ready client matches
-function M.at_mention(path, start_line, end_line, o)
-  if not state.srv or type(path) ~= 'string' or path == '' then
+---Send the selection :AgentSend captured to the agent `o` describes, as selection_changed
+---(rendered for its kind, as selection.track sends it), also when it is the one sent last. Only to
+---a ready client: Claude and OpenCode use it for the next prompt, so it is not replayed to a client
+---that connects later (init.lua waits for the agent's client instead).
+---@param s agent.Selection
+---@param o agent.claude.TargetOpts|nil
+---@return boolean sent  a ready client of the agent has it now
+function M.send_context(s, o)
+  if not state.srv or not s or not s.path then
     return false
   end
-  local abs = abs_path(path)
-  local s0, e0
-  if start_line then
-    s0 = math.max(0, math.floor(start_line) - 1)
-    e0 = math.max(s0, math.floor(end_line or start_line) - 1)
-  end
   local sent = false
-  for _, s in ipairs(mention_targets(o)) do
-    if s.data.ready then
-      local p = { filePath = abs }
-      if s.data.kind == 'opencode' then
-        -- OpenCode requires both lines and reads them as 1-based.
-        local off = opencode_offset()
-        local first, last = s0 or 0, e0 or (math.max(1, file_line_count(abs)) - 1)
-        p.lineStart, p.lineEnd = first + off, last + off
-      elseif s0 then
-        p.lineStart, p.lineEnd = s0, e0 -- (both omitted, never null, for a whole file)
-      end
-      if s:notify('at_mentioned', p) then
-        sent = true
-      end
+  for _, session in ipairs((context_targets(o))) do
+    if session.data.ready and notify_selection(session, s, true) then
+      sent = true
     end
   end
   return sent
@@ -1056,6 +1037,7 @@ local function new_mcp_server()
       data.client_name = type(ci.name) == 'string' and ci.name or nil
       data.client_version = type(ci.version) == 'string' and ci.version or nil
       data.kind = data.client_name == 'opencode' and 'opencode' or 'claude'
+      data.opened_ms = util.now_ms()
       log.debug('initialize from %s %s', tostring(data.client_name), tostring(data.client_version))
       if data.kind == 'opencode' then
         -- OpenCode listens from the start; notify right after the initialize response.

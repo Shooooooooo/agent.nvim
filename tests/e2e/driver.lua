@@ -23,17 +23,33 @@
 --      (dropped) back in the file window the agent sees the cursor only; select again (Vj), then
 --             <Esc>: the selection is dropped
 --   4. :AgentSend: select a.txt lines 1-2 (Vj) and press <leader>as, mapped to
---      <cmd>AgentSend<cr> in Visual mode: the focus goes to the agent terminal and the agent's
---      prompt shows the mention (Claude @a.txt#L1-2, Copilot @a.txt:1-2, OpenCode a.txt#1-2, all
---      three through the IDE connection; Gemini the typed reference @a.txt (lines 1-2)). With the
---      default selection.track = false nothing was pushed on the wire
---   5. submit a prompt (after the mention); the scripted model then
+--      <cmd>AgentSend<cr> in Visual mode (with the default selection.track = false, Vj alone pushed
+--      nothing): the focus goes to the agent terminal, the selection goes through the IDE
+--      connection as auto-follow sends it (Claude, OpenCode, Copilot: selection_changed; Gemini: an
+--      ide/contextUpdate with a.txt as the active file), the TUI shows it (Claude ⧉ 2 lines
+--      selected, Copilot @a.txt:1-2, OpenCode a.txt#1-2) and nothing is typed into the prompt
+--   5. submit a prompt: the model request carries the selection (Claude "The user selected the
+--      lines 1 to 2 from <path>:", Copilot <ide_selection>, OpenCode "Note: The user selected
+--      #1-2 from", Gemini the active file of its editor context, read from its telemetry outfile);
+--      the scripted model then
 --      (a) calls the $NVIM controller: exec_lua (sets vim.g.agent_e2e) and open_file (notes.txt)
 --      (b) edits a.txt (world -> neovim) through the IDE diff; its tab page must show the agent
 --          terminal too (diff.show_terminal), on split_side (on the right, as wide as the agent's
 --          own split; below: at the bottom, full width and as tall), and this driver accepts it
---   6. check the effects in Neovim and on disk; stop() the agent, which also stops its provider
---      (its lock/discovery file goes), tear down, check that no files are left
+--   6. check the effects in Neovim and on disk
+--   7. :AgentSend from a buffer that is not a file (a scratch buffer, lines 1-2): it reaches the
+--      agent by its nvim://buffer/<n>/<label> id, and the next prompt's model request carries it
+--   8. :AgentSend of the same lines again once that prompt was answered: the next prompt's model
+--      request carries them again. Claude drops the selection when a prompt is submitted (its TUI
+--      stops showing it), and OpenCode attaches one to a single prompt and ignores one that did not
+--      change: agent.nvim sends it again anyway (checked on the wire for every :AgentSend: to
+--      OpenCode always after a copy with other text). Copilot attaches it to every prompt; Gemini's
+--      editor context is unchanged, so the model's (its full context and the changes Gemini added
+--      since) still has it
+--   9. :'<,'>AgentSend typed from a charwise Visual selection of a.txt (v): the provider sends the
+--      characters selected, not lines 1-2; the same range run with vim.cmd() sends lines 1-2
+--  10. stop() the agent, which also stops its provider (its lock/discovery file goes), tear down,
+--      check that no files are left
 -- OpenCode has no IDE diff (its client is receive-only), so (b) is skipped for it.
 local kind, root = arg[1], arg[2]
 assert(kind and root, 'usage: driver.lua <kind> <root>')
@@ -137,6 +153,9 @@ local EXPECTED = 'hello\nneovim\n'
 local MARK = 'e2e-ok:' .. vim.fn.getpid()
 local EXEC_CODE = ("vim.g.agent_e2e = %q; return %q"):format(kind, MARK)
 local PROMPT = 'PLEASE_EDIT a.txt: replace world with neovim'
+-- After the scripted steps: the model only answers Done. (Short: the TUIs must not wrap them.)
+local PROMPT_BUFFER = 'PLEASE_EDIT nothing more'
+local PROMPT_AGAIN = 'PLEASE_EDIT once more'
 
 local model_log = root .. '/' .. kind .. '.model.jsonl'
 local fake -- vim.SystemObj
@@ -178,6 +197,17 @@ local function model_saw_result(text)
   end
   return false
 end
+---The input text (see fake_model.mjs) of each scripted-turn request made for `prompt`: the prompt,
+---and what the agent attached to it.
+local function model_requests(prompt)
+  local list = {}
+  for _, e in ipairs(model_entries()) do
+    if e.kind == 'REQ' and (e.ntools or 0) > 0 and type(e.input) == 'string' and e.input:find(prompt, 1, true) then
+      list[#list + 1] = e.input
+    end
+  end
+  return list
+end
 local function model_steps_done()
   local n = 0
   for _, e in ipairs(model_entries()) do
@@ -211,20 +241,107 @@ local function claude_client(k)
   end
 end
 
----The text of the last selection_changed sent to the ready client of kind `k` for a.txt ('' when
+---The text of the last selection_changed sent to the ready client of kind `k` for `path` ('' when
 ---only the cursor was sent), or nil.
-local function claude_wire(k)
+local function claude_wire(k, path)
   local st = claude_provider()._state
   for _, s in ipairs(st.srv and st.srv:sessions() or {}) do
     if not s.closed and s.data.kind == k and s.data.ready and s.data.sel_key then
       local ok, p = pcall(vim.json.decode, s.data.sel_key)
-      if ok and type(p) == 'table' and p.filePath == ws .. '/a.txt' then
+      if ok and type(p) == 'table' and p.filePath == path then
         return p.text
       end
     end
   end
 end
 
+---The text after the prompt sign on the last line of the TUI `t` that matches `pattern` (one
+---capture), or nil when there is none.
+local function prompt_line(t, pattern)
+  local found
+  for line in t:gmatch('[^\n]+') do
+    local rest = line:gsub('\194\160', ' '):match(pattern)
+    if rest then
+      found = vim.trim(rest)
+    end
+  end
+  return found
+end
+
+local gemini_telemetry = root .. '/gemini.telemetry.log'
+---The requests Gemini made to the model, from its telemetry outfile (each request's request_text, a
+---line of that pretty-printed JSON): each one the text parts of its contents, in order.
+local function gemini_requests()
+  local list = {}
+  for line in (readf(gemini_telemetry) or ''):gmatch('[^\n]+') do
+    local lit = line:match('^%s*"request_text":%s*(".*")%s*,?%s*$')
+    local ok, text = pcall(vim.json.decode, lit or '')
+    local ok2, contents = pcall(vim.json.decode, ok and type(text) == 'string' and text or '')
+    if ok2 and type(contents) == 'table' then
+      local parts = {}
+      for _, c in ipairs(contents) do
+        for _, part in ipairs(type(c) == 'table' and type(c.parts) == 'table' and c.parts or {}) do
+          if type(part) == 'table' and type(part.text) == 'string' then
+            parts[#parts + 1] = part.text
+          end
+        end
+      end
+      list[#list + 1] = parts
+    end
+  end
+  return list
+end
+---The active file ({ path, text }: its selected text, if any) of the editor context the model had
+---when Gemini sent it `prompt`, in each request made for it (false: none). Gemini adds its editor
+---context to the conversation with a prompt: in full, then a summary of what changed since the
+---last prompt (nothing when nothing did); they are applied in order, up to the prompt.
+local function gemini_active(prompt)
+  local function file(f) -- (a path null: no active file)
+    return type(f) == 'table' and type(f.path) == 'string' and { path = f.path, text = f.selectedText } or nil
+  end
+  local list = {}
+  for _, parts in ipairs(gemini_requests()) do
+    local at
+    for i, t in ipairs(parts) do
+      at = t:find(prompt, 1, true) and i or at
+    end
+    if at then
+      local active
+      for i = 1, at - 1 do
+        local json = parts[i]:match("^Here is [^\n]*the user's editor context.-\n```json\n(.*)\n```$")
+        local ok, ctx = pcall(vim.json.decode, json or '')
+        if ok and type(ctx) == 'table' then
+          local changes = type(ctx.changes) == 'table' and ctx.changes or nil
+          if not changes then -- the full context
+            active = file(ctx.activeFile)
+          elseif changes.activeFileChanged then
+            active = file(changes.activeFileChanged)
+          end
+          local sc = changes and changes.selectionChanged
+          if active and type(sc) == 'table' and sc.path == active.path then
+            active.text = sc.selectedText ~= '' and sc.selectedText or nil
+          end
+        end
+      end
+      list[#list + 1] = active or false
+    end
+  end
+  return list
+end
+
+-- Per agent:
+--   selection, no_selection  the TUI with the selection, and with the cursor only (nil: not shown)
+--   context_shown            (no selection shown) the TUI once a.txt is sent with :AgentSend
+--   buffer_selection         the TUI with lines 1-2 of the scratch buffer (step 7) selected
+--   cleared_on_submit        the TUI stops showing the selection (`selection`) when a prompt is
+--                            submitted: the agent drops it (Claude: it is for that prompt only)
+--   wire(path)               the text of the selection agent.nvim last sent to the agent for `path`
+--                            ('' for the cursor only), or nil
+--   prompt(t)                the text in the prompt of the TUI `t` ('' when empty, placeholder
+--                            left out), or nil when it is not found
+--   attached(sel)            what the model request for the next prompt contains for the selection
+--                            sel = { path, l1, l2, text } sent with :AgentSend (every string)
+--   carried(prompt, sel)     (instead of attached) whether the model got it with `prompt`
 local K = {}
 
 K.claude = {
@@ -251,15 +368,22 @@ K.claude = {
   connected = function()
     return claude_client('claude') ~= nil
   end,
-  -- The TUI with the selection, and with the cursor only (E2E_TRACK=1).
   selection = '⧉ 2 lines selected',
   no_selection = 'In a.txt',
-  wire = function()
-    return claude_wire('claude')
+  buffer_selection = '⧉ 2 lines selected',
+  cleared_on_submit = true,
+  wire = function(path)
+    return claude_wire('claude', path)
   end,
-  -- :AgentSend of lines 1-2, as the TUI's prompt shows it (at_mentioned).
-  mention = '@a.txt#L1-2',
-  provider_mention = true,
+  -- (Its prompt shows the selection as [⧉ 2 lines selected] while it is empty.)
+  prompt = function(t)
+    local p = prompt_line(t, '^%s*❯%s(.*)$')
+    return p and vim.trim((p:gsub('^%[⧉[^%]]*%]', ''))) or nil
+  end,
+  -- The attachment Claude Code makes of the selection_changed it stored.
+  attached = function(sel)
+    return { ('The user selected the lines %d to %d from %s:\n%s'):format(sel.l1, sel.l2, sel.path, sel.text) }
+  end,
   prompts = {},
   diff = true,
   lock_dir = function()
@@ -299,13 +423,21 @@ K.copilot = {
   end,
   selection = '@a.txt:1-2',
   no_selection = '@a.txt',
-  wire = function()
+  buffer_selection = '@e2e-scratch:1-2',
+  wire = function(path)
     local st = require('agent.providers.copilot')._state()
-    local p = st and st.last_selection
-    return p and p.filePath == ws .. '/a.txt' and p.text or nil
+    -- What :AgentSend sent, else the last tracked selection (a tracked one clears the former).
+    local p = st and (st.context and st.context.params or st.last_selection)
+    return p and p.filePath == path and p.text or nil
   end,
-  mention = '@a.txt:1-2', -- add_file_reference
-  provider_mention = true,
+  prompt = function(t)
+    return prompt_line(t, '^%s*❯%s?(.*)$')
+  end,
+  -- The <ide_selection> block Copilot adds to the prompt (a path relative to its cwd).
+  attached = function(sel)
+    local path = vim.startswith(sel.path, ws .. '/') and sel.path:sub(#ws + 2) or sel.path
+    return { '<ide_selection>', ('File: %s (lines %d-%d)\n```\n%s\n```'):format(path, sel.l1, sel.l2, sel.text) }
+  end,
   prompts = { { 'Do you trust the files', '\r' } },
   diff = true,
   lock_dir = function()
@@ -330,6 +462,8 @@ K.gemini = {
       security = { auth = { selectedType = 'gemini-api-key' }, folderTrust = { enabled = false } },
       ide = { enabled = true, hasSeenNudge = true },
       privacy = { usageStatisticsEnabled = false },
+      -- The model requests (their contents: logPrompts), to a local file only.
+      telemetry = { enabled = true, target = 'local', outfile = gemini_telemetry, logPrompts = true },
     }))
     writef(ghome .. '/.gemini/state.json', vim.json.encode({ terminalSetupPromptShown = true }))
     local function call(name, args)
@@ -347,7 +481,7 @@ K.gemini = {
       call('mcp_nvim_exec_lua', { code = EXEC_CODE }),
       call('mcp_nvim_open_file', { path = ws .. '/notes.txt', line = 2 }),
       call('write_file', { file_path = ws .. '/a.txt', content = EXPECTED }),
-      done, done, done,
+      done, done, done, done, -- (one for each of the three prompts, and a spare)
     }
     for _ = 1, 20 do
       lines[#lines + 1] = nxt
@@ -379,21 +513,34 @@ K.gemini = {
   connected = function()
     return require('agent.providers.gemini').status().streams >= 1
   end,
-  -- Gemini's TUI does not show the selection: only the last ide/contextUpdate sent is checked.
-  wire = function()
+  -- Gemini's TUI does not show the selection (the last ide/contextUpdate sent is checked), only its
+  -- context summary: a.txt, sent with :AgentSend (the only file with selection.track = false).
+  context_shown = '1 open file',
+  wire = function(path)
     local st = require('agent.providers.gemini')._state()
     for _, s in ipairs(st and st.binding:sessions() or {}) do
       local sent = s.data.gemini and s.data.gemini.last_context
       local ok, ctx = pcall(vim.json.decode, sent or '')
       local f = ok and type(ctx) == 'table' and ctx.workspaceState.openFiles[1]
-      if f and f.path == ws .. '/a.txt' and f.isActive then
+      if f and f.path == path and f.isActive then
         return f.selectedText or ''
       end
     end
   end,
-  -- Gemini has no mention notification: the reference is typed into its prompt.
-  mention = '@a.txt (lines 1-2)',
-  provider_mention = false,
+  prompt = function(t)
+    local p = prompt_line(t, '^%s*[│┃]?%s*>%s(.*)$')
+    return p and (p:gsub('%s*[│┃]$', ''):gsub('^Type your message or @path/to/file$', '')) or nil
+  end,
+  -- The editor context the model had at the prompt (see gemini_active()): the selection is the
+  -- active file, with its text.
+  carried = function(prompt, sel)
+    for _, f in ipairs(gemini_active(prompt)) do
+      if f and f.path == sel.path and f.text == sel.text then
+        return true
+      end
+    end
+    return false
+  end,
   prompts = {},
   diff = true,
   lock_dir = function()
@@ -440,11 +587,33 @@ K.opencode = {
   end,
   selection = 'a.txt#1-2',
   no_selection = 'a.txt',
-  wire = function()
-    return claude_wire('opencode')
+  wire = function(path)
+    return claude_wire('opencode', path)
   end,
-  mention = 'a.txt#1-2', -- at_mentioned
-  provider_mention = true,
+  -- Its input box: ┃ lines above ╹▀▀▀, the last one with the agent and the model. (Empty on its
+  -- home screen, it shows a placeholder: Ask anything… "<an example>".) Only the box's columns: a
+  -- wide window has a sidebar on its right once a session started.
+  prompt = function(t)
+    local lines = vim.split(t, '\n')
+    for i = #lines, 1, -1 do
+      if lines[i]:match('^%s*╹▀') then
+        local width = vim.fn.strchars(lines[i]:sub(1, select(2, lines[i]:find('.*▀'))))
+        local j, text = i - 1, {}
+        while j > 1 and lines[j - 1]:match('^%s*┃') do
+          j = j - 1
+        end
+        for k = j, i - 2 do
+          text[#text + 1] = vim.trim((vim.fn.strcharpart(lines[k], 0, width):gsub('^%s*┃', '')))
+        end
+        local p = vim.trim(table.concat(text, ' '))
+        return p:match('^Ask anything… ".*"$') and '' or p
+      end
+    end
+  end,
+  -- The editor-context part OpenCode adds to the prompt.
+  attached = function(sel)
+    return { ('Note: The user selected #%d-%d from "%s". ```%s```'):format(sel.l1, sel.l2, sel.path, sel.text) }
+  end,
   prompts = {},
   diff = false,
   lock_dir = function()
@@ -477,18 +646,45 @@ check(('setup() with the %s terminal layout, split_side = %s, selection.track = 
 -- The commands (-u NONE loads no plugin/ file), and the mapping the README suggests.
 vim.cmd.runtime('plugin/agent.lua')
 vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>')
--- Record what the provider's at_mention delivered.
-local delivered = {}
-local provider_name = require('agent.agents').get(kind).provider
+-- Record what :AgentSend returned (M.send()), what the provider's send_context delivered (Claude,
+-- OpenCode: and the text of each selection_changed it sent), and anything typed into the agent's
+-- terminal.
+local sends, delivered, typed = {}, {}, {}
 do
-  local P = require('agent.providers.' .. provider_name)
-  local orig = P.at_mention
-  if orig then
-    P.at_mention = function(...)
-      local sent = orig(...)
-      delivered[#delivered + 1] = sent
-      return sent
+  local send = agent.send
+  agent.send = function(...)
+    local ok, how = send(...)
+    sends[#sends + 1] = { ok = ok, how = how }
+    return ok, how
+  end
+  local provider = require('agent.agents').get(kind).provider
+  local P = require('agent.providers.' .. provider)
+  local send_context = assert(P.send_context, 'the provider has no send_context')
+  P.send_context = function(s, o)
+    local srv, notified = provider == 'claude' and claude_provider()._state.srv, {}
+    if srv then
+      local notify = srv.notify
+      srv.notify = function(self, session, method, params, no)
+        if method == 'selection_changed' then
+          notified[#notified + 1] = params.text
+        end
+        return notify(self, session, method, params, no)
+      end
     end
+    local ok, sent = pcall(send_context, s, o)
+    if srv then
+      srv.notify = nil -- (the server's own method again)
+    end
+    if not ok then
+      error(sent, 0)
+    end
+    delivered[#delivered + 1] = { path = s.path, text = s.text, sent = sent, notified = srv and notified or nil }
+    return sent
+  end
+  local tsend = terminal.send
+  terminal.send = function(text, o)
+    typed[#typed + 1] = text
+    return tsend(text, o)
   end
 end
 
@@ -635,13 +831,14 @@ end
 vim.wait(1500)
 
 -- 3. (E2E_TRACK=1) Selection tracking, with keys as a user would press them
+local A = ws .. '/a.txt'
 local SELECTED = 'hello\nworld'
 local function feed(keys, mode)
   vim.api.nvim_feedkeys(vim.keycode(keys), mode or 'nx', false)
 end
 ---The agent got the selection (selected) or the cursor only: on the wire, and in its TUI.
 local function agent_has(selected)
-  if R.wire() ~= (selected and SELECTED or '') then
+  if R.wire(A) ~= (selected and SELECTED or '') then
     return false
   end
   if not R.selection then
@@ -672,7 +869,7 @@ if TRACK then
   check(to_agent .. ' from Visual mode: the agent window has focus', vim.api.nvim_get_current_win() == term_win,
     vim.api.nvim_get_current_win())
   vim.wait(2000) -- well past the grace period and the debounce
-  check('the selection is kept for the agent' .. shown, agent_has(true), vim.inspect(R.wire()))
+  check('the selection is kept for the agent' .. shown, agent_has(true), vim.inspect(R.wire(A)))
 
   -- (dropped) Back in the file window, Normal mode: the cursor only. Select again, then <Esc>.
   feed('<C-w>p')
@@ -692,51 +889,108 @@ if TRACK then
 end
 
 -- 4. :AgentSend from Visual mode, through <leader>as (<cmd>AgentSend<cr>)
+local function inspect1(v)
+  return vim.inspect(v, { newline = ' ', indent = '' })
+end
+local wire_name = kind == 'gemini' and 'ide/contextUpdate, as the active file' or 'selection_changed'
+---Press <leader>as in Visual mode (the selection `sel` = { path, l1, l2, text }), or run :AgentSend
+---another way (`how` = { run = function, label = string }), and check that the agent got the
+---selection through its IDE connection, as selection.track sends selections, and that nothing was
+---typed into its prompt. `pre` prefixes the check names; `shows` is what the TUI shows for it, if
+---anything.
+local function send_selection(sel, pre, shows, how)
+  how = how or { label = '<leader>as (<cmd>AgentSend<cr>) from Visual mode', run = function()
+    feed('<leader>as', 'x')
+  end }
+  local nsends, ndelivered, ntyped = #sends, #delivered, #typed
+  how.run()
+  check(pre .. how.label .. ': the agent terminal has focus, Visual mode ended',
+    vim.api.nvim_get_current_win() == term_win and not vim.api.nvim_get_mode().mode:match('^[vVsS\22\19]'),
+    ('win %d, mode %s'):format(vim.api.nvim_get_current_win(), vim.api.nvim_get_mode().mode))
+  local r = sends[nsends + 1]
+  check(pre .. ":AgentSend returned 'sent': the agent is connected", #sends == nsends + 1 and r.ok
+    and r.how == 'sent', inspect1(vim.list_slice(sends, nsends + 1)))
+  local d = delivered[#delivered]
+  check(pre .. 'the provider sent the selection (send_context)', #delivered > ndelivered and d.sent
+    and d.path == sel.path and d.text == sel.text, inspect1(vim.list_slice(delivered, ndelivered + 1)))
+  -- Claude, OpenCode: selection_changed, also when it is the one sent last; to OpenCode always
+  -- after a copy with other text ('' <-> ' '), since it ignores one that did not change and keeps
+  -- its selection across reconnects.
+  if d and d.notified then
+    local want = kind == 'opencode' and { sel.text == '' and ' ' or '', sel.text } or { sel.text }
+    check(pre .. 'the provider sent selection_changed' .. (kind == 'opencode' and ', after a copy with other text'
+      or ''), vim.deep_equal(d.notified, want), inspect1(d.notified))
+  end
+  check(('%sthe agent got %s lines %d-%d on the wire (%s)'):format(pre, sel.path, sel.l1, sel.l2, wire_name),
+    wait_until(20000, function()
+      return R.wire(sel.path) == sel.text
+    end, 'the selection on the wire'), vim.inspect(R.wire(sel.path)))
+  if shows then
+    check(pre .. "the agent's TUI shows it: " .. shows, wait_until(20000, function()
+      return tty():find(shows, 1, true) ~= nil
+    end, shows))
+  end
+  vim.wait(1000) -- (a reference typed or inserted would show by now)
+  local p = R.prompt(tty())
+  check(pre .. "nothing was typed: the agent's prompt is empty", #typed == ntyped and p == '',
+    ('typed %s, prompt %s'):format(vim.inspect(vim.list_slice(typed, ntyped + 1)), vim.inspect(p)))
+  writef(root .. '/' .. kind .. '.tty-send.txt', tty())
+end
+---Did the model request made for `prompt` carry the selection `sel`?
+local function carried(prompt, sel)
+  if R.carried then
+    return R.carried(prompt, sel)
+  end
+  for _, u in ipairs(model_requests(prompt)) do
+    local all = true
+    for _, want in ipairs(R.attached(sel)) do
+      all = all and u:find(want, 1, true) ~= nil
+    end
+    if all then
+      return true
+    end
+  end
+  return false
+end
+local function carried_detail(prompt)
+  if kind == 'gemini' then
+    return 'the active file at the prompt: ' .. inspect1(gemini_active(prompt))
+  end
+  local u = model_requests(prompt)
+  return #u == 0 and 'no request for the prompt' or vim.inspect(u[#u]:sub(1, 3000))
+end
+---Did the agent finish the turn of `prompt` (Done. after it in the TUI)?
+local function done_after(prompt)
+  -- (A full-screen TUI keeps no scrollback: an earlier Done. may be gone.)
+  local t, i = tty(), nil
+  for at in t:gmatch('()' .. vim.pesc(prompt)) do
+    i = at
+  end
+  return i ~= nil and t:find('Done.', i, true) ~= nil
+end
+
 vim.api.nvim_set_current_win(main_win)
 vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
 feed('Vj', 'nx!')
----Occurrences of `text` in the TUI.
-local function count(text)
-  local n, i = 0, 1
-  local t = tty()
-  while true do
-    local j = t:find(text, i, true)
-    if not j then
-      return n
-    end
-    n, i = n + 1, j + #text
-  end
-end
 if TRACK then
-  -- The selection shows too where the TUI labels it like the mention (Copilot's footer @a.txt:1-2,
-  -- OpenCode's a.txt#1-2), and stays (the focus goes straight to the agent): the mention is one
-  -- more occurrence.
   check('Vj: the agent got the selection' .. shown, wait_until(20000, function()
     return agent_has(true)
   end, 'the selection at the agent'))
   vim.wait(500)
-end
-local before = count(R.mention)
-feed('<leader>as', 'x')
-check('<leader>as (<cmd>AgentSend<cr>) from Visual mode: the agent terminal has focus, Visual mode ended',
-  vim.api.nvim_get_current_win() == term_win and vim.api.nvim_get_mode().mode:sub(1, 1) ~= 'V',
-  ('win %d, mode %s'):format(vim.api.nvim_get_current_win(), vim.api.nvim_get_mode().mode))
-check("the agent's prompt shows the mention " .. R.mention, wait_until(30000, function()
-  return count(R.mention) > before
-end, 'the mention in the TUI'), ('%d -> %d occurrences'):format(before, count(R.mention)))
-if R.provider_mention then
-  check('the mention went through the IDE connection (' .. (provider_name == 'copilot' and 'add_file_reference'
-    or 'at_mentioned') .. ')', vim.tbl_contains(delivered, true), vim.inspect(delivered))
 else
-  check('the reference was typed (Gemini has no mention notification)', #delivered == 0)
+  vim.wait(500) -- past the debounce
+  check('selection.track = false: Vj alone pushed nothing to the agent', R.wire(A) == nil, vim.inspect(R.wire(A)))
 end
-if not TRACK then
-  check('selection.track = false: nothing was pushed to the agent', R.wire() == nil, vim.inspect(R.wire()))
-end
+local SEL = { path = A, l1 = 1, l2 = 2, text = SELECTED }
+send_selection(SEL, '', R.selection or R.context_shown)
 
--- 5. Prompt, after the mention
-vim.wait(1000)
+-- 5. Prompt: its model request carries the selection
 terminal.send(PROMPT, { submit = true, submit_delay_ms = 400 })
+local ok = wait_until(60000, function()
+  return carried(PROMPT, SEL)
+end, 'the selection in the model request')
+check('the model request for the prompt carries the selection (' .. (R.carried and 'editor context activeFile'
+  or R.attached(SEL)[#R.attached(SEL)]:gsub('\n.*', ' ...')) .. ')', ok, not ok and carried_detail(PROMPT) or nil)
 
 -- (a) the $NVIM controller
 check('(a) exec_lua ran in this Neovim (vim.g.agent_e2e set)', wait_until(90000, function()
@@ -812,7 +1066,7 @@ if R.diff then
     end, 'a.txt buffer reload'))
   end
 else
-  skip('(b) edit through the IDE diff', 'OpenCode has no IDE diff: its editor client only receives selections and mentions')
+  skip('(b) edit through the IDE diff', 'OpenCode has no IDE diff: its editor client only receives selections')
 end
 
 if kind ~= 'gemini' then
@@ -823,4 +1077,74 @@ end
 check('the agent finished its turn (Done. in the TUI)', wait_until(30000, function()
   return tty():find('Done.', 1, true) ~= nil
 end, 'Done.'))
+
+-- 7. :AgentSend from a buffer that is not a file (a scratch buffer): by its nvim://buffer/ id
+local scratch = vim.api.nvim_create_buf(true, true)
+vim.api.nvim_buf_set_name(scratch, 'e2e-scratch')
+vim.api.nvim_buf_set_lines(scratch, 0, -1, false, { 'alpha', 'beta', 'gamma' })
+vim.api.nvim_set_current_win(main_win)
+vim.api.nvim_win_set_buf(main_win, scratch)
+local BSEL = { path = require('agent.editor.context').buffer_uri(scratch), l1 = 1, l2 = 2, text = 'alpha\nbeta' }
+check('(buffer) a scratch buffer goes by its nvim://buffer/ id', BSEL.path == ('nvim://buffer/%d/e2e-scratch'):format(scratch),
+  BSEL.path)
+vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
+feed('Vj', 'nx!')
+vim.wait(500)
+send_selection(BSEL, '(buffer) ', R.buffer_selection)
+terminal.send(PROMPT_BUFFER, { submit = true, submit_delay_ms = 400 })
+ok = wait_until(60000, function()
+  return carried(PROMPT_BUFFER, BSEL)
+end, 'the buffer selection in the model request')
+check('(buffer) the model request for the next prompt carries it', ok, not ok and carried_detail(PROMPT_BUFFER) or nil)
+check('(buffer) the agent finished that turn too (Done. after the prompt in the TUI)', wait_until(30000, function()
+  return done_after(PROMPT_BUFFER)
+end, 'Done.'))
+
+-- 8. :AgentSend of the same lines again, now that the prompt was answered: the next prompt carries
+--    them too. Claude drops the selection when a prompt is submitted; OpenCode attaches one to a
+--    single prompt and ignores one that did not change (file, range, text): the provider sends it
+--    again anyway (to OpenCode after a copy with other text). Copilot attaches the latest one to
+--    every prompt; Gemini adds only what changed to the editor context, so the model's still has it.
+if R.cleared_on_submit then
+  check('(again) the agent dropped the selection when the prompt was submitted (TUI: no ' .. R.selection .. ')',
+    wait_until(5000, function()
+      return tty():find(R.selection, 1, true) == nil
+    end, 'the selection gone from the TUI'))
+end
+vim.api.nvim_set_current_win(main_win)
+vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
+feed('Vj', 'nx!')
+vim.wait(500)
+send_selection(BSEL, '(again) ', R.buffer_selection)
+terminal.send(PROMPT_AGAIN, { submit = true, submit_delay_ms = 400 })
+ok = wait_until(60000, function()
+  return carried(PROMPT_AGAIN, BSEL)
+end, 'the selection in the model request again')
+check('(again) the model request for the next prompt carries it again'
+  .. (kind == 'gemini' and ' (the editor context the model has)' or ''),
+  ok, not ok and carried_detail(PROMPT_AGAIN) or nil)
+check('(again) the agent finished that turn too (Done. after the prompt in the TUI)', wait_until(30000, function()
+  return done_after(PROMPT_AGAIN)
+end, 'Done.'))
+
+-- 9. :'<,'>AgentSend typed from a charwise Visual selection (v, a.txt from line 1 column 2 to line 2
+--    column 2): the Visual area as it was made, not its lines (the command line is read on
+--    CmdlineLeave). Then the same range run from Lua (vim.cmd), which is never the Visual area:
+--    lines 1-2.
+vim.api.nvim_set_current_win(main_win)
+vim.api.nvim_win_set_buf(main_win, a_buf)
+local al = vim.api.nvim_buf_get_lines(a_buf, 0, 2, false)
+local CSEL = { path = A, l1 = 1, l2 = 2, text = al[1]:sub(2) .. '\n' .. al[2]:sub(1, 2) }
+vim.api.nvim_win_set_cursor(main_win, { 1, 1 })
+feed('vj', 'nx!')
+vim.wait(500)
+send_selection(CSEL, '(charwise) ', nil, { label = ":'<,'>AgentSend typed in Visual mode (v)", run = function()
+  feed(':AgentSend<CR>', 'x')
+end })
+vim.api.nvim_set_current_win(main_win)
+vim.wait(500)
+send_selection({ path = A, l1 = 1, l2 = 2, text = table.concat(al, '\n') }, '(range) ', nil,
+  { label = [[vim.cmd("'<,'>AgentSend") in Normal mode]], run = function()
+    vim.cmd("'<,'>AgentSend")
+  end })
 done()

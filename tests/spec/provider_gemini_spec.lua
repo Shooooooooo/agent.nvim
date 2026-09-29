@@ -1042,6 +1042,282 @@ describe('ide/contextUpdate', function()
   end)
 end)
 
+describe('send_context (:AgentSend)', function()
+  local function track_off()
+    config.setup({ diff = { open_in = 'tab' }, selection = { track = false },
+      providers = { gemini = { discovery_dir = tmp .. '/disc' } } })
+  end
+
+  local function edit(path, text)
+    write(path, text)
+    vim.cmd('edit ' .. vim.fn.fnameescape(path))
+    return path
+  end
+
+  ---The latest ide/contextUpdate of `c`, once its files satisfy `pred`; checked against Gemini's schema.
+  local function wait_ctx(c, pred, what)
+    local found
+    wait_for(function()
+      local evs = c:events('ide/contextUpdate')
+      local m = evs[#evs] and evs[#evs].msg
+      if m and pred(m.params.workspaceState.openFiles) then
+        found = m
+        return true
+      end
+      return false
+    end, 3000, what)
+    assert.truthy(P.validate_notification(found.method, found.params))
+    return found.params.workspaceState.openFiles
+  end
+
+  it('with selection.track = false, lists the sent entry alone: path, isActive, 1-based UTF-16 cursor, selectedText', function()
+    track_off()
+    local b = edit(tmp .. '/b.lua', 'other\n')
+    local a = edit(tmp .. '/a.lua', 'local x = 1\nlocal y = "é"\n')
+    api.nvim_win_set_cursor(0, { 2, 13 })
+    local c = new_client(start()):connect()
+    assert.same({}, c:wait_event('ide/contextUpdate').params.workspaceState.openFiles)
+    assert.truthy(P.send_context(selection.capture({ line1 = 1, line2 = 2 })))
+    local msg = c:wait_event('ide/contextUpdate', 2)
+    assert.truthy(P.validate_notification(msg.method, msg.params))
+    local files = msg.params.workspaceState.openFiles
+    assert.eq(1, #files, 'not ' .. b)
+    local f = files[1]
+    assert.truthy(f.timestamp > 1.7e12, 'wall-clock ms')
+    -- A range: the cursor at the start of its last line (as a V selection made downwards has it).
+    assert.same({ path = a, timestamp = f.timestamp, isActive = true, cursor = { line = 2, character = 1 },
+      selectedText = 'local x = 1\nlocal y = "é"' }, f)
+    assert.same(msg.params, P.build_context())
+    -- The cursor only: the file, with no selectedText. Byte column 13 is after 'local y = "é' (é is
+    -- 2 bytes, 1 UTF-16 unit): 1-based UTF-16 = 13.
+    assert.truthy(P.send_context(selection.capture()))
+    files = c:wait_event('ide/contextUpdate', 3).params.workspaceState.openFiles
+    assert.same({ { path = a, timestamp = files[1].timestamp, isActive = true, cursor = { line = 2, character = 13 } } },
+      files)
+    assert.truthy(files[1].timestamp > f.timestamp)
+    -- The selected text is truncated like the tracked one.
+    edit(tmp .. '/big.txt', string.rep('é', 20000) .. '\n')
+    assert.truthy(P.send_context(selection.capture({ line1 = 1 })))
+    files = c:wait_event('ide/contextUpdate', 4).params.workspaceState.openFiles
+    assert.eq(string.rep('é', 16384) .. '... [TRUNCATED]', files[1].selectedText)
+  end)
+
+  it('sends a buffer that is not a file by its nvim://buffer/ id, its cursor at 1:1', function()
+    track_off()
+    local c = new_client(start()):connect()
+    c:wait_event('ide/contextUpdate')
+    vim.cmd('enew')
+    api.nvim_buf_set_lines(0, 0, -1, false, { 'error: boom', 'at line 2' })
+    api.nvim_win_set_cursor(0, { 2, 3 })
+    local id = ('nvim://buffer/%d/scratch'):format(api.nvim_get_current_buf())
+    assert.truthy(P.send_context(selection.capture()))
+    local msg = c:wait_event('ide/contextUpdate', 2)
+    assert.truthy(P.validate_notification(msg.method, msg.params))
+    local files = msg.params.workspaceState.openFiles
+    assert.same({ { path = id, timestamp = files[1].timestamp, isActive = true, cursor = { line = 1, character = 1 } } },
+      files)
+    assert.truthy(P.send_context(selection.capture({ line1 = 1, line2 = 2 })))
+    files = c:wait_event('ide/contextUpdate', 3).params.workspaceState.openFiles
+    assert.eq(1, #files)
+    assert.eq(id, files[1].path)
+    assert.eq('error: boom\nat line 2', files[1].selectedText)
+  end)
+
+  it('with selection.track = true, puts the sent entry first and newest, the recent files after it as plain entries', function()
+    local a = edit(tmp .. '/a.txt', 'alpha\nbeta\n')
+    local b = edit(tmp .. '/b.txt', 'one\n')
+    local c = new_client(start({ context_debounce_ms = 10 })):connect()
+    c:wait_event('ide/contextUpdate')
+    vim.cmd('buffer ' .. vim.fn.bufnr(a))
+    api.nvim_win_set_cursor(0, { 2, 1 })
+    selection.flush()
+    wait_ctx(c, function(files)
+      return files[1].path == a
+    end, 'a focused')
+    assert.truthy(P.send_context(selection.capture({ line1 = 1, line2 = 2 })))
+    local files = wait_ctx(c, function(list)
+      return list[1].selectedText ~= nil
+    end, 'the sent entry')
+    assert.eq(2, #files)
+    assert.same({ path = a, timestamp = files[1].timestamp, isActive = true, cursor = { line = 2, character = 1 },
+      selectedText = 'alpha\nbeta' }, files[1])
+    assert.same({ path = b, timestamp = files[2].timestamp }, files[2])
+    assert.truthy(files[1].timestamp > files[2].timestamp)
+    -- A buffer that is not a file, focused now, is never listed behind it.
+    vim.cmd('botright new')
+    selection.flush()
+    assert.matches('^nvim://buffer/', selection.recent_files({ buffers = true })[1].path)
+    local ctx = P.build_context()
+    assert.same({ a, b }, vim.tbl_map(function(x)
+      return x.path
+    end, ctx.workspaceState.openFiles))
+    vim.cmd('close')
+    -- The focus moves on to another file before the selection event reaches the provider: the sent
+    -- entry stays first, and the newest (Gemini keeps isActive on the newest entry only).
+    local c3 = edit(tmp .. '/c.txt', 'x\n')
+    selection.flush()
+    files = wait_ctx(c, function(list)
+      return #list == 3
+    end, 'c.txt listed')
+    assert.same({ a, c3, b }, vim.tbl_map(function(x)
+      return x.path
+    end, files))
+    assert.eq('alpha\nbeta', files[1].selectedText)
+    assert.eq(true, files[1].isActive)
+    assert.same({ path = c3, timestamp = files[2].timestamp }, files[2])
+    assert.truthy(files[1].timestamp > files[2].timestamp)
+    -- The selection event replaces it.
+    P.on_selection(nil)
+    assert.eq(nil, P._state().context)
+    files = wait_ctx(c, function(list)
+      return list[1].path == c3
+    end, 'c.txt active')
+    assert.eq(true, files[1].isActive)
+    assert.same({ path = a, timestamp = files[2].timestamp }, files[2])
+  end)
+
+  it('is in the update each new stream gets, until the next :AgentSend or on_selection replaces it', function()
+    track_off()
+    local a = edit(tmp .. '/a.txt', 'alpha\nbeta\n')
+    local info = start()
+    assert.falsy(P.send_context(selection.capture({ line1 = 2 })), 'no stream yet')
+    local c = new_client(info):connect()
+    local c2 = new_client(info):connect()
+    for _, x in ipairs({ c, c2 }) do
+      local files = x:wait_event('ide/contextUpdate').params.workspaceState.openFiles
+      assert.eq(1, #files)
+      assert.eq(a, files[1].path)
+      assert.eq('beta', files[1].selectedText)
+    end
+    -- The stream reopens (a reconnect): the update it gets has it too.
+    c:open_stream()
+    assert.eq('beta', c:wait_event('ide/contextUpdate').params.workspaceState.openFiles[1].selectedText)
+    -- The next :AgentSend replaces it everywhere.
+    assert.truthy(P.send_context(selection.capture({ line1 = 1 })))
+    assert.eq('alpha', c:wait_event('ide/contextUpdate', 2).params.workspaceState.openFiles[1].selectedText)
+    assert.eq('alpha', c2:wait_event('ide/contextUpdate', 2).params.workspaceState.openFiles[1].selectedText)
+    -- A selection event: forgotten (with selection.track = false, no files at all).
+    P.on_selection(nil)
+    assert.same({}, c2:wait_event('ide/contextUpdate', 3).params.workspaceState.openFiles)
+    assert.same({ workspaceState = { openFiles = {} } }, P.build_context())
+    local c3 = new_client(info):connect()
+    assert.same({}, c3:wait_event('ide/contextUpdate').params.workspaceState.openFiles)
+  end)
+
+  it('clear_context(pid) forgets it when the agent terminal with that job pid ends, and updates the Geminis', function()
+    track_off()
+    edit(tmp .. '/a.txt', 'alpha\nbeta\n')
+    local info = start()
+    local c = new_client(info):connect()
+    c:wait_event('ide/contextUpdate')
+    assert.truthy(P.send_context(selection.capture({ line1 = 2 }), { pid = 4242 }))
+    assert.eq('beta', c:wait_event('ide/contextUpdate', 2).params.workspaceState.openFiles[1].selectedText)
+    assert.eq(4242, P._state().context_pid)
+    -- Another agent (terminal) ended: kept, nothing sent.
+    P.clear_context(1111)
+    P.clear_context(nil)
+    vim.wait(100)
+    assert.eq(2, #c:events('ide/contextUpdate'))
+    assert.eq('beta', P.build_context().workspaceState.openFiles[1].selectedText)
+    -- Its own: forgotten, and the connected Geminis get an update without it (with
+    -- selection.track = false: no files).
+    P.clear_context(4242)
+    assert.eq(nil, P._state().context)
+    assert.eq(nil, P._state().context_pid)
+    assert.same({}, c:wait_event('ide/contextUpdate', 3).params.workspaceState.openFiles)
+    local c2 = new_client(info):connect()
+    assert.same({}, c2:wait_event('ide/contextUpdate').params.workspaceState.openFiles)
+    -- Nothing left to forget: no update.
+    P.clear_context(4242)
+    vim.wait(100)
+    assert.eq(3, #c:events('ide/contextUpdate'))
+    -- Sent with no pid (no agent terminal, terminal.layout = 'none'): a pid does not forget it.
+    assert.truthy(P.send_context(selection.capture({ line1 = 1 })))
+    assert.eq('alpha', c:wait_event('ide/contextUpdate', 4).params.workspaceState.openFiles[1].selectedText)
+    P.clear_context(4242)
+    vim.wait(100)
+    assert.eq(4, #c:events('ide/contextUpdate'))
+    P.clear_context(nil)
+    assert.same({}, c:wait_event('ide/contextUpdate', 5).params.workspaceState.openFiles)
+    P.stop()
+    P.clear_context(4242) -- safe when stopped
+  end)
+
+  it('clear_context keeps the recent files with selection.track = true', function()
+    local a = edit(tmp .. '/a.txt', 'alpha\nbeta\n')
+    local c = new_client(start()):connect()
+    c:wait_event('ide/contextUpdate')
+    selection.flush()
+    assert.truthy(P.send_context(selection.capture({ line1 = 1 }), { pid = 4242 }))
+    assert.eq('alpha', c:wait_event('ide/contextUpdate', 2).params.workspaceState.openFiles[1].selectedText)
+    local n = #c:events('ide/contextUpdate')
+    P.clear_context(4242)
+    local files = c:wait_event('ide/contextUpdate', n + 1).params.workspaceState.openFiles
+    assert.eq(a, files[1].path)
+    assert.eq(true, files[1].isActive)
+    assert.eq(nil, files[1].selectedText)
+  end)
+
+  it('ide_mode_off(): IDE mode was off when before_spawn last ran (the launcher\'s warning, else the settings), and still is', function()
+    assert.falsy(P.ide_mode_off(), 'not running')
+    start()
+    assert.falsy(P.ide_mode_off(), 'not launched yet')
+    local home = tmp .. '/ghome'
+    vim.fn.mkdir(home .. '/.gemini', 'p')
+    local settings = home .. '/.gemini/settings.json'
+    local env = { GEMINI_CLI_HOME = home, GEMINI_CLI_SYSTEM_DEFAULTS_PATH = tmp .. '/none.json',
+      GEMINI_CLI_SYSTEM_SETTINGS_PATH = tmp .. '/none2.json' }
+    local orig = vim.notify
+    vim.notify = function() end -- the one-time hint
+    local ok, err = pcall(function()
+      write(settings, '{"ide":{"enabled":true}}')
+      P.before_spawn({ cwd = tmp, env = env, warnings = {} })
+      assert.falsy(P.ide_mode_off())
+      -- The launcher warned (it read the settings already); the settings are read again later.
+      write(settings, '{"ide":{"enabled":false}}')
+      P.before_spawn({ cwd = tmp, env = env, warnings = { { id = 'gemini-ide-disabled' } } })
+      assert.truthy(P.ide_mode_off())
+      -- /ide enable in the running Gemini writes the setting: no relaunch needed.
+      write(settings, '{"ide":{"enabled":true}}')
+      assert.falsy(P.ide_mode_off())
+      -- Else the settings, as Gemini reads them with the job's environment.
+      P.before_spawn({ cwd = tmp, env = env, warnings = { { id = 'another-warning' } } })
+      assert.falsy(P.ide_mode_off())
+      write(settings, '{ // jsonc\n "ide": { "enabled": false } }')
+      P.before_spawn({ cwd = tmp, env = env, warnings = {} })
+      assert.truthy(P.ide_mode_off())
+      -- /ide enable, and the next launch.
+      write(settings, '{"ide":{"enabled":true}}')
+      P.before_spawn({ cwd = tmp, env = env, warnings = {} })
+      assert.falsy(P.ide_mode_off())
+      write(settings, '{"ide":{"enabled":false}}')
+      P.before_spawn({ cwd = tmp, env = env })
+      assert.truthy(P.ide_mode_off())
+      -- A restart of the server forgets it.
+      P.stop()
+      assert.falsy(P.ide_mode_off())
+      start()
+      assert.falsy(P.ide_mode_off())
+    end)
+    vim.notify = orig
+    assert.truthy(ok, err)
+  end)
+
+  it('returns false when stopped or with no stream open; stop() forgets it', function()
+    track_off()
+    edit(tmp .. '/a.txt', 'alpha\n')
+    assert.falsy(P.send_context(selection.capture()), 'not running')
+    local info = start()
+    new_client(info):connect({ no_stream = true })
+    assert.falsy(P.send_context(selection.capture()), 'no stream')
+    assert.falsy(P.send_context(nil))
+    P.stop()
+    info = start()
+    local c = new_client(info):connect()
+    assert.same({}, c:wait_event('ide/contextUpdate').params.workspaceState.openFiles)
+  end)
+end)
+
 describe('misc', function()
   it('on_selection is safe when stopped', function()
     P.on_selection(nil)

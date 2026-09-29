@@ -10,8 +10,8 @@
 ---    decision is sent later as `ide/diffAccepted {filePath, content}` / `ide/diffRejected {filePath}`
 ---    with filePath exactly as received) and `closeDiff` (returns the proposal text, user edits
 ---    included, as the JSON text `{"content": ...}`; never sends a notification);
----  * `ide/contextUpdate` snapshots of the recently focused files, debounced, and sent to every
----    new GET stream.
+---  * `ide/contextUpdate` snapshots of the recently focused files (config.selection.track), and of
+---    what :AgentSend sent, debounced, and sent to every new GET stream.
 --- Every outgoing notification is checked against Gemini's zod schemas first: one malformed
 --- notification disconnects Gemini's IDE client for the rest of its life.
 local McpServer = require('agent.mcp.server')
@@ -19,6 +19,7 @@ local streamable = require('agent.mcp.streamable_http')
 local common = require('agent.net.common')
 local diff = require('agent.editor.diff')
 local selection = require('agent.editor.selection')
+local context = require('agent.editor.context')
 local util = require('agent.util')
 local log = require('agent.log').scope('gemini')
 
@@ -276,20 +277,37 @@ end
 -- IDE context
 -- ---------------------------------------------------------------------------
 
----The `ide/contextUpdate` params for the current editor state (never isTrusted). With
----selection.track = false no files are listed: they would carry the cursor and selected text.
----When the user was last in a buffer that is not a file (a terminal other than the agent's), it is
----the active entry, under its nvim://buffer/<n>/<label> id (Gemini passes it to the model as the
----activeFile, which the model reads with the controller's read_buffer); it never joins the recent
----files.
+---The `ide/contextUpdate` params for the current editor state (never isTrusted): the recently
+---focused files, with selection.track = true; what :AgentSend sent last (M.send_context()), as the
+---active entry, ahead of them (and alone with selection.track = false: the files would carry the
+---cursor and selected text). When the user was last in a buffer that is not a file (a terminal
+---other than the agent's), it is the active entry, under its nvim://buffer/<n>/<label> id (Gemini
+---passes it to the model as the activeFile, which the model reads with the controller's
+---read_buffer); it never joins the recent files.
 ---@param opts { limit?: integer }|nil
 ---@return table params
 function M.build_context(opts)
-  if not track_selection() then
-    return { workspaceState = { openFiles = {} } }
-  end
   local limit = opts and opts.limit or M.MAX_OPEN_FILES
-  local files = selection.recent_files({ limit = limit, max_selected = M.MAX_SELECTED_TEXT, buffers = true })
+  local sent = state and state.context
+  local files = {}
+  if track_selection() and limit > 0 then
+    files = selection.recent_files({ limit = limit, max_selected = M.MAX_SELECTED_TEXT, buffers = true })
+  end
+  if sent and limit > 0 then
+    -- Ahead of the others, and the newest (Gemini sorts by timestamp and keeps isActive only on
+    -- the newest entry).
+    local head = vim.deepcopy(sent)
+    local rest = {}
+    for _, f in ipairs(files) do
+      -- (A buffer that is not a file is only ever the active entry.)
+      if f.path ~= head.path and not context.is_buffer_uri(f.path) and #rest < limit - 1 then
+        rest[#rest + 1] = { path = f.path, bufnr = f.bufnr, timestamp = f.timestamp }
+        head.timestamp = math.max(head.timestamp, f.timestamp + 1)
+      end
+    end
+    files = { head }
+    vim.list_extend(files, rest)
+  end
   local open = {}
   for _, f in ipairs(files) do
     -- A path that is not valid UTF-8 cannot be named in JSON.
@@ -325,7 +343,7 @@ end
 ---@param force boolean send even when identical to the last snapshot
 ---@param params table|nil
 ---@param text string|nil
-local function send_context(session, force, params, text)
+local function push_context(session, force, params, text)
   if not state or session.closed or not session.initialized or not state.binding:has_stream(session) then
     return false
   end
@@ -363,7 +381,7 @@ function M.broadcast_context()
   local text = vim.json.encode(params)
   local n = 0
   for _, s in ipairs(state.binding:sessions()) do
-    if send_context(s, false, params, text) then
+    if push_context(s, false, params, text) then
       n = n + 1
     end
   end
@@ -850,7 +868,7 @@ function M.start(opts)
         timer:close()
       end
       if state == st then
-        send_context(session, true)
+        push_context(session, true)
       end
     end,
     on_stream_close = function(session)
@@ -1036,23 +1054,24 @@ function M.before_spawn(spec)
       end
     end
   end
-  if not ide_hint_shown then
-    for _, w in ipairs(spec.warnings or {}) do
-      if w.id == 'gemini-ide-disabled' then
-        ide_hint_shown = true
-      end
+  local warned = false
+  for _, w in ipairs(spec.warnings or {}) do
+    if w.id == 'gemini-ide-disabled' then
+      warned = true
     end
   end
-  if not ide_hint_shown then
-    local environ = vim.fn.environ()
-    for k, v in pairs(spec.env or {}) do
-      environ[k] = v ~= false and v or nil
-    end
-    if not M.ide_enabled({ environ = environ }) then
-      ide_hint_shown = true
-      require('agent.log').notify('gemini: IDE mode is off in your Gemini settings. Run /ide enable once in Gemini to connect it to Neovim.',
-        vim.log.levels.INFO)
-    end
+  local environ = vim.fn.environ()
+  for k, v in pairs(spec.env or {}) do
+    environ[k] = v ~= false and v or nil
+  end
+  local off = warned or not M.ide_enabled({ environ = environ })
+  state.ide_off, state.ide_environ = off, environ
+  if off and not warned and not ide_hint_shown then
+    require('agent.log').notify('gemini: IDE mode is off in your Gemini settings. Run /ide enable once in Gemini to connect it to Neovim.',
+      vim.log.levels.INFO)
+  end
+  if off then
+    ide_hint_shown = true
   end
 end
 
@@ -1093,9 +1112,8 @@ function M.status()
   }
 end
 
----The state of Gemini's IDE client: 'ready' (its event stream is open), 'connecting' (a session
----without a stream yet), or nil. Gemini has no mention notification: :AgentSend types the reference
----into its prompt, once it is connected (its TUI is up by then).
+---The state of Gemini's IDE client: 'ready' (its event stream is open, so it takes a context update
+---now), 'connecting' (a session without a stream yet), or nil.
 ---@return 'ready'|'connecting'|nil
 function M.client_state()
   if not state then
@@ -1111,9 +1129,67 @@ function M.client_state()
   return any and 'connecting' or nil
 end
 
----Selection events from init (coalesced with the provider's own subscription and debounced).
+---Send the selection :AgentSend captured to every Gemini connected (there is one per agent
+---terminal): an ide/contextUpdate with it as the active file (a buffer that is not a file by its
+---nvim://buffer/ id), its cursor and its text; with selection.track = true the recently focused
+---files follow. It stays in every later update, and in the one each new stream gets, until the next
+---:AgentSend or, with selection.track = true, the next selection event.
+---@param s agent.Selection
+---@return boolean sent  a Gemini with an open stream has it now
+function M.send_context(s, opts)
+  if not state or not s or type(s.path) ~= 'string' or s.path == '' then
+    return false
+  end
+  state.context = selection.entry_of(s, M.MAX_SELECTED_TEXT)
+  state.context_pid = opts and opts.pid
+  local ok, params = pcall(M.build_context, { limit = state.cfg.max_open_files })
+  if not ok then
+    log.error('cannot build the IDE context: %s', params)
+    return false
+  end
+  local text = vim.json.encode(params)
+  local sent = false
+  for _, session in ipairs(state.binding:sessions()) do
+    if state.binding:has_stream(session) then
+      local sd = sdata(session)
+      if sd.last_context == text or push_context(session, false, params, text) then
+        sent = true
+      end
+    end
+  end
+  return sent
+end
+
+---Forget what :AgentSend sent to the Gemini of the agent terminal with this job pid (it has ended),
+---and update the other connected Geminis, if any.
+---@param pid integer|nil
+function M.clear_context(pid)
+  if state and state.context and state.context_pid == pid then
+    state.context, state.context_pid = nil, nil
+    schedule_context()
+  end
+end
+
+---Gemini's IDE mode was off in its settings when agent.nvim last launched it, and still is (then it
+---never connects: :AgentSend types the reference instead). /ide enable turns it on in the settings.
+---@return boolean
+function M.ide_mode_off()
+  if not state or not state.ide_off then
+    return false
+  end
+  if M.ide_enabled({ environ = state.ide_environ }) then
+    state.ide_off = false
+  end
+  return state.ide_off
+end
+
+---Selection events from init (coalesced with the provider's own subscription and debounced). They
+---replace what :AgentSend sent.
 ---@param _ agent.Selection|nil
 function M.on_selection(_)
+  if state then
+    state.context = nil
+  end
   schedule_context()
 end
 

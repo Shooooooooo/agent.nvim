@@ -9,9 +9,9 @@
 ---   rewritten while the server lives: the CLI treats any event on its lock file as "IDE gone".
 --- * Tools: get_vscode_info, get_selection, open_diff (held open until the user decides),
 ---   close_diff, get_diagnostics, update_session_name.
---- * Notifications, sent on the session's GET stream: selection_changed (to every session, and
----   replayed when a stream opens; config.selection.track) and add_file_reference (:AgentSend, to
----   the CLI in the agent terminal only).
+--- * Notifications, sent on the session's GET stream: selection_changed, to every session as the
+---   selection changes (config.selection.track), and for :AgentSend to the CLI in the agent terminal
+---   only; both are replayed when a stream opens. add_file_reference is not sent.
 --- * The proposed side of a diff is read-only: after SAVED the CLI writes its own content.
 local uv = vim.uv or vim.loop
 local util = require('agent.util')
@@ -795,15 +795,34 @@ local function build_server(st)
   return srv
 end
 
+---@param s agent.mcp.Session
+---@param pid integer
+---@return boolean
+local function pid_matches(s, pid)
+  return s.info.copilot_pid == pid or s.info.copilot_parent_pid == pid
+end
+
+---The CLI a session belongs to, the same across its reconnects (which start new sessions).
+---@param session agent.mcp.Session
+---@return string
+local function client_key(session)
+  return session.info.copilot_session_id or session.id
+end
+
+---A stream opened (the CLI clears its cache on every reconnect): send it the selection, and what
+---:AgentSend sent last when it is for this CLI.
 ---@param st table
 ---@param session agent.mcp.Session
 local function replay_selection(st, session)
-  if not tracking_enabled() then
-    return
+  if tracking_enabled() then
+    local params = st.last_selection or current_selection(st)
+    if params then
+      session:notify('selection_changed', params)
+    end
   end
-  local params = st.last_selection or current_selection(st)
-  if params then
-    session:notify('selection_changed', params)
+  local c = st.context
+  if c and (c.pid and pid_matches(session, c.pid) or not c.pid and c.clients[client_key(session)]) then
+    session:notify('selection_changed', c.params)
   end
 end
 
@@ -831,6 +850,9 @@ function M.start()
     pending = {}, ---@type table<string, agent.copilot.PendingDiff>
     timers = {},
     last_selection = nil,
+    ---@type { params: table, pid: integer|nil, clients: table<string, true> }|nil  what :AgentSend
+    ---sent last, and to which CLI (by pid; else the CLIs it was sent to, by X-Copilot-Session-Id)
+    context = nil,
   }
   st.srv = build_server(st)
   local binding, err = streamable.attach({ pipe = sock }, st.srv, {
@@ -993,22 +1015,15 @@ function M.status()
 end
 
 -- ---------------------------------------------------------------------------
--- At-mentions (add_file_reference, :AgentSend)
+-- :AgentSend (selection_changed to the agent terminal's CLI)
 -- ---------------------------------------------------------------------------
 
----@param s agent.mcp.Session
----@param pid integer
----@return boolean
-local function pid_matches(s, pid)
-  return s.info.copilot_pid == pid or s.info.copilot_parent_pid == pid
-end
-
 ---Sessions that may be the CLI `opts.pid` names (its pid or its parent's, e.g. the terminal job's
----pid): with no pid, every session, most recently active first.
+---pid): with no pid, every session.
 ---@param st table
 ---@param opts { pid?: integer }|nil
 ---@return agent.mcp.Session[]
-local function mention_targets(st, opts)
+local function context_targets(st, opts)
   local pid = opts and opts.pid
   local out = {}
   for _, s in ipairs(st.binding:sessions()) do
@@ -1016,14 +1031,11 @@ local function mention_targets(st, opts)
       out[#out + 1] = s
     end
   end
-  table.sort(out, function(a, b)
-    return (a.info.last_activity or 0) > (b.info.last_activity or 0)
-  end)
   return out
 end
 
----The state of the CLI `opts.pid` names: 'ready' (connected with its event stream open, so a
----mention is delivered now), 'connecting' (connected, no stream yet), or nil.
+---The state of the CLI `opts.pid` names: 'ready' (connected with its event stream open, so it
+---takes a selection now), 'connecting' (connected, no stream yet), or nil.
 ---@param opts { pid?: integer }|nil
 ---@return 'ready'|'connecting'|nil
 function M.client_state(opts)
@@ -1031,7 +1043,7 @@ function M.client_state(opts)
   if not st then
     return nil
   end
-  local list = mention_targets(st, opts)
+  local list = context_targets(st, opts)
   for _, s in ipairs(list) do
     if st.binding:has_stream(s) then
       return 'ready'
@@ -1040,68 +1052,40 @@ function M.client_state(opts)
   return #list > 0 and 'connecting' or nil
 end
 
----@param path string
----@param first integer 1-based
----@param last integer 1-based
----@return string[]|nil lines  from the loaded buffer, else from disk
-local function range_lines(path, first, last)
-  local b = context().find_buf(path, { loaded = true })
-  if b then
-    return api.nvim_buf_get_lines(b, first - 1, last, false)
+---Send the selection :AgentSend captured to the CLI `opts.pid` names (else to every CLI), as
+---selection_changed (the footer shows `@file:L1-L2`; a non-empty selection is attached to every
+---prompt until replaced, an empty one to none), and remember it: a stream that opens later for
+---that CLI (without a pid: for a CLI it was sent to) gets it too, since the CLI clears it on every
+---reconnect. With selection.track = true, the next selection event replaces it.
+---@param s agent.Selection
+---@param opts { pid?: integer }|nil
+---@return boolean sent  a CLI with an open stream has it now
+function M.send_context(s, opts)
+  local st = state
+  if not st or not s or type(s.path) ~= 'string' or s.path == '' then
+    return false
   end
-  local ok, lines = pcall(vim.fn.readfile, path, '', last)
-  if ok and type(lines) == 'table' then
-    return vim.list_slice(lines, first, last)
+  local params = M.selection_params(s)
+  local c = { params = params, pid = opts and opts.pid, clients = {} }
+  st.context = c
+  local sent = false
+  for _, session in ipairs(context_targets(st, opts)) do
+    if st.binding:has_stream(session) and session:notify('selection_changed', params) then
+      c.clients[client_key(session)] = true
+      sent = true
+    end
   end
-  return nil
+  return sent
 end
 
----Insert an `@<file>[:L1-L2]` reference into the prompt of one CLI (add_file_reference): the one
----`opts.pid` names, else the most recently active one.
----@param path string  a file (the CLI makes it relative to its cwd)
----@param start_line integer|nil  1-based, inclusive; nil = the whole file
----@param end_line integer|nil    1-based, inclusive; default start_line
----@param opts { pid?: integer }|nil
----@return boolean sent
-function M.at_mention(path, start_line, end_line, opts)
+---Forget what :AgentSend sent to the CLI of the agent terminal with this job pid (it has ended), so
+---that no later CLI gets it when its stream opens.
+---@param pid integer|nil
+function M.clear_context(pid)
   local st = state
-  if not st or type(path) ~= 'string' or path == '' then
-    return false
+  if st and st.context and st.context.pid == pid then
+    st.context = nil
   end
-  local session
-  for _, s in ipairs(mention_targets(st, opts)) do
-    if st.binding:has_stream(s) then
-      session = s
-      break
-    end
-  end
-  if not session then
-    return false
-  end
-  local abs = util.abspath(path)
-  -- selection and selectedText must be present, as null for a whole file.
-  local params = { filePath = abs, fileUrl = util.file_url(abs), selection = vim.NIL, selectedText = vim.NIL }
-  if start_line then
-    end_line = end_line or start_line
-    if end_line < start_line then
-      start_line, end_line = end_line, start_line
-    end
-    start_line = math.max(start_line, 1)
-    end_line = math.max(end_line, start_line)
-    local lines = range_lines(abs, start_line, end_line)
-    local last_col = 0
-    if lines and #lines > 0 then
-      local last = lines[#lines]
-      local ok, n = pcall(vim.str_utfindex, last, 'utf-16', #last, false)
-      last_col = ok and n or #last
-      params.selectedText = table.concat(lines, '\n')
-    end
-    params.selection = {
-      start = { line = start_line - 1, character = 0 },
-      ['end'] = { line = end_line - 1, character = last_col },
-    }
-  end
-  return session:notify('add_file_reference', params)
 end
 
 ---Push a selection to every connected CLI (selection_changed). Called by agent.nvim for each
@@ -1114,6 +1098,7 @@ function M.on_selection(s)
   end
   local params = M.selection_params(s)
   st.last_selection = params
+  st.context = nil
   st.srv:broadcast('selection_changed', params, function(session)
     return st.binding:has_stream(session)
   end)

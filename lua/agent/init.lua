@@ -7,9 +7,9 @@
 ---    the running one. When the agent stops (M.stop(), a replace, or its process exits), its
 ---    provider stops too, unless config.auto_start keeps every provider running for agents started
 ---    outside Neovim.
----  * :AgentSend (M.send()) at-mentions the current buffer, or lines of it, in the agent's prompt
----    (through its provider, or typed), then focuses the agent's terminal, starting the agent if
----    needed.
+---  * :AgentSend (M.send()) sends the current buffer, or the selection in it, to the agent as its
+---    IDE context (through its provider, as selection.track does; typed when the provider is
+---    disabled), then focuses the agent's terminal, starting the agent if needed.
 ---  * agent.editor.selection runs while a provider runs (the providers' tools read it), and with
 ---    config.selection.track (off by default) its events are forwarded to every running provider.
 ---  * VimLeavePre stops the agent (SIGTERM to its whole process tree, see agent.terminal.stop()) and
@@ -35,11 +35,11 @@ local state = {
   augroup = nil,
   ---@type fun()|nil  selection subscription
   unsubscribe = nil,
-  ---@type agent.Mention[]  mentions waiting for delivery, oldest first (M.send(), drain())
-  mentions = {},
-  ---@type boolean  a poll() of the mentions is scheduled
+  ---@type agent.PendingSend|nil  what :AgentSend sent and is not delivered yet (M.send(), drain())
+  pending = nil,
+  ---@type boolean  a poll() of the pending send is scheduled
   polling = false,
-  ---@type integer|nil  the pid of the agent told that its mentions wait for its IDE connection
+  ---@type integer|nil  the pid of the agent told that :AgentSend waits for its IDE connection
   waiting_pid = nil,
 }
 
@@ -85,11 +85,17 @@ local function tracking()
   return config.get().selection.track == true
 end
 
----Forward one selection event to every running provider (only with config.selection.track).
+---Forward one selection event to every running provider (only with config.selection.track). An
+---:AgentSend still waiting for the agent's connection gives way to a newer selection: the agent
+---gets the current one when it connects.
 ---@param s agent.Selection|nil
 local function forward_selection(s)
   if not s or not tracking() then
     return
+  end
+  local m = state.pending
+  if m and not require('agent.editor.selection').same(s, m.selection) then
+    state.pending = nil
   end
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
@@ -184,6 +190,18 @@ local function cli_error(def)
   return nil
 end
 
+---The agent `name` with this job pid has ended: its provider forgets what :AgentSend sent it, so
+---that no later client gets it (the provider keeps running with config.auto_start).
+---@param name string
+---@param pid integer|nil
+local function forget_context(name, pid)
+  local def = require('agent.agents').get(name)
+  local P = def and loaded_provider(def.provider)
+  if P and P.clear_context then
+    pcall(P.clear_context, pid)
+  end
+end
+
 ---Stop the provider of agent `name` (its IDE server, lock and discovery files; pending diffs are
 ---closed) when the agent has stopped. Kept when config.auto_start is on (agents started outside
 ---Neovim may use it), and when the agent now in the terminal uses it.
@@ -215,7 +233,9 @@ local function stop_agent()
   if not name then
     return nil
   end
+  local info = terminal.info()
   terminal.stop()
+  forget_context(name, info and info.pid)
   stop_provider_of(name)
   return name
 end
@@ -270,8 +290,9 @@ local function launcher(name, open_opts)
       timeout_ms = cfg.nvim_mcp.timeout_ms,
     },
     auto_approve = open_opts.auto_approve,
-    on_exit = function(code)
+    on_exit = function(code, info)
       scoped().debug('%s exited with code %d', name, code)
+      forget_context(name, info and info.pid)
       -- Also after a stop or a replace (then the provider is already stopped, or in use again).
       stop_provider_of(name)
       vim.schedule(reload_changed_buffers)
@@ -326,6 +347,8 @@ function M.setup(opts)
       end
     end,
   })
+  -- (Also started by plugin/agent.lua; here for a setup() without it.)
+  require('agent.editor.cmdline').start()
 
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
@@ -457,7 +480,7 @@ end
 ---config.auto_start), selection tracking, and delete this Neovim's agent.nvim temp directory.
 ---Runs on VimLeavePre.
 function M.teardown()
-  state.mentions = {}
+  state.pending = nil
   pcall(terminal.stop)
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
@@ -475,20 +498,15 @@ function M.teardown()
 end
 
 -- ---------------------------------------------------------------------------
--- :AgentSend (at-mentions)
+-- :AgentSend (the selection, through the IDE connection)
 -- ---------------------------------------------------------------------------
 
----Providers with a mention notification: Claude and OpenCode (at_mentioned), Copilot
----(add_file_reference). Gemini has none: the reference is typed into its prompt.
-local MENTION_PROVIDERS = { claude = true, copilot = true }
-
----A mention waits for the agent's IDE connection (polling every MENTION_POLL_MS). Claude, OpenCode
----and Copilot, while their provider runs: until the client connects, however long that takes
----(nothing is typed before, which could go into a dialog such as Claude's folder trust question);
----a notice says so once the agent was started this long ago (or its client has been connecting
----this long). Gemini: at most this long, then the reference is typed.
-M.MENTION_WAIT_MS = 15000
-M.MENTION_POLL_MS = 250
+---What :AgentSend sent waits for the agent's IDE connection (polling every SEND_POLL_MS), as long
+---as that takes: nothing is sent before (an agent may ask a question first, such as Claude's folder
+---trust dialog). A notice says so once the agent was started this long ago (or its client has been
+---connecting this long).
+M.SEND_WAIT_MS = 15000
+M.SEND_POLL_MS = 250
 ---A reference is typed only into a terminal at least this old, so that the agent's TUI takes it.
 M.STARTUP_GRACE_MS = 3000
 
@@ -505,8 +523,9 @@ local function gemini_escape(p)
   return (p:gsub('([ \t()%[%]{};|*?$`\'"#&<>!~\\])', '\\%1'))
 end
 
----The reference an agent understands when typed into its prompt. Paths inside `cwd` are relative
----to it, others absolute. Lines are 1-based and inclusive; nil means the whole file.
+---The reference an agent understands when typed into its prompt, for an agent whose IDE server is
+---disabled. Paths inside `cwd` are relative to it, others absolute. Lines are 1-based and
+---inclusive; nil means the whole file.
 ---  claude:   @path  @path#L3  @path#L3-5
 ---  opencode: @path  @path#3   @path#3-5
 ---  copilot:  @path  @path:3   @path:3-5
@@ -556,35 +575,31 @@ local function reference(kind, path, l1, l2, cwd)
 end
 M._reference = reference
 
----@class agent.Mention
+---@class agent.PendingSend
 ---@field name string     the agent
 ---@field def agent.AgentDef
----@field path string     a file path, or the nvim://buffer/<n>/<label> id of another buffer
----@field l1 integer|nil  1-based first line; nil: the whole file or buffer
----@field l2 integer|nil  1-based last line (inclusive)
+---@field selection agent.Selection  what is sent (selection.capture())
 ---@field pid integer|nil its terminal job's pid (nil: no agent.nvim terminal, terminal.layout = 'none')
 ---@field started number|nil  util.now_ms() when its terminal was started
----@field deadline number|nil util.now_ms() until which it waits for the IDE connection quietly
----  (Claude, OpenCode, Copilot: then with a notice, see M.MENTION_WAIT_MS), or at all (Gemini)
+---@field deadline number|nil util.now_ms() after which a notice says that it waits for the IDE
+---  connection (see M.SEND_WAIT_MS)
 ---@field sync boolean|nil   M.send() is delivering it now (see drain())
----@field how string|nil     'sent', 'typed', 'gone' or 'error' once out of the queue
+---@field how string|nil     'sent', 'typed', 'gone' or 'error' once delivered or dropped
 ---@field err string|nil     the error, for 'error'
 
----Deliver the mention through the agent's provider (to the client in its terminal, matched by
----pid). Never an nvim://buffer/ id (see reference()).
----@param m agent.Mention
----@return boolean sent
-local function provider_mention(m)
-  if not MENTION_PROVIDERS[m.def.provider] or require('agent.editor.context').is_buffer_uri(m.path) then
-    return false
-  end
+---Send the selection through the agent's provider, as selection.track sends selections (to the
+---client in its terminal, matched by pid). Copilot and Gemini remember it for a stream that opens
+---later (they clear their state when it does); Claude and OpenCode use it for one prompt.
+---@param m agent.PendingSend
+---@return boolean sent  a ready client of the agent has it
+local function provider_send(m)
   local P = loaded_provider(m.def.provider)
-  if not P or not P.is_running() or not P.at_mention then
+  if not P or not P.is_running() or not P.send_context then
     return false
   end
-  local ok, sent = pcall(P.at_mention, m.path, m.l1, m.l2, { kind = m.def.kind, pid = m.pid })
+  local ok, sent = pcall(P.send_context, m.selection, { kind = m.def.kind, pid = m.pid, started = m.started })
   if not ok then
-    scoped().error('%s.at_mention failed: %s', m.def.provider, tostring(sent))
+    scoped().error('%s.send_context failed: %s', m.def.provider, tostring(sent))
     return false
   end
   return sent == true
@@ -592,49 +607,48 @@ end
 
 ---The state of the agent's IDE client: 'ready', 'connecting', 'ambiguous' or nil (see the
 ---providers' client_state()); nil also when its provider is not running.
----@param m agent.Mention
+---@param m agent.PendingSend
 ---@return 'ready'|'connecting'|'ambiguous'|nil
 local function client_state(m)
   local P = loaded_provider(m.def.provider)
   if not P or not P.is_running() or not P.client_state then
     return nil
   end
-  local ok, s = pcall(P.client_state, { kind = m.def.kind, pid = m.pid })
+  local ok, s = pcall(P.client_state, { kind = m.def.kind, pid = m.pid, started = m.started })
   return ok and s or nil
 end
 
----Tell the user, once for the agent in the terminal (until one of its mentions is delivered),
----that its mentions wait for its IDE connection.
----@param m agent.Mention
+---Tell the user, once for the agent in the terminal (until something is delivered to it), that
+---:AgentSend waits for its IDE connection.
+---@param m agent.PendingSend
 local function notify_waiting(m)
   if state.waiting_pid == m.pid then
     return
   end
   state.waiting_pid = m.pid
-  notify(('%s has not connected to Neovim yet: the mention will be inserted when it connects'):format(m.name))
+  notify(('%s has not connected to Neovim yet: the context will be sent when it connects'):format(m.name))
 end
 
----One delivery attempt: through the provider; else typed into the prompt once the IDE client is
----ready and the terminal is old enough. Claude, OpenCode and Copilot are never typed into while
----their provider runs and the client is not ready, unless which client is the agent's cannot be
----told (two OpenCodes); Gemini is once the wait is over.
----@param m agent.Mention
+---One delivery attempt: through the provider, once the agent's IDE client is ready, however long
+---that takes. Typed into the prompt instead, once the terminal is old enough, when the agent cannot
+---connect: its IDE server is disabled, or Gemini's IDE mode is off; and once the wait is over, when
+---its client cannot be told apart from another one (two OpenCodes).
+---@param m agent.PendingSend
 ---@return 'sent'|'typed'|'wait'|'gone'|'error' how, string|nil err
 local function attempt(m)
   local info = terminal.info()
   if not info or not info.running or info.pid ~= m.pid then
     return 'gone', nil
   end
-  if provider_mention(m) then
-    state.waiting_pid = nil
-    return 'sent', nil
-  end
   local now = util.now_ms()
   local P = loaded_provider(m.def.provider)
-  -- (A provider that is not running, disabled say, gets no connection to wait for.)
-  local cs = P and P.is_running() and client_state(m) or nil
-  if P and P.is_running() and cs ~= 'ready' then
-    if MENTION_PROVIDERS[m.def.provider] and cs ~= 'ambiguous' then
+  -- (Gemini's IDE mode off: the agent's Gemini never connects; another one may.)
+  if P and P.is_running() and not (P.ide_mode_off and P.ide_mode_off()) then
+    if provider_send(m) then
+      state.waiting_pid = nil
+      return 'sent', nil
+    end
+    if client_state(m) ~= 'ambiguous' then
       if now >= m.deadline then
         notify_waiting(m)
       end
@@ -646,7 +660,12 @@ local function attempt(m)
   if now - m.started < M.STARTUP_GRACE_MS then
     return 'wait', nil
   end
-  local ok, err = terminal.send(reference(m.def.kind, m.path, m.l1, m.l2, info.cwd) .. ' ')
+  local s = m.selection
+  local l1, l2
+  if not s.is_empty then
+    l1, l2 = s.start_line, s.end_line
+  end
+  local ok, err = terminal.send(reference(m.def.kind, s.path, l1, l2, info.cwd) .. ' ')
   if not ok then
     return 'error', err
   end
@@ -654,30 +673,30 @@ local function attempt(m)
   return 'typed', nil
 end
 
----Deliver the queued mentions (state.mentions) in the order they were sent, until one has to wait.
----Each delivered or dropped one gets `how` (and `err`): an error is shown, except for the mention
----M.send() is delivering now (`m.sync`), which returns it.
+---Deliver what :AgentSend sent (state.pending), unless it has to wait. Once delivered or dropped
+---it gets `how` (and `err`): an error is shown, except while M.send() delivers it (`m.sync`), which
+---returns it.
 local function drain()
-  local q = state.mentions
-  while #q > 0 do
-    local m = q[1]
-    local how, err = attempt(m)
-    if how == 'wait' then
-      return
-    end
-    table.remove(q, 1)
-    m.how, m.err = how, err
-    if how == 'error' and not m.sync then
-      notify(tostring(err), vim.log.levels.WARN)
-    elseif how == 'gone' then
-      scoped().debug('mention of %s dropped: %s is no longer running', m.path, m.name)
-    end
+  local m = state.pending
+  if not m then
+    return
+  end
+  local how, err = attempt(m)
+  if how == 'wait' then
+    return
+  end
+  state.pending = nil
+  m.how, m.err = how, err
+  if how == 'error' and not m.sync then
+    notify(tostring(err), vim.log.levels.WARN)
+  elseif how == 'gone' then
+    scoped().debug('%s dropped: %s is no longer running', m.selection.path, m.name)
   end
 end
 
----Poll the queued mentions every MENTION_POLL_MS while there are any.
+---Poll the pending send every SEND_POLL_MS while there is one.
 local function poll()
-  if state.polling or #state.mentions == 0 then
+  if state.polling or not state.pending then
     return
   end
   state.polling = true
@@ -685,15 +704,15 @@ local function poll()
     state.polling = false
     drain()
     poll()
-  end, M.MENTION_POLL_MS)
+  end, M.SEND_POLL_MS)
 end
 
----What :AgentSend sends from the current window: its buffer (a file by its path, another buffer
----by its nvim://buffer/<n>/<label> id), with the lines of the live Visual selection, else of
----`range`, else none (the whole buffer). Not the agent's terminal, a diff buffer, a floating
+---What :AgentSend sends from the current window (selection.capture()): its buffer (a file by its
+---path, another buffer by its nvim://buffer/<n>/<label> id) with the live Visual selection, else
+---the lines of `range`, else the cursor. Not the agent's terminal, a diff buffer, a floating
 ---window, or a buffer agent.nvim ignores (b:agent_ignore).
----@param range { line1: integer, line2?: integer }|nil
----@return { path: string, l1: integer|nil, l2: integer|nil }|nil target, string|nil err
+---@param range { line1: integer, line2?: integer, visual?: boolean }|nil
+---@return agent.Selection|nil selection, string|nil err
 local function send_target(range)
   local api = vim.api
   local win = api.nvim_get_current_win()
@@ -708,55 +727,44 @@ local function send_target(range)
   if api.nvim_win_get_config(win).relative ~= '' then
     return nil, 'nothing to send from a floating window'
   end
-  local selection = require('agent.editor.selection')
-  local kind = selection.kind(buf, win)
-  if not kind then
+  local s = require('agent.editor.selection').capture(range)
+  if not s then
     return nil, 'nothing to send: agent.nvim ignores this buffer'
   end
-  local path = kind == 'file' and bufname or require('agent.editor.context').buffer_uri(buf)
-  local l1, l2
-  if api.nvim_get_mode().mode:match('^[vVsS\22\19]') then
-    l1, l2 = vim.fn.line('v'), vim.fn.line('.')
-  elseif range and range.line1 then
-    l1, l2 = range.line1, range.line2 or range.line1
-  end
-  if l1 then
-    if l2 < l1 then
-      l1, l2 = l2, l1
-    end
-    local n = api.nvim_buf_line_count(buf)
-    l1 = math.min(math.max(1, math.floor(l1)), n)
-    l2 = math.min(math.max(l1, math.floor(l2)), n)
-  end
-  return { path = path, l1 = l1, l2 = l2 }, nil
+  return s, nil
 end
 
 ---@class agent.SendOpts
 ---@field name? string     target agent (default: the running agent, else config.default_agent)
 ---@field line1? integer   first line of a range of the current buffer (1-based; ignored in Visual
----                        mode, where the selection's lines are sent)
+---                        mode, where the selection is sent)
 ---@field line2? integer   last line of the range (default line1)
+---@field visual? boolean  the range is the Visual area (:'<,'>AgentSend): the Visual selection
+---                        is sent as it was made (charwise, blockwise)
 ---@field confirm? boolean ask before replacing a different running agent (default true)
 
----At-mention the current file or buffer in the agent's prompt, then focus the agent's terminal:
----shown when it is hidden, started (config.default_agent, or opts.name) when no agent runs, as
----M.open() does (a different running agent is replaced only when the user confirms). In Visual
----mode the selected lines are mentioned (and Visual mode ends), with opts.line1 that range, else
----the whole file or buffer. Claude, OpenCode and Copilot get the mention through their IDE
----connection; Gemini, buffers that are not files, and agents whose IDE server is disabled get a
----typed reference (see reference()). Until the agent's IDE client connects the mention waits:
----for Claude, OpenCode and Copilot as long as it takes (with a notice after MENTION_WAIT_MS, and
----dropped when the agent stops or is replaced), for Gemini up to MENTION_WAIT_MS after its start.
----The mention is never submitted.
+---Send the current file or buffer to the agent as its IDE context, as selection.track does as you
+---move, then focus the agent's terminal: shown when it is hidden, started (config.default_agent,
+---or opts.name) when no agent runs, as M.open() does (a different running agent is replaced only
+---when the user confirms). In Visual mode the selection is sent (and Visual mode ends), with
+---opts.line1 those lines (with opts.visual, :'<,'>, the Visual selection as it was made), else the
+---file or buffer with no selection. Claude and OpenCode get selection_changed, Copilot too, Gemini an
+---ide/contextUpdate; a buffer that is not a file goes by its nvim://buffer/<n>/<label> id. Until
+---the agent's IDE client connects it waits, however long that takes (with a notice after
+---SEND_WAIT_MS; dropped when the agent stops or is replaced; a newer :AgentSend replaces it, and so
+---does a newer selection with selection.track). An agent that cannot connect (its IDE server
+---disabled, Gemini's IDE mode off) gets a reference typed into its prompt (see reference()), and so
+---does one whose client cannot be told apart from another (two OpenCodes) once the wait is over.
+---Nothing is submitted.
 ---@param opts agent.SendOpts|nil
 ---@return boolean ok, string|nil how_or_err  how: 'sent' (through the IDE connection), 'typed' or
----  'pending' (delivered once the agent is connected); err is nil when the user declined to replace
----  the running agent
+---  'pending' (sent once the agent is connected); err is nil when the user declined to replace the
+---  running agent
 function M.send(opts)
   ensure_setup()
   opts = opts or {}
-  local target, terr = send_target(opts.line1 and { line1 = opts.line1, line2 = opts.line2 } or nil)
-  if not target then
+  local sel, terr = send_target(opts.line1 and { line1 = opts.line1, line2 = opts.line2, visual = opts.visual } or nil)
+  if not sel then
     return false, terr
   end
   local name, nerr = resolve(opts.name)
@@ -764,22 +772,22 @@ function M.send(opts)
     return false, nerr
   end
   local def = require('agent.agents').get(name)
-  ---@type agent.Mention
-  local m = { name = name, def = def, path = target.path, l1 = target.l1, l2 = target.l2 }
+  ---@type agent.PendingSend
+  local m = { name = name, def = def, selection = sel }
   if config.get().terminal.layout == 'none' and not terminal.is_running() then
-    -- No agent.nvim terminal: only an agent the user started, connected to the IDE server, and
-    -- nothing typed (that needs a terminal agent.nvim opened).
-    if provider_mention(m) then
+    -- No agent.nvim terminal: only to an agent the user started, connected to the IDE server (so
+    -- that Copilot and Gemini do not keep it for a client that never had it).
+    if client_state(m) == 'ready' and provider_send(m) then
+      -- The focus stays here: tracking must not drop the selection just sent when its grace
+      -- period after Visual mode ends (as it keeps it for the agent terminal).
+      if tracking() then
+        pcall(function()
+          require('agent.editor.selection').keep_held()
+        end)
+      end
       return true, 'sent'
     end
-    local none = ', and terminal.layout is "none"'
-    if not MENTION_PROVIDERS[def.provider] then
-      return false, ('%s takes mentions only in a terminal agent.nvim opened'):format(name) .. none
-    elseif require('agent.editor.context').is_buffer_uri(m.path) then
-      return false, 'a buffer that is not a file is mentioned only in a terminal agent.nvim opened' .. none
-    end
-    return false, ('no %s is connected to Neovim to take the mention (terminal.layout is "none")')
-      :format(name)
+    return false, ('no %s is connected to Neovim to send it to (terminal.layout is "none")'):format(name)
   end
   -- The focus moves to the agent terminal: leave Visual mode here, in the buffer.
   if vim.api.nvim_get_mode().mode:match('^[vVsS\22\19]') then
@@ -794,15 +802,24 @@ function M.send(opts)
     return false, name .. ' is not running'
   end
   m.pid, m.started = info.pid, info.started
-  -- Quietly (Claude, OpenCode, Copilot) or at all (Gemini): after a start, and while the client is
-  -- connecting.
-  m.deadline = info.started + M.MENTION_WAIT_MS
+  -- The notice: after a start, and while the client is connecting.
+  m.deadline = info.started + M.SEND_WAIT_MS
   if client_state(m) == 'connecting' then
-    m.deadline = math.max(m.deadline, util.now_ms() + M.MENTION_WAIT_MS)
+    m.deadline = math.max(m.deadline, util.now_ms() + M.SEND_WAIT_MS)
   end
-  -- Behind the mentions still waiting, if any: they arrive in the order they were sent.
+  -- Selection events not delivered yet (the tracker's first one when it started with the agent)
+  -- are older than this send: deliver them now, so that they do not replace it (forward_selection).
+  if tracking() then
+    pcall(function()
+      local sel = require('agent.editor.selection')
+      if sel.is_running() then
+        sel.flush()
+      end
+    end)
+  end
+  -- It replaces what is still waiting, if anything: the agent has one context.
   m.sync = true
-  table.insert(state.mentions, m)
+  state.pending = m
   drain()
   m.sync = nil
   if not m.how then
@@ -1021,6 +1038,8 @@ function commands.AgentSend(o)
   -- A <cmd> mapping in Visual mode has no range: M.send() reads the live selection.
   if o.range and o.range > 0 then
     opts.line1, opts.line2 = o.line1, o.line2
+    -- :'<,'>AgentSend (or :*), typed or from a ':' mapping in Visual mode.
+    opts.visual = require('agent.editor.cmdline').take_visual('AgentSend')
   end
   local ok, err = M.send(opts)
   if not ok and err then

@@ -6,7 +6,9 @@
 --   stats | select {path,start:[l,c],end:[l,c]} | cursor {path,line,col} | float
 --   terminal {text,col} (a shell terminal that printed text; Visual selection from byte col to the
 --   end of the line, forwarded as agent.nvim does) | escape
---   mention {path,start?,end?,pid?} | accept <tab> | reject <tab> | closeui <tab>
+--   send {path,line1?,line2?,cursor?:[l,c],pid?} (:AgentSend: selection.capture() of the lines, else
+--   of the cursor, then send_context) | forget {pid?} (the agent terminal with job pid ended:
+--   clear_context) | accept <tab> | reject <tab> | closeui <tab>
 --   diffinfo <tab> | diag {path,items} | write {path,text} | buflines <path> | launch {cwd}
 --   stop | quit (or EOF)
 local root, tmp = arg[1], arg[2]
@@ -118,8 +120,18 @@ function handlers.escape()
   return { ok = true }
 end
 
-function handlers.mention(a)
-  return { sent = P.at_mention(a.path, a.start, a['end'], { pid = a.pid }), state = P.client_state({ pid = a.pid }) or vim.NIL }
+function handlers.send(a)
+  edit(a.path)
+  if a.cursor then
+    api.nvim_win_set_cursor(0, a.cursor)
+  end
+  local s = assert(require('agent.editor.selection').capture(a.line1 and { line1 = a.line1, line2 = a.line2 } or nil))
+  return { sent = P.send_context(s, { pid = a.pid }), state = P.client_state({ pid = a.pid }) or vim.NIL }
+end
+
+function handlers.forget(a)
+  P.clear_context(a.pid)
+  return { ok = true }
 end
 
 function handlers.accept(tab)

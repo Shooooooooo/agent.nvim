@@ -137,6 +137,21 @@ async function startFixture() {
 
 const luaStr = (s) => JSON.stringify(s); // JSON string literals are valid Lua strings for our inputs
 
+/**
+ * :AgentSend in the fixture: capture the lines of `range` (else the cursor) in `file` with
+ * selection.capture(), then P.send_context() for the agent in the terminal (`kind`, `pid`). The focus
+ * then goes back to an ignored buffer, as it moves to the agent terminal. Resolves to its result.
+ */
+const sendContext = (fx, file, { range, cursor, kind = 'claude', pid, started } = {}) =>
+  fx.lua(`vim.cmd.edit(${luaStr(file)})
+    ${cursor ? `vim.api.nvim_win_set_cursor(0, { ${cursor[0]}, ${cursor[1]} })` : ''}
+    local s = assert(require('agent.editor.selection').capture(${range ? `{ line1 = ${range[0]}, line2 = ${range[1]} }` : 'nil'}))
+    vim.cmd('enew')
+    vim.b.agent_ignore = true
+    return P.send_context(s, { kind = ${luaStr(kind)}${pid ? `, pid = ${pid}` : ''}${started !== undefined ? `, started = ${started}` : ''} })`);
+/** util.now_ms() in the fixture: when an agent terminal starts (opts.started). */
+const nowMs = (fx) => fx.lua("return require('agent.util').now_ms()");
+
 // ---------------------------------------------------------------------------
 // Claude-style raw client (masked frames, exact captured bytes)
 // ---------------------------------------------------------------------------
@@ -315,13 +330,17 @@ function decodeMention(p) {
   return p;
 }
 
-async function opencodeClient(root, directory) {
+/**
+ * `editor`: OpenCode's editor context, which outlives a connection (pass the `editor` of the last
+ * client to connect again as the same OpenCode).
+ */
+async function opencodeClient(root, directory, editor = { key: undefined, current: undefined, selectionSent: false }) {
   const conn = discoverEditorConnection(root, directory);
   if (!conn) return null;
   const socket = conn.authToken
     ? new WebSocket(conn.url, { headers: { 'x-claude-code-ide-authorization': conn.authToken } })
     : new WebSocket(conn.url);
-  const c = { socket, selections: [], mentions: [], dropped: [], server: undefined, conn };
+  const c = { socket, selections: [], mentions: [], dropped: [], server: undefined, conn, editor };
   let requestID = 0;
   const pending = new Map();
   const send = (payload) => socket.readyState === 1 && socket.send(JSON.stringify({ jsonrpc: '2.0', ...payload }));
@@ -330,7 +349,17 @@ async function opencodeClient(root, directory) {
     const message = JSON.parse(data.toString('utf8'));
     if (message.method === 'selection_changed') {
       const s = decodeSelection(message.params);
-      if (s) return c.selections.push({ ...s, source: 'websocket' });
+      if (s) {
+        // The editor context keeps the latest selection: one whose file, ranges and text did not
+        // change is ignored, and a new one is attached to the next prompt only (selectionSent).
+        const k = JSON.stringify([s.filePath, s.ranges]);
+        if (k !== editor.key) {
+          editor.key = k;
+          editor.current = s;
+          editor.selectionSent = false;
+        }
+        return c.selections.push({ ...s, source: 'websocket' });
+      }
     }
     if (message.method === 'at_mentioned') {
       const m = decodeMention(message.params);
@@ -355,6 +384,12 @@ async function opencodeClient(root, directory) {
   pending.set(requestID, 'initialize');
   send({ id: requestID, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'opencode', version: '0.0.0' } } });
   c.close = () => new Promise((r) => (socket.readyState === 3 ? r() : (socket.once('close', r), socket.close())));
+  /** A prompt is submitted: the selection it gets attached, if any (once). */
+  c.submit = () => {
+    if (!editor.current || editor.selectionSent) return undefined;
+    editor.selectionSent = true;
+    return editor.current;
+  };
   return c;
 }
 
@@ -452,14 +487,29 @@ describe('Claude Code 2.1.283 replay', () => {
     assert.equal(clients[0].pid, 4242);
     assert.equal(clients[0].name, 'claude-code');
 
-    // at_mentioned (:AgentSend; 0-based: Claude adds 1 and inserts @b.txt#L2-3), for the terminal
-    // job whose pid is Claude's; never for another pid.
+    // :AgentSend: selection_changed as tracking sends it (0-based: Claude attaches "lines 1 to 2"),
+    // for the terminal job whose pid is Claude's; the cursor only stands for the file ("In b.txt");
+    // never for another pid, and never at_mentioned.
+    const b = fx.workspace + '/b.txt';
     assert.equal(await fx.lua('return P.client_state({ kind = "claude", pid = 4242 })'), 'ready');
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, 2, 3, { kind = 'claude', pid = 4242 })`), true);
-    assert.deepEqual((await c.note('at_mentioned')).params, { filePath: fx.workspace + '/b.txt', lineStart: 1, lineEnd: 2 });
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, nil, nil, { kind = 'claude', pid = 4242 })`), true);
-    assert.deepEqual((await c.note('at_mentioned')).params, { filePath: fx.workspace + '/b.txt' });
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, 1, 1, { kind = 'claude', pid = 1 })`), false);
+    assert.equal(await sendContext(fx, b, { range: [1, 2], pid: 4242 }), true);
+    assert.deepEqual((await c.note('selection_changed')).params, {
+      text: 'one\ntwo',
+      filePath: b,
+      fileUrl: 'file://' + b,
+      selection: { start: { line: 0, character: 0 }, end: { line: 1, character: 3 }, isEmpty: false },
+    });
+    assert.equal(await sendContext(fx, b, { cursor: [3, 2], pid: 4242 }), true);
+    assert.deepEqual((await c.note('selection_changed')).params, {
+      text: '',
+      filePath: b,
+      fileUrl: 'file://' + b,
+      selection: { start: { line: 2, character: 2 }, end: { line: 2, character: 2 }, isEmpty: true },
+    });
+    assert.equal(await sendContext(fx, b, { range: [1, 1], pid: 1 }), false);
+    await sleep(100);
+    assert.equal(c.pending('selection_changed').length, 0);
+    assert.equal(c.pending('at_mentioned').length, 0);
 
     // Turn start: closeAllDiffTabs {} (errors ignored by Claude).
     c.raw(CLAUDE_TOOL_CALL(2, 'closeAllDiffTabs', {}));
@@ -520,6 +570,48 @@ describe('Claude Code 2.1.283 replay', () => {
     await c.closeWith(1000);
     assert.equal(c.closeCode, 1000);
     await until(async () => (await fx.lua('return P.status().clients')) === 0, 3000, 'session closed');
+  });
+
+  test(':AgentSend is not replayed to a Claude that connects later; an unchanged one is sent again', async () => {
+    const a = fx.workspace + '/a.txt';
+    const b = fx.workspace + '/b.txt';
+    const want = {
+      text: 'two',
+      filePath: b,
+      fileUrl: 'file://' + b,
+      selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 }, isEmpty: false },
+    };
+    const sent = (x) => x.pending('selection_changed').filter((m) => m.params.text === 'two');
+    const next = (x) => x.wait((m) => m.method === 'selection_changed' && m.params.text === 'two', 3000, 'the sent selection');
+    // The tracked selection (selection.track = true in the fixture) marks a client ready.
+    await fx.lua(`P.on_selection({ path = ${luaStr(a)}, bufnr = 1, text = 'hello',
+      start = { line = 0, character = 0 }, finish = { line = 0, character = 5 }, is_empty = false, mode = 'v' })`);
+    const tracked = (x) => x.wait((m) => m.method === 'selection_changed' && m.params.text === 'hello', 3000, 'the tracked selection');
+    assert.equal(await sendContext(fx, b, { range: [2, 2], pid: 5151 }), false, 'no client yet');
+    const other = await claudeSession(fx, 6161);
+    const c = await claudeSession(fx, 5151);
+    await tracked(c);
+    await tracked(other);
+    await sleep(300);
+    assert.equal(sent(c).length, 0, 'not replayed once ready');
+    // Sent now (init.lua sends it again once the client is ready). Claude clears its selection when
+    // a prompt is submitted, so the same :AgentSend after a prompt is sent again, as is.
+    assert.equal(await sendContext(fx, b, { range: [2, 2], pid: 5151 }), true);
+    assert.deepEqual((await next(c)).params, want);
+    assert.equal(await sendContext(fx, b, { range: [2, 2], pid: 5151 }), true);
+    assert.deepEqual((await next(c)).params, want);
+    await sleep(150);
+    assert.equal(sent(c).length, 0, 'once each');
+    assert.equal(sent(other).length, 0, 'not to another Claude');
+    // A reconnect: the tracked selection only.
+    await c.closeWith(1000);
+    const again = await claudeSession(fx, 5151);
+    await tracked(again);
+    await sleep(300);
+    assert.equal(sent(again).length, 0, 'not replayed after a reconnect');
+    await again.closeWith(1000);
+    await other.closeWith(1000);
+    await until(async () => (await fx.lua('return P.status().clients')) === 0, 3000, 'sessions closed');
   });
 
   test('reconnect after a server restart: same port, same token, ids restart at 0', async () => {
@@ -633,18 +725,97 @@ describe('OpenCode client', () => {
     assert.equal(r2.text, 'error: boom');
     assert.deepEqual([r2.selection.start, r2.selection.end], [{ line: 5, character: 1 }, { line: 5, character: 12 }]);
 
-    // at_mentioned (:AgentSend): 1-based lines; a whole file as 1..N (OpenCode requires both).
-    // OpenCode reports no pid: the only OpenCode client is the terminal's.
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, 2, 3, { kind = 'opencode', pid = 4242 })`), true);
-    await until(() => c.mentions.length === 1, 2000, 'mention');
-    assert.deepEqual(c.mentions[0], { filePath: fx.workspace + '/b.txt', lineStart: 2, lineEnd: 3 });
-    assert.equal(await fx.lua(`return P.at_mention(${luaStr(fx.workspace + '/b.txt')}, nil, nil, { kind = 'opencode' })`), true);
-    await until(() => c.mentions.length === 2, 2000, 'mention 2');
-    assert.deepEqual(c.mentions[1], { filePath: fx.workspace + '/b.txt', lineStart: 1, lineEnd: 3 });
+    // :AgentSend: selection_changed, +1 too, right after a copy with other text (OpenCode ignores a
+    // selection that did not change). OpenCode reports no pid: the only OpenCode is the agent's.
+    const b = fx.workspace + '/b.txt';
+    assert.equal(await sendContext(fx, b, { range: [1, 2], kind: 'opencode', pid: 4242 }), true);
+    await until(() => c.selections.length === 5, 2000, 'the copy, then the sent selection');
+    assert.equal(c.selections[3].ranges[0].text, '', 'the copy');
+    assert.equal(c.selections[4].filePath, b);
+    const r3 = c.selections[4].ranges[0];
+    assert.equal(r3.text, 'one\ntwo');
+    assert.deepEqual([r3.selection.start, r3.selection.end], [{ line: 1, character: 1 }, { line: 2, character: 4 }]);
+    assert.deepEqual(c.selections[3].ranges[0].selection, r3.selection);
+    // A prompt attaches it, once. The same :AgentSend then reaches the next prompt too.
+    assert.equal(c.submit()?.ranges[0].text, 'one\ntwo');
+    assert.equal(c.submit(), undefined, 'attached to one prompt only');
+    assert.equal(await sendContext(fx, b, { range: [1, 2], kind: 'opencode', pid: 4242 }), true);
+    await until(() => c.selections.length === 7, 2000, 'the copy, then the selection');
+    assert.deepEqual(c.selections.slice(5).map((x) => x.ranges[0].text), ['', 'one\ntwo']);
+    assert.deepEqual(c.selections[6].ranges[0].selection, r3.selection);
+    assert.equal(c.submit()?.ranges[0].text, 'one\ntwo');
+    // A second OpenCode: which one runs in the agent terminal cannot be told, so neither gets it.
+    const c2 = await opencodeClient(fx.lockDir, fx.workspace);
+    await until(() => c2.selections.length, 2000, 'the tracked selection, second OpenCode');
+    assert.equal(await fx.lua('return P.client_state({ kind = "opencode", pid = 4242 })'), 'ambiguous');
+    const n = c.selections.length;
+    const n2 = c2.selections.length;
+    assert.equal(await sendContext(fx, b, { cursor: [3, 0], kind: 'opencode', pid: 4242 }), false);
     await sleep(200);
-    assert.equal(c.mentions.length, 2);
-    assert.deepEqual(c.dropped, [], 'every notification decoded under OpenCode\'s schemas');
+    assert.equal(c.selections.length, n);
+    assert.equal(c2.selections.length, n2);
+    await c2.close();
+    await until(async () => (await fx.lua('return P.client_state({ kind = "opencode", pid = 4242 })')) === 'ready', 2000, 'one OpenCode again');
+    assert.equal(await sendContext(fx, b, { cursor: [3, 0], kind: 'opencode', pid: 4242 }), true);
+    await until(() => c.selections.length === n + 2, 2000, 'the copy, then the cursor');
+    assert.equal(c.selections[n].ranges[0].text, ' ', 'the copy of an empty selection: a space');
+    const r = c.selections[n + 1].ranges[0];
+    assert.equal(r.text, '');
+    assert.deepEqual([r.selection.start, r.selection.end], [{ line: 3, character: 1 }, { line: 3, character: 1 }]);
+    await sleep(200);
+    assert.equal(c.selections.length, n + 2);
+    for (const x of [c, c2]) {
+      assert.deepEqual(x.mentions, [], 'at_mentioned is never sent');
+      assert.deepEqual(x.dropped, [], 'every notification decoded under OpenCode\'s schemas');
+    }
     await c.close();
+  });
+
+  test('keeps its selection across reconnects: the same :AgentSend reaches the next prompt all the same', async () => {
+    const b = fx.workspace + '/b.txt';
+    await fx.lua('P._state.last_selection = nil');
+    const c = await opencodeClient(fx.lockDir, fx.workspace);
+    await until(async () => (await fx.lua('return P.client_state({ kind = "opencode", pid = 4242 })')) === 'ready', 3000, 'ready');
+    assert.equal(await sendContext(fx, b, { range: [2, 3], kind: 'opencode', pid: 4242 }), true);
+    await until(() => c.selections.length === 2, 2000, 'the copy, then the selection');
+    assert.equal(c.submit()?.ranges[0].text, 'two\nthree');
+    // OpenCode reconnects (a new connection, the same editor context): the selection it kept is the
+    // one sent again, which it would ignore without the copy.
+    await c.close();
+    const again = await opencodeClient(fx.lockDir, fx.workspace, c.editor);
+    await until(async () => (await fx.lua('return P.client_state({ kind = "opencode", pid = 4242 })')) === 'ready', 3000, 'ready again');
+    assert.equal(await sendContext(fx, b, { range: [2, 3], kind: 'opencode', pid: 4242 }), true);
+    await until(() => again.selections.length >= 2, 2000, 'the copy, then the selection');
+    assert.deepEqual(again.selections.slice(-2).map((x) => x.ranges[0].text), ['', 'two\nthree']);
+    assert.equal(again.submit()?.ranges[0].text, 'two\nthree', 'attached to the next prompt');
+    assert.deepEqual(again.dropped, []);
+    await again.close();
+    await until(async () => (await fx.lua('return P.client_state({ kind = "opencode" })')) === null, 2000, 'disconnected');
+  });
+
+  test('an OpenCode connected before the agent terminal started (opts.started) is not the agent\'s', async () => {
+    const b = fx.workspace + '/b.txt';
+    const other = await opencodeClient(fx.lockDir, fx.workspace);
+    await until(async () => (await fx.lua('return P.client_state({ kind = "opencode" })')) === 'ready', 3000, 'ready');
+    await sleep(20);
+    const started = await nowMs(fx); // the agent's terminal starts
+    const state = (o) => fx.lua(`return P.client_state({ kind = "opencode", pid = 4242${o ? `, started = ${o}` : ''} })`);
+    assert.equal(await state(started), null, 'the only OpenCode connected before: not the agent\'s');
+    assert.equal(await sendContext(fx, b, { range: [1, 1], kind: 'opencode', pid: 4242, started }), false);
+    assert.equal(await state(), 'ready', 'without started: the only OpenCode');
+    // The agent's OpenCode connects.
+    const c = await opencodeClient(fx.lockDir, fx.workspace);
+    await until(async () => (await state(started)) === 'ready', 3000, 'the agent\'s OpenCode ready');
+    assert.equal(await state(), 'ambiguous', 'without started: two OpenCodes');
+    const n = other.selections.length;
+    assert.equal(await sendContext(fx, b, { range: [1, 1], kind: 'opencode', pid: 4242, started }), true);
+    await until(() => c.selections.length >= 2, 2000, 'the copy, then the selection');
+    assert.equal(c.submit()?.ranges[0].text, 'one');
+    await sleep(200);
+    assert.equal(other.selections.length, n, 'not to the older OpenCode');
+    await other.close();
+    await c.close();
+    await until(async () => (await fx.lua('return P.client_state({ kind = "opencode" })')) === null, 2000, 'disconnected');
   });
 
   test('prefers the newest lock after before_spawn() touches it', async () => {

@@ -13,6 +13,11 @@
 --   {"cmd":"select","from":A,"to":B}       linewise visual selection of lines A..B (stays active)
 --   {"cmd":"escape"}                       leave visual mode
 --   {"cmd":"flush"}                        run the selection debounce now
+--   {"cmd":"send","from":A,"to":B,"pid":N} :AgentSend: selection.capture() of lines A..B (else of the
+--                                          cursor), then send_context (for the terminal job pid N)
+--   {"cmd":"forget","pid":N}               the agent terminal with job pid N ended (clear_context)
+--   {"cmd":"track","on":bool}              set config.selection.track
+--   {"cmd":"onselection"}                  a selection event forwarded by agent.nvim (on_selection)
 --   {"cmd":"stop"}                         provider stop()
 --   {"cmd":"quit"}
 local root, work = arg[1], arg[2]
@@ -162,6 +167,26 @@ end
 
 function handlers.flush()
   selection.flush()
+  return { ok = true }
+end
+
+function handlers.send(c)
+  local s = assert(selection.capture(c.from and { line1 = c.from, line2 = c.to } or nil))
+  return { ok = true, sent = P.send_context(s, c.pid and { pid = c.pid } or nil) }
+end
+
+function handlers.forget(c)
+  P.clear_context(c.pid)
+  return { ok = true }
+end
+
+function handlers.track(c)
+  config.setup({ diff = { open_in = 'tab' }, selection = { debounce_ms = 20, track = c.on } })
+  return { ok = true }
+end
+
+function handlers.onselection()
+  P.on_selection(nil)
   return { ok = true }
 end
 
