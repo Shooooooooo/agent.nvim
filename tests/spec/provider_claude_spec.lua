@@ -20,9 +20,11 @@ local CLAUDE_TOOLS_LIST = '{"method":"tools/list","jsonrpc":"2.0","id":1}'
 local OPENCODE_INITIALIZE = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25",'
   .. '"capabilities":{},"clientInfo":{"name":"opencode","version":"0.0.0"}}}'
 
+-- Selection tracking on (the automatic mode): the provider's selection_changed is tested here.
 local function setup_config(extra)
   config.setup(vim.tbl_deep_extend('force', {
     providers = { claude = { lock_dir = LOCK_DIR, notify_delay_ms = 80 } },
+    selection = { track = true },
   }, extra or {}))
 end
 
@@ -663,7 +665,7 @@ describe('selection_changed', function()
     local selection = require('agent.editor.selection')
     selection._reset()
     config.setup({ providers = { claude = { lock_dir = LOCK_DIR, notify_delay_ms = 80 } },
-      selection = { debounce_ms = 20 } })
+      selection = { debounce_ms = 20, track = true } })
     selection.start()
     local unsubscribe = selection.subscribe(P.on_selection) -- as agent.nvim forwards it
     local c = track(claude_client())
@@ -734,6 +736,103 @@ describe('selection_changed', function()
     assert.truthy(require('agent.net.common').valid_utf8(f.payload), 'a text frame must be valid UTF-8')
     assert.eq('caf\239\191\189 cr\239\191\189me \195\169 \239\191\189', n.params.text)
     assert.eq('/p/caf\239\191\189.txt', n.params.filePath)
+  end)
+end)
+
+describe('at_mentioned (:AgentSend)', function()
+  local file
+  before_each(function()
+    assert.truthy(P.start())
+    file = TMP .. '/mention.txt'
+    write(file, 'one\ntwo\nthree\nfour\n')
+  end)
+
+  it('sends 0-based lines to Claude, and omits them for a whole file', function()
+    local c = track(claude_client())
+    wait_ready(1)
+    c.clear()
+    assert.truthy(P.at_mention(file, 5, 10))
+    assert.same({ filePath = file, lineStart = 4, lineEnd = 9 }, c.take('at_mentioned').params)
+    assert.truthy(P.at_mention(file, 3))
+    assert.same({ filePath = file, lineStart = 2, lineEnd = 2 }, c.take('at_mentioned').params)
+    assert.truthy(P.at_mention(file))
+    local whole = c.take('at_mentioned')
+    assert.same({ filePath = file }, whole.params)
+    assert.falsy(vim.json.encode(whole.params):find('null', 1, true), 'no null keys')
+  end)
+
+  it('sends 1-based lines to OpenCode (line_offset), and a whole file as 1..N', function()
+    local c = track(opencode_client())
+    wait_ready(1)
+    c.clear()
+    assert.truthy(P.at_mention(file, 5, 10, { kind = 'opencode' }))
+    assert.same({ filePath = file, lineStart = 5, lineEnd = 10 }, c.take('at_mentioned').params)
+    assert.truthy(P.at_mention(file, nil, nil, { kind = 'opencode' }))
+    assert.same({ filePath = file, lineStart = 1, lineEnd = 4 }, c.take('at_mentioned').params)
+    setup_config({ agents = { opencode = { line_offset = 0 } } })
+    assert.truthy(P.at_mention(file, 2, 3))
+    assert.same({ filePath = file, lineStart = 1, lineEnd = 2 }, c.take('at_mentioned').params)
+  end)
+
+  it('goes only to the client in the agent terminal, matched by pid; an OpenCode when it is the only one', function()
+    local a = track(claude_client({ pid = 1111 }))
+    local b = track(claude_client({ pid = 2222 }))
+    local o = track(opencode_client())
+    wait_ready(3)
+    for _, x in ipairs({ a, b, o }) do
+      x.clear()
+    end
+    assert.truthy(P.at_mention(file, 2, 2, { kind = 'claude', pid = 2222 }))
+    assert.same({ filePath = file, lineStart = 1, lineEnd = 1 }, b.take('at_mentioned').params)
+    -- The terminal job may be an ancestor of Claude (a wrapper script, a shell).
+    local c = track(claude_client({ pid = vim.fn.getpid() }))
+    wait_ready(4)
+    c.clear()
+    assert.truthy(P.at_mention(file, 1, 1, { kind = 'claude', pid = vim.api.nvim_get_proc(vim.fn.getpid()).ppid }))
+    c.take('at_mentioned')
+    -- Never to a Claude that reported another pid.
+    assert.falsy(P.at_mention(file, 2, 3, { kind = 'claude', pid = 3333 }))
+    -- OpenCode reports no pid: the only OpenCode client is the agent's.
+    assert.truthy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
+    assert.same({ filePath = file, lineStart = 2, lineEnd = 2 }, o.take('at_mentioned').params)
+    -- Two of them: which one runs in the terminal is unknown, so neither gets it.
+    local o2 = track(opencode_client())
+    wait_ready(5)
+    o2.clear()
+    assert.falsy(P.at_mention(file, 2, 2, { kind = 'opencode', pid = 4242 }))
+    vim.wait(100)
+    assert.eq(0, #a.notifications('at_mentioned'))
+    assert.eq(0, #o.notifications('at_mentioned'))
+    assert.eq(0, #o2.notifications('at_mentioned'))
+    assert.eq('ambiguous', P.client_state({ kind = 'opencode', pid = 4242 }))
+    assert.eq('ready', P.client_state({ kind = 'opencode' }))
+  end)
+
+  it('client_state: connecting until the post-connect delay is over, then ready; nil for another agent', function()
+    assert.eq(nil, P.client_state({ kind = 'claude', pid = 1111 }))
+    local c = track(connect())
+    assert.eq(101, c.status, c.head)
+    wait_for(function()
+      return P.client_state({ kind = 'claude', pid = 1111 }) == 'connecting'
+    end, 2000, 'connecting (no initialize yet)')
+    c.raw(CLAUDE_INITIALIZE)
+    c.response(0)
+    c.raw(CLAUDE_INITIALIZED)
+    c.raw('{"jsonrpc":"2.0","method":"ide_connected","params":{"pid":1111}}')
+    vim.wait(20)
+    assert.eq('connecting', P.client_state({ kind = 'claude', pid = 1111 }))
+    assert.falsy(P.at_mention(file, 1, 1, { kind = 'claude', pid = 1111 }), 'not ready: not sent')
+    wait_ready(1)
+    assert.eq('ready', P.client_state({ kind = 'claude', pid = 1111 }))
+    assert.eq(nil, P.client_state({ kind = 'claude', pid = 2222 }))
+    assert.eq(nil, P.client_state({ kind = 'opencode', pid = 1111 }))
+  end)
+
+  it('returns false with no ready client, and when stopped', function()
+    assert.falsy(P.at_mention(file, 1, 2))
+    P.stop()
+    assert.falsy(P.at_mention(file, 1, 2))
+    assert.eq(nil, P.client_state())
   end)
 end)
 

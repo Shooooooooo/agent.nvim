@@ -16,9 +16,11 @@ Lua, and send you notifications.
 - The agent runs in a split (below your file by default), a float, a tab or the current window.
   `:AgentToggle` toggles the terminal; the agent keeps running while hidden. One agent runs at a
   time: starting another one asks before replacing it.
-- The agent automatically sees your current file and visual selection. In a terminal or another
-  buffer that is not a file, it sees that buffer instead (`nvim://buffer/<n>/<label>`, e.g. "In
-  fish" in Claude), and reads it through the [$NVIM controller](#the-nvim-controller).
+- `:AgentSend` puts your selection, or the whole file, in the agent's prompt as an @-mention and
+  switches to the agent, starting it if needed. A terminal or another buffer that is not a file
+  goes as `nvim://buffer/<n>/<label>`, which the agent reads through the
+  [$NVIM controller](#the-nvim-controller). Optionally (`selection.track = true`) the agent
+  follows your current file and selection by itself.
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
@@ -26,12 +28,12 @@ Lua, and send you notifications.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
   a token.
 
-| Agent | Sees file and selection | Diffs in Neovim | Diagnostics |
+| Agent | `:AgentSend` of lines 1-2 | Diffs in Neovim | Diagnostics |
 |---|---|---|---|
-| Claude Code (`claude`) | yes | yes, editable | yes |
-| OpenCode (`opencode`) | yes | no | through `exec_lua` |
-| GitHub Copilot CLI (`copilot`) | selection (file through a tool) | yes, read-only | yes |
-| Gemini CLI (`gemini`) | yes | yes, editable | through `exec_lua` |
+| Claude Code (`claude`) | `@a.txt#L1-2` | yes, editable | yes |
+| OpenCode (`opencode`) | `a.txt#1-2` | no | through `exec_lua` |
+| GitHub Copilot CLI (`copilot`) | `@a.txt:1-2` | yes, read-only | yes |
+| Gemini CLI (`gemini`) | `@a.txt (lines 1-2)`, typed | yes, editable | through `exec_lua` |
 
 ## Requirements
 
@@ -52,6 +54,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   opts = {},
   keys = {
     { '<leader>ac', '<cmd>AgentToggle<cr>', mode = { 'n', 'x' }, desc = 'Toggle agent' },
+    { '<leader>as', '<cmd>AgentSend<cr>', mode = { 'n', 'x' }, desc = 'Send to agent' },
   },
 }
 ```
@@ -61,10 +64,10 @@ With `vim.pack` (Neovim 0.12+):
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
 vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
+vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send to agent' })
 ```
 
-The mapping works in Visual mode too, so that a selection reaches the agent when `<leader>ac`
-opens it (pressing `<Esc>` first would drop the selection).
+`<leader>as` sends the selection in Visual mode, the whole file in Normal mode.
 
 ## Quick start
 
@@ -73,9 +76,8 @@ opens it (pressing `<Esc>` first would drop the selection).
 2. Run `:AgentToggle` to open Claude in a split below your file (or `:AgentToggle opencode`,
    `:AgentToggle copilot`, `:AgentToggle gemini`). The agent connects to Neovim by itself; Gemini
    needs a [one-time setup](#gemini-cli) first.
-3. Select lines and switch to the agent straight from Visual mode: `<C-w>j` (then `i` to type), or
-   the `<leader>ac` mapping when the agent is hidden. The agent keeps the selection. Leaving Visual
-   mode in the file (`<Esc>`) drops it, and the agent then sees just the current file.
+3. Select lines and press `<leader>as` (`:AgentSend`). The agent's prompt gets a mention of them
+   (`@a.txt#L3-5` in Claude) and the cursor moves to the agent's prompt: type your request.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
    `<leader>aa`, reject with `<leader>ad` or by closing the tab. The tab shows the agent's
    terminal too, so you can read its prompt or answer there instead. Claude Code's default mode
@@ -90,6 +92,7 @@ opens it (pressing `<Esc>` first would drop the selection).
 |---|---|
 | `:AgentToggle [name]` | Toggle the agent terminal, starting the agent if needed. |
 | `:AgentOpen [name]` | Open (start or show) the agent terminal and focus it. |
+| `:[range]AgentSend [name]` | Mention the selection (or the range, else the whole file) in the agent's prompt and switch to the agent, starting it if needed. |
 | `:AgentClose` | Hide the terminal (in a diff tab, only there). The agent keeps running. |
 | `:AgentStop` | Stop the agent, and its IDE server unless `auto_start` is on. |
 | `:AgentDiffAccept` | Accept the current diff. |
@@ -117,6 +120,9 @@ require('agent').setup({
     layout = 'split',       -- 'split' | 'current' | 'float' | 'tab' | 'none'
     split_side = 'below',   -- 'below' | 'right' | 'left' | 'above' (splits, diff tabs)
     split_size = 0.4,       -- fraction of the editor height (or width)
+  },
+  selection = {
+    track = false,          -- true: the agent follows your current file and selection by itself
   },
   diff = {
     show_terminal = true,   -- show the agent terminal in diff tabs too; false: the diff only
@@ -151,13 +157,14 @@ Full reference: `:help agent-config`.
 ### OpenCode
 
 - Connects through the Claude IDE server's lock file in `~/.claude/ide`; nothing to set up.
-- It only receives the file and selection: its edits are written directly, so there are no diffs
-  in Neovim. The $NVIM controller works.
+- It only receives mentions (and, with `selection.track`, the file and selection): its edits are
+  written directly, so there are no diffs in Neovim. The $NVIM controller works.
 
 ### GitHub Copilot CLI
 
-- It attaches only a non-empty selection to your prompt, not the current file. Its model can
-  still read the current file and cursor with its `ide-get_selection` tool.
+- With `selection.track = true` it attaches only a non-empty selection to your prompt, not the
+  current file. Its model can read the current file and selection with its `ide-get_selection`
+  tool either way.
 - **Security:** `providers.copilot.trust_workspace = true` makes Copilot skip its folder-trust
   prompt and load the repository's own MCP servers, settings and hooks without asking. Leave it
   `false` (the default), or pass a `function(folder)` that returns `true` only for folders you
@@ -176,10 +183,10 @@ When it launches an agent, agent.nvim registers a stdio MCP server through which
 drive the Neovim it runs in, without editing your agent config files. Its tools: `read_buffer`,
 `open_file`, `execute_command`, `eval`, `exec_lua`, `notify`. It leaves the current file,
 selection and diagnostics to the IDE connection, edits to the agent's own tools, and anything else
-to `exec_lua`. `read_buffer` also reads the terminals and other buffers that the IDE connection
-reports as `nvim://buffer/<n>/<label>`. For an agent you start yourself in a Neovim terminal,
-`:AgentMcpConfig` prints the config to add, and `auto_start = true` keeps the IDE servers running
-so that it can use the IDE connection too (`:help agent-nvim-mcp-manual`).
+to `exec_lua`. `read_buffer` also reads the terminals and other buffers that `:AgentSend` and the
+IDE connection name `nvim://buffer/<n>/<label>`. For an agent you start yourself in a Neovim
+terminal, `:AgentMcpConfig` prints the config to add, and `auto_start = true` keeps the IDE
+servers running so that it can use the IDE connection too (`:help agent-nvim-mcp-manual`).
 
 **Security:** the controller can do anything your Neovim can. `exec_lua`, `execute_command` and
 `eval` run arbitrary Lua, Ex commands and Vimscript as you, shell commands included. Claude,

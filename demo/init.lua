@@ -225,6 +225,7 @@ require('agent').setup({
     },
   },
 })
--- The README's recommended mapping (Normal and Visual mode).
+-- The README's recommended mappings (Normal and Visual mode).
 vim.g.mapleader = ' '
 vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
+vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send to agent' })

@@ -12,6 +12,9 @@
 --- 'opencode' gets 1-based lines (config.agents.opencode.line_offset) and immediate notifications;
 --- everything else is treated as Claude Code: 0-based lines, notifications only after a short
 --- delay once the connection is complete (Claude registers its handlers late, §6.3).
+---
+--- Notifications: selection_changed (config.selection.track) and at_mentioned (:AgentSend, sent to
+--- the client of the agent terminal only, matched by its pid; see M.at_mention()).
 local uv = vim.uv or vim.loop
 local config = require('agent.config')
 local util = require('agent.util')
@@ -363,6 +366,139 @@ local function ready_sessions()
     end
   end
   return out
+end
+
+-- ---------------------------------------------------------------------------
+-- At-mentions (at_mentioned, :AgentSend)
+-- ---------------------------------------------------------------------------
+
+---@param path string
+---@return integer
+local function file_line_count(path)
+  local b = context.find_buf(path, { loaded = true })
+  if b then
+    return vim.api.nvim_buf_line_count(b)
+  end
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if ok and type(lines) == 'table' then
+    return #lines
+  end
+  return 1
+end
+
+---Is `pid` the client's own pid or one of its close ancestors (a wrapper script or shell)?
+---@param session agent.mcp.Session
+---@param pid integer
+---@return boolean
+local function pid_matches(session, pid)
+  local cur = session.data.pid
+  for _ = 1, 4 do
+    if not cur or cur <= 1 then
+      return false
+    end
+    if cur == pid then
+      return true
+    end
+    local ok, info = pcall(vim.api.nvim_get_proc, cur)
+    cur = ok and type(info) == 'table' and info.ppid or nil
+  end
+  return false
+end
+
+---@class agent.claude.MentionOpts
+---@field kind? 'claude'|'opencode'  only clients of this kind
+---@field pid? integer  only the client in the terminal with this job pid: the Claude whose pid (or a
+---  close ancestor of it) is this pid, else the only client of the kind that reports no pid (OpenCode)
+
+---Open, initialized sessions that may be the agent `o` describes (ready or not), and the sessions
+---of the kind that report no pid when none matched.
+---@param o agent.claude.MentionOpts|nil
+---@return agent.mcp.Session[] targets, agent.mcp.Session[] pidless
+local function mention_targets(o)
+  o = o or {}
+  local out, pidless = {}, {}
+  for _, s in ipairs(state.srv and state.srv:sessions() or {}) do
+    if not s.closed and s.initialized and (not o.kind or s.data.kind == o.kind) then
+      if not o.pid or pid_matches(s, o.pid) then
+        out[#out + 1] = s
+      elseif not s.data.pid then
+        pidless[#pidless + 1] = s
+      end
+    end
+  end
+  -- An OpenCode reports no pid: it is the agent's client when it is the only such client.
+  if #out == 0 and #pidless == 1 then
+    out[1] = pidless[1]
+  end
+  return out, pidless
+end
+
+---The state of the IDE client of the agent `o` describes: 'ready' (a mention is delivered now),
+---'connecting' (a client that may be it has connected, and is not ready yet), 'ambiguous' (several
+---clients of the kind report no pid, so which one it is cannot be told), or nil.
+---@param o agent.claude.MentionOpts|nil
+---@return 'ready'|'connecting'|'ambiguous'|nil
+function M.client_state(o)
+  if not state.srv then
+    return nil
+  end
+  local connecting = false
+  local targets, pidless = mention_targets(o)
+  for _, s in ipairs(targets) do
+    if s.data.ready then
+      return 'ready'
+    end
+    connecting = true
+  end
+  if #targets == 0 and #pidless > 1 then
+    return 'ambiguous'
+  end
+  for _, s in ipairs(state.srv:sessions()) do
+    if not s.closed and not s.initialized then
+      connecting = true -- its kind and pid are not known yet
+    end
+  end
+  return connecting and 'connecting' or nil
+end
+
+---Insert an @-mention of a file, or of lines of it, into the prompt of the agent `o` describes
+---(at_mentioned). Lines are 1-based and inclusive; nil means the whole file. Claude gets 0-based
+---lines (none for a whole file) and inserts `@<path>#L<a>-<b>`; OpenCode gets 1-based ones (1..N
+---for a whole file, agents.opencode.line_offset) and inserts `<path>#<a>-<b>`.
+---@param path string  a file: Claude makes it relative to its cwd, which turns an nvim://buffer/ id
+---  into `@nvim:/buffer/...` (agent.nvim types those ids instead)
+---@param start_line integer|nil
+---@param end_line integer|nil
+---@param o agent.claude.MentionOpts|nil
+---@return boolean sent  false when no ready client matches
+function M.at_mention(path, start_line, end_line, o)
+  if not state.srv or type(path) ~= 'string' or path == '' then
+    return false
+  end
+  local abs = abs_path(path)
+  local s0, e0
+  if start_line then
+    s0 = math.max(0, math.floor(start_line) - 1)
+    e0 = math.max(s0, math.floor(end_line or start_line) - 1)
+  end
+  local sent = false
+  for _, s in ipairs(mention_targets(o)) do
+    if s.data.ready then
+      local p = { filePath = abs }
+      if s.data.kind == 'opencode' then
+        -- OpenCode requires both lines and reads them as 1-based.
+        local off = opencode_offset()
+        local first, last = s0 or 0, e0 or (math.max(1, file_line_count(abs)) - 1)
+        p.lineStart, p.lineEnd = first + off, last + off
+      elseif s0 then
+        p.lineStart, p.lineEnd = s0, e0 -- (both omitted, never null, for a whole file)
+      end
+      if s:notify('at_mentioned', p) then
+        sent = true
+      end
+    end
+  end
+  return sent
 end
 
 ---The selection to send to a client that just became ready.

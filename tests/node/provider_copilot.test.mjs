@@ -471,6 +471,27 @@ describe('copilot provider (replaying Copilot CLI 1.0.88)', () => {
       assert.equal('current' in e.data.params, false);
     });
 
+    test('add_file_reference (:AgentSend): whole file (null selection and selectedText) and a line range', async () => {
+      writeFileSync(path.join(ws(), 'r.txt'), 'l1\nl2\nl3\nl4\nl5\n');
+      assert.deepEqual(await fx.cmd('mention', { path: path.join(ws(), 'r.txt') }), { sent: true, state: 'ready' });
+      const whole = await cli.nextEvent(stream);
+      assert.deepEqual(whole.data, {
+        jsonrpc: '2.0',
+        method: 'add_file_reference',
+        params: { filePath: path.join(ws(), 'r.txt'), fileUrl: 'file://' + path.join(ws(), 'r.txt'), selection: null, selectedText: null },
+      });
+      assert.deepEqual(await fx.cmd('mention', { path: path.join(ws(), 'r.txt'), start: 3, end: 5, pid: 5000 }), { sent: true, state: 'ready' });
+      const range = await cli.nextEvent(stream);
+      assert.deepEqual(range.data.params, {
+        filePath: path.join(ws(), 'r.txt'),
+        fileUrl: 'file://' + path.join(ws(), 'r.txt'),
+        selection: { start: { line: 2, character: 0 }, end: { line: 4, character: 2 } },
+        selectedText: 'l3\nl4\nl5',
+      });
+      // Another pid: another CLI, not this one.
+      assert.deepEqual(await fx.cmd('mention', { path: path.join(ws(), 'r.txt'), pid: 1 }), { sent: false, state: null });
+    });
+
     test('update_session_name (as sent after the first prompt)', async () => {
       const r = await cli.callTool('update_session_name', { name: '@a.txt:3-5 PLEASE_EDIT now' }, 1);
       assert.equal(r.status, 200);

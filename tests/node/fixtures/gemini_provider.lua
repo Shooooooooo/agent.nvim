@@ -24,7 +24,7 @@ vim.notify = function(msg)
 end
 
 local config = require('agent.config')
-config.setup({ diff = { open_in = 'tab' }, selection = { debounce_ms = 20 } })
+config.setup({ diff = { open_in = 'tab' }, selection = { debounce_ms = 20, track = true } })
 local P = require('agent.providers.gemini')
 local diff = require('agent.editor.diff')
 local selection = require('agent.editor.selection')

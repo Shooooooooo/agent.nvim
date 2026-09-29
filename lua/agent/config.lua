@@ -42,8 +42,10 @@ M.defaults = {
   },
 
   selection = {
-    ---@type boolean  Push selection changes to connected agents
-    track = true,
+    ---@type boolean  Push the current file and selection to connected agents as they change (the
+    --- automatic mode). Off by default: :AgentSend sends them explicitly. The tools an agent calls
+    --- itself (Claude's getCurrentSelection, Copilot's get_selection) answer either way
+    track = false,
     ---@type integer
     debounce_ms = 100,
   },

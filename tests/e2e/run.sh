@@ -9,12 +9,13 @@
 #
 # For each agent, a headless Neovim runs tests/e2e/driver.lua: it calls require('agent').setup()
 # and require('agent').open(<agent>) (a split on the right, or see E2E_LAYOUT and E2E_SPLIT_SIDE
-# below), waits for the agent's IDE connection, selects lines in the editor and checks that the
-# agent got the selection, and submits a prompt. A scripted model turn then (a) calls the $NVIM
-# controller (exec_lua and open_file) and (b) proposes an edit that goes through the IDE diff,
-# which the driver accepts in Neovim. The driver checks the effects in Neovim and on disk, stops
-# the agent (its provider stops with it and removes its lock/discovery file), tears down, and
-# checks that no lock/discovery files or temp dirs are left.
+# below), waits for the agent's IDE connection, selects lines in the editor and sends them with
+# :AgentSend (a Visual-mode <cmd>AgentSend<cr> mapping), checks that the focus went to the agent
+# and that its prompt shows the mention, and submits a prompt. A scripted model turn then (a)
+# calls the $NVIM controller (exec_lua and open_file) and (b) proposes an edit that goes through
+# the IDE diff, which the driver accepts in Neovim. The driver checks the effects in Neovim and
+# on disk, stops the agent (its provider stops with it and removes its lock/discovery file),
+# tears down, and checks that no lock/discovery files or temp dirs are left.
 # This script then checks that no process started by the run is still alive.
 #
 # Isolation: nothing touches your real agent configs or accounts.
@@ -37,7 +38,9 @@
 # E2E_TIMEOUT (seconds per agent, default 300), E2E_LAYOUT (terminal.layout: split, the default,
 # or current), E2E_SPLIT_SIDE (terminal.split_side: right, the baseline here, or below, the
 # plugin's default; the diff tab page must show the agent on that side: on the right as wide as
-# its split, or at the bottom, full width and as tall).
+# its split, or at the bottom, full width and as tall), E2E_TRACK=1 (selection.track = true, the
+# automatic mode: also checks that a selection reaches the agent by itself, is kept when the focus
+# goes straight from Visual mode to the agent, and is dropped by <Esc>).
 # Exit status: 0 when every selected agent passed or was skipped.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
@@ -91,6 +94,7 @@ for kind in "$@"; do
     XDG_STATE_HOME="$ROOT/xdg/state" XDG_CACHE_HOME="$ROOT/xdg/cache" \
     E2E_CLAUDE_BIN="$CLAUDE_BIN" E2E_COPILOT_BIN="$COPILOT_BIN" E2E_OPENCODE_BIN="$OPENCODE_BIN" \
     E2E_GEMINI_JS="$GEMINI_JS" E2E_LAYOUT="${E2E_LAYOUT:-}" E2E_SPLIT_SIDE="${E2E_SPLIT_SIDE:-}" \
+    E2E_TRACK="${E2E_TRACK:-}" \
     perl -e 'alarm shift; exec @ARGV' "${E2E_TIMEOUT:-300}" \
     nvim --headless -u NONE -i NONE -n -l "$REPO/tests/e2e/driver.lua" "$kind" "$ROOT"
   rc=$?

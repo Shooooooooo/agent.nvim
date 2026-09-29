@@ -10,7 +10,8 @@
 --- * Tools: get_vscode_info, get_selection, open_diff (held open until the user decides),
 ---   close_diff, get_diagnostics, update_session_name.
 --- * Notifications, sent on the session's GET stream: selection_changed (to every session, and
----   replayed when a stream opens).
+---   replayed when a stream opens; config.selection.track) and add_file_reference (:AgentSend, to
+---   the CLI in the agent terminal only).
 --- * The proposed side of a diff is read-only: after SAVED the CLI writes its own content.
 local uv = vim.uv or vim.loop
 local util = require('agent.util')
@@ -989,6 +990,118 @@ function M.status()
     sessions = sessions,
     pending_diffs = pending,
   }
+end
+
+-- ---------------------------------------------------------------------------
+-- At-mentions (add_file_reference, :AgentSend)
+-- ---------------------------------------------------------------------------
+
+---@param s agent.mcp.Session
+---@param pid integer
+---@return boolean
+local function pid_matches(s, pid)
+  return s.info.copilot_pid == pid or s.info.copilot_parent_pid == pid
+end
+
+---Sessions that may be the CLI `opts.pid` names (its pid or its parent's, e.g. the terminal job's
+---pid): with no pid, every session, most recently active first.
+---@param st table
+---@param opts { pid?: integer }|nil
+---@return agent.mcp.Session[]
+local function mention_targets(st, opts)
+  local pid = opts and opts.pid
+  local out = {}
+  for _, s in ipairs(st.binding:sessions()) do
+    if s.initialized and (not pid or pid_matches(s, pid)) then
+      out[#out + 1] = s
+    end
+  end
+  table.sort(out, function(a, b)
+    return (a.info.last_activity or 0) > (b.info.last_activity or 0)
+  end)
+  return out
+end
+
+---The state of the CLI `opts.pid` names: 'ready' (connected with its event stream open, so a
+---mention is delivered now), 'connecting' (connected, no stream yet), or nil.
+---@param opts { pid?: integer }|nil
+---@return 'ready'|'connecting'|nil
+function M.client_state(opts)
+  local st = state
+  if not st then
+    return nil
+  end
+  local list = mention_targets(st, opts)
+  for _, s in ipairs(list) do
+    if st.binding:has_stream(s) then
+      return 'ready'
+    end
+  end
+  return #list > 0 and 'connecting' or nil
+end
+
+---@param path string
+---@param first integer 1-based
+---@param last integer 1-based
+---@return string[]|nil lines  from the loaded buffer, else from disk
+local function range_lines(path, first, last)
+  local b = context().find_buf(path, { loaded = true })
+  if b then
+    return api.nvim_buf_get_lines(b, first - 1, last, false)
+  end
+  local ok, lines = pcall(vim.fn.readfile, path, '', last)
+  if ok and type(lines) == 'table' then
+    return vim.list_slice(lines, first, last)
+  end
+  return nil
+end
+
+---Insert an `@<file>[:L1-L2]` reference into the prompt of one CLI (add_file_reference): the one
+---`opts.pid` names, else the most recently active one.
+---@param path string  a file (the CLI makes it relative to its cwd)
+---@param start_line integer|nil  1-based, inclusive; nil = the whole file
+---@param end_line integer|nil    1-based, inclusive; default start_line
+---@param opts { pid?: integer }|nil
+---@return boolean sent
+function M.at_mention(path, start_line, end_line, opts)
+  local st = state
+  if not st or type(path) ~= 'string' or path == '' then
+    return false
+  end
+  local session
+  for _, s in ipairs(mention_targets(st, opts)) do
+    if st.binding:has_stream(s) then
+      session = s
+      break
+    end
+  end
+  if not session then
+    return false
+  end
+  local abs = util.abspath(path)
+  -- selection and selectedText must be present, as null for a whole file.
+  local params = { filePath = abs, fileUrl = util.file_url(abs), selection = vim.NIL, selectedText = vim.NIL }
+  if start_line then
+    end_line = end_line or start_line
+    if end_line < start_line then
+      start_line, end_line = end_line, start_line
+    end
+    start_line = math.max(start_line, 1)
+    end_line = math.max(end_line, start_line)
+    local lines = range_lines(abs, start_line, end_line)
+    local last_col = 0
+    if lines and #lines > 0 then
+      local last = lines[#lines]
+      local ok, n = pcall(vim.str_utfindex, last, 'utf-16', #last, false)
+      last_col = ok and n or #last
+      params.selectedText = table.concat(lines, '\n')
+    end
+    params.selection = {
+      start = { line = start_line - 1, character = 0 },
+      ['end'] = { line = end_line - 1, character = last_col },
+    }
+  end
+  return session:notify('add_file_reference', params)
 end
 
 ---Push a selection to every connected CLI (selection_changed). Called by agent.nvim for each

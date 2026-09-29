@@ -1032,4 +1032,67 @@ describe('notifications', function()
     a:close()
     assert.truthy(ok, err)
   end)
+
+  it('at_mention sends add_file_reference to the CLI in the agent terminal (its pid or its parent\'s)', function()
+    local file = util.realpath(ws) .. '/a.txt'
+    write(file, 'one\ntwo\nthrée\nfour\n')
+    local old, sent_old = streaming_session({ last_activity = 1, copilot_pid = 11, copilot_parent_pid = 10 })
+    local new, sent_new = streaming_session({ last_activity = 2, copilot_pid = 21, copilot_parent_pid = 20 })
+
+    -- Without a pid: the most recently active CLI. A whole file: null selection and selectedText.
+    assert.truthy(P.at_mention(file))
+    assert.eq(0, #sent_old)
+    assert.eq(1, #sent_new)
+    local whole = vim.json.decode(vim.json.encode(sent_new[1]))
+    assert.eq('add_file_reference', whole.method)
+    assert.same({ filePath = file, fileUrl = vim.uri_from_fname(file), selection = vim.NIL, selectedText = vim.NIL },
+      whole.params)
+    -- Both keys must be present as JSON null.
+    assert.matches('"selection":null', vim.json.encode(sent_new[1].params))
+    assert.matches('"selectedText":null', vim.json.encode(sent_new[1].params))
+
+    -- A line range (file not loaded: read from disk), for the terminal job's pid (the CLI's parent).
+    assert.truthy(P.at_mention(file, 2, 3, { pid = 10 }))
+    assert.eq(1, #sent_old)
+    assert.same({
+      filePath = file, fileUrl = vim.uri_from_fname(file),
+      selection = { start = { line = 1, character = 0 }, ['end'] = { line = 2, character = 5 } },
+      selectedText = 'two\nthrée',
+    }, sent_old[1].params)
+
+    -- Loaded buffer: UTF-16 end column; a reversed range is normalized; the CLI's own pid.
+    vim.cmd('edit ' .. vim.fn.fnameescape(file))
+    assert.truthy(P.at_mention(file, 3, 2, { pid = 21 }))
+    local p = sent_new[#sent_new].params
+    assert.same({ start = { line = 1, character = 0 }, ['end'] = { line = 2, character = 5 } }, p.selection)
+    assert.eq('two\nthrée', p.selectedText)
+
+    -- Never to another CLI.
+    assert.falsy(P.at_mention(file, 1, 1, { pid = 999 }))
+    assert.eq(1, #sent_old)
+    assert.eq(2, #sent_new)
+    old:close()
+    new:close()
+  end)
+
+  it('client_state: ready with an event stream, connecting without one, else nil', function()
+    assert.eq(nil, P.client_state({ pid = 10 }))
+    local s = open_session({ copilot_pid = 11, copilot_parent_pid = 10 })
+    s.initialized = true
+    P._state().binding._sessions[s.id] = s
+    assert.eq('connecting', P.client_state({ pid = 10 }))
+    assert.eq(nil, P.client_state({ pid = 20 }))
+    assert.falsy(P.at_mention(ws .. '/a.txt', 1, 1, { pid = 10 }), 'no stream: not delivered')
+    P._state().binding._streams[s] = { res = { closed = false } }
+    assert.eq('ready', P.client_state({ pid = 10 }))
+    assert.eq('ready', P.client_state())
+    s:close()
+  end)
+
+  it('at_mention returns false without a connected CLI or when stopped', function()
+    assert.falsy(P.at_mention(ws .. '/a.txt'))
+    P.stop()
+    assert.falsy(P.at_mention(ws .. '/a.txt'))
+    assert.eq(nil, P.client_state())
+  end)
 end)

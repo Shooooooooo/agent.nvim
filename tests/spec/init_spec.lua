@@ -1,6 +1,6 @@
 -- Integration of agent.nvim: plugin/agent.lua, setup(), the launcher wiring for every agent kind
--- (with the fake agent CLI), one agent at a time (replace, stop, provider lifecycle), selection
--- forwarding, teardown.
+-- (with the fake agent CLI), one agent at a time (replace, stop, provider lifecycle), :AgentSend
+-- (mentions through the providers and their typed fallback), selection forwarding, teardown.
 local util = require('agent.util')
 local uv = vim.uv
 
@@ -55,6 +55,20 @@ local function wait_ready(name)
   wait_for(function()
     return vim.fn.filereadable(out_of(name) .. '.env') == 1
   end, 5000, name .. ' fake agent ready')
+end
+
+local function stdin_of(name)
+  return read(out_of(name) .. '.stdin') or ''
+end
+
+local function wait_stdin(name, text)
+  wait_for(function()
+    return stdin_of(name):find(text, 1, true) ~= nil
+  end, 5000, ('%s stdin to contain %q'):format(name, text))
+end
+
+local function pasted(text)
+  return '\27[200~' .. text .. '\27[201~'
 end
 
 local function files_in(dir)
@@ -137,10 +151,13 @@ describe('plugin/agent.lua', function()
     vim.cmd.runtime('plugin/agent.lua')
     assert.eq(1, vim.g.loaded_agent_nvim)
     local cmds = vim.api.nvim_get_commands({})
-    for _, c in ipairs({ 'AgentToggle', 'AgentOpen', 'AgentClose', 'AgentStop', 'AgentDiffAccept',
+    for _, c in ipairs({ 'AgentToggle', 'AgentOpen', 'AgentSend', 'AgentClose', 'AgentStop', 'AgentDiffAccept',
       'AgentDiffReject', 'AgentStatus', 'AgentMcpConfig', 'AgentGeminiSetup' }) do
       assert.truthy(cmds[c], ':' .. c .. ' exists')
     end
+    assert.eq('?', cmds.AgentSend.nargs)
+    assert.truthy(cmds.AgentSend.range ~= nil and cmds.AgentSend.range ~= '', ':AgentSend takes a range')
+    assert.falsy(cmds.AgentAdd, ':AgentAdd stays removed (:AgentSend without a range sends the whole file)')
     assert.falsy(cmds.Agent, ':Agent no longer exists (:AgentToggle replaced it)')
     assert.falsy(cmds.AgentStop.bang)
     assert.eq('0', cmds.AgentStop.nargs)
@@ -168,6 +185,7 @@ describe('plugin/agent.lua', function()
     assert.eq('claude', require('agent.config').get().default_agent)
     assert.same({ 'claude', 'copilot' }, vim.fn.getcompletion('AgentToggle c', 'cmdline'))
     assert.same({ 'gemini' }, vim.fn.getcompletion('AgentOpen g', 'cmdline'))
+    assert.same({ 'copilot' }, vim.fn.getcompletion('AgentSend co', 'cmdline'))
     -- :AgentClose and :AgentStop take no name, so they complete nothing.
     assert.same({}, vim.fn.getcompletion('AgentClose ', 'cmdline'))
     assert.same({}, vim.fn.getcompletion('AgentStop c', 'cmdline'))
@@ -379,7 +397,8 @@ describe('agent', function()
   end)
 
   describe('selection', function()
-    it('is forwarded to every running provider, and not when tracking is off', function()
+    it('with selection.track = true it is forwarded to every running provider, and not once it is off', function()
+      setup({ selection = { track = true } })
       local got = { claude = {}, copilot = {}, gemini = {} }
       local originals = {}
       for name in pairs(got) do
@@ -407,6 +426,73 @@ describe('agent', function()
         vim.api.nvim_win_set_cursor(0, { 1, 0 })
         require('agent.editor.selection').flush()
         assert.eq(n, #got.claude, 'no forwarding with selection.track = false')
+      end)
+      for name, fn in pairs(originals) do
+        require('agent.providers.' .. name).on_selection = fn
+      end
+      assert.truthy(ok, err)
+    end)
+  end)
+
+  describe('selection.track = false (the default)', function()
+    it('pushes nothing, and the selection is still tracked for the tools the agent calls', function()
+      assert.eq(false, require('agent.config').defaults.selection.track)
+      assert.eq(false, require('agent.config').get().selection.track)
+      local got, originals = { claude = 0, copilot = 0, gemini = 0 }, {}
+      for name in pairs(got) do
+        local P = require('agent.providers.' .. name)
+        originals[name] = P.on_selection
+        P.on_selection = function()
+          got[name] = got[name] + 1
+        end
+      end
+      local sel = require('agent.editor.selection')
+      local ok, err = pcall(function()
+        setup({ auto_start = true, selection = { debounce_ms = 20 } })
+        agent.open('claude', { focus = false })
+        wait_ready('claude')
+        assert.truthy(sel.is_running(), 'selection tracking runs while a provider runs')
+        edit_in_main(ws .. '/a.txt')
+        vim.api.nvim_win_set_cursor(0, { 2, 0 })
+        vim.api.nvim_feedkeys(vim.keycode('Vj'), 'x!', false)
+        sel.flush()
+        -- Straight from Visual mode to the agent: the selection is kept, and pushed to nobody.
+        vim.api.nvim_feedkeys(vim.keycode('<C-w>j'), 'x', false)
+        assert.eq(terminal.bufnr(), vim.api.nvim_get_current_buf())
+        vim.wait(sel.DEMOTE_MS + 150)
+        sel.flush()
+        assert.same({ claude = 0, copilot = 0, gemini = 0 }, got, 'nothing forwarded')
+
+        -- The tools the agent calls read it: Claude's getLatestSelection and getCurrentSelection,
+        -- Copilot's get_selection; Gemini's context carries nothing.
+        local function call(srv, tool, session)
+          local box = {}
+          srv:handle(session, { jsonrpc = '2.0', id = 1, method = 'tools/call',
+            params = { name = tool, arguments = vim.empty_dict() } }, {
+            on_response = function(r)
+              box.r = r
+            end,
+            on_done = function() end,
+          })
+          return vim.json.decode(box.r.result.content[1].text)
+        end
+        local C = require('agent.providers.claude')
+        local cs = C._state.srv:open_session({ send = function()
+          return true
+        end, info = {} })
+        for _, tool in ipairs({ 'getLatestSelection', 'getCurrentSelection' }) do
+          local r = call(C._state.srv, tool, cs)
+          assert.eq('two\nthree', r.text, tool)
+          assert.eq(ws .. '/a.txt', r.filePath, tool)
+        end
+        local K = require('agent.providers.copilot')
+        local ks = K._state().srv:open_session({ send = function()
+          return true
+        end, info = {} })
+        local r = call(K._state().srv, 'get_selection', ks)
+        assert.eq('two\nthree', r.text)
+        assert.eq(true, r.current)
+        assert.same({ workspaceState = { openFiles = {} } }, require('agent.providers.gemini').build_context())
       end)
       for name, fn in pairs(originals) do
         require('agent.providers.' .. name).on_selection = fn
@@ -444,6 +530,510 @@ describe('agent', function()
         assert.truthy(ok, err)
       end)
     end
+  end)
+
+  describe(':AgentSend', function()
+    local saved, stubs
+    local orig_confirm = vim.fn.confirm
+
+    ---Replace provider functions for one test (restored in after_each).
+    local function stub(provider, fns)
+      local P = require('agent.providers.' .. provider)
+      for k, fn in pairs(fns) do
+        stubs[#stubs + 1] = { P, k, P[k] }
+        P[k] = fn
+      end
+    end
+
+    ---The number of the notes (vim.notify) whose message contains `text`.
+    local function noted(text)
+      return #vim.tbl_filter(function(n)
+        return n.msg:find(text, 1, true) ~= nil
+      end, notes)
+    end
+
+    local function focused_agent()
+      return terminal.bufnr() ~= nil and vim.api.nvim_get_current_buf() == terminal.bufnr()
+    end
+
+    before_each(function()
+      saved = { wait = agent.MENTION_WAIT_MS, grace = agent.STARTUP_GRACE_MS, poll = agent.MENTION_POLL_MS }
+      stubs = {}
+      -- The fake agents never connect: no wait unless a test says otherwise. (Claude, OpenCode and
+      -- Copilot get a typed reference only with their IDE server disabled.)
+      agent.MENTION_WAIT_MS, agent.STARTUP_GRACE_MS, agent.MENTION_POLL_MS = 0, 0, 20
+      write(ws .. '/my file.txt', 'x\n')
+    end)
+
+    after_each(function()
+      for i = #stubs, 1, -1 do
+        local s = stubs[i]
+        s[1][s[2]] = s[3]
+      end
+      vim.fn.confirm = orig_confirm
+      pcall(vim.keymap.del, 'x', '<F9>')
+      agent.MENTION_WAIT_MS, agent.STARTUP_GRACE_MS, agent.MENTION_POLL_MS = saved.wait, saved.grace, saved.poll
+    end)
+
+    it('types a reference in the agent\'s own syntax when its IDE server is disabled', function()
+      setup({ providers = { claude = { enabled = false }, copilot = { enabled = false } } })
+      local ref = agent._reference
+      local cases = {
+        claude = { { 2, 4, '@a.txt#L2-4' }, { 3, 3, '@a.txt#L3' }, { nil, nil, '@a.txt' } },
+        opencode = { { 2, 4, '@a.txt#2-4' }, { 3, 3, '@a.txt#3' }, { nil, nil, '@a.txt' } },
+        copilot = { { 2, 4, '@a.txt:2-4' }, { 3, 3, '@a.txt:3' }, { nil, nil, '@a.txt' } },
+        gemini = { { 2, 4, '@a.txt (lines 2-4)' }, { 3, 3, '@a.txt (line 3)' }, { nil, nil, '@a.txt' } },
+      }
+      for kind, list in pairs(cases) do
+        for _, c in ipairs(list) do
+          assert.eq(c[3], ref(kind, ws .. '/a.txt', c[1], c[2], ws), kind)
+        end
+        -- A buffer that is not a file: its id, for every agent.
+        assert.eq('nvim://buffer/7/sh lines 1-2', ref(kind, 'nvim://buffer/7/sh', 1, 2, ws))
+        assert.eq('nvim://buffer/7/sh line 4', ref(kind, 'nvim://buffer/7/sh', 4, 4, ws))
+        assert.eq('nvim://buffer/7/sh', ref(kind, 'nvim://buffer/7/sh', nil, nil, ws))
+      end
+      -- Gemini escapes spaces; paths outside the agent's cwd stay absolute.
+      assert.eq('@my\\ file.txt', ref('gemini', ws .. '/my file.txt', nil, nil, ws))
+      assert.eq('@' .. tmp .. '/out.txt:1-2', ref('copilot', tmp .. '/out.txt', 1, 2, ws))
+
+      -- Through :AgentSend, for each kind (IDE servers disabled; Gemini's fake never connects).
+      local sent = { claude = '@a.txt#L2-3', opencode = '@a.txt#2-3', copilot = '@a.txt:2-3',
+        gemini = '@a.txt (lines 2-3)' }
+      for _, kind in ipairs(KINDS) do
+        edit_in_main(ws .. '/a.txt')
+        vim.cmd('2,3AgentSend ' .. kind)
+        wait_ready(kind)
+        wait_stdin(kind, pasted(sent[kind] .. ' '))
+        local pid = terminal.info().pid
+        agent.stop()
+        wait_exited(pid)
+      end
+    end)
+
+    it('goes through the provider when the agent\'s IDE client is connected, targeted by its terminal pid', function()
+      for _, provider in ipairs({ 'claude', 'copilot' }) do
+        local calls = {}
+        stub(provider, {
+          client_state = function()
+            return 'ready'
+          end,
+          at_mention = function(path, l1, l2, o)
+            calls[#calls + 1] = { path = path, l1 = l1, l2 = l2, o = o }
+            return true
+          end,
+        })
+        agent.open(provider, { focus = false, confirm = false })
+        wait_ready(provider)
+        edit_in_main(ws .. '/a.txt')
+        local ok, how = agent.send({ line1 = 3, line2 = 2 })
+        assert.truthy(ok, how)
+        assert.eq('sent', how)
+        assert.eq(1, #calls)
+        assert.same({ ws .. '/a.txt', 2, 3, terminal.info().pid, provider },
+          { calls[1].path, calls[1].l1, calls[1].l2, calls[1].o.pid, calls[1].o.kind })
+        -- The whole file: no lines.
+        edit_in_main(ws .. '/a.txt')
+        assert.same({ true, 'sent' }, { agent.send() })
+        assert.same({ ws .. '/a.txt' }, { calls[2].path, calls[2].l1, calls[2].l2 })
+        vim.wait(100)
+        assert.eq('', stdin_of(provider), 'nothing typed')
+      end
+    end)
+
+    it('focuses the agent terminal: shows it when hidden, starts default_agent when none runs', function()
+      setup({ default_agent = 'copilot', providers = { copilot = { enabled = false } } })
+      local a = edit_in_main(ws .. '/a.txt')
+      local main = vim.api.nvim_get_current_win()
+      assert.falsy(terminal.is_running())
+      vim.cmd('AgentSend')
+      assert.eq('copilot', terminal.name(), 'default_agent was started')
+      assert.truthy(focused_agent())
+      wait_stdin('copilot', pasted('@a.txt '))
+      -- Hidden: shown again and focused.
+      vim.cmd('AgentClose')
+      assert.falsy(terminal.is_visible())
+      assert.eq(main, vim.api.nvim_get_current_win())
+      vim.cmd('2AgentSend')
+      assert.truthy(terminal.is_visible())
+      assert.truthy(focused_agent())
+      wait_stdin('copilot', pasted('@a.txt:2 '))
+      -- Visible but not focused: focused.
+      vim.api.nvim_set_current_win(main)
+      assert.eq(a, vim.api.nvim_get_current_buf())
+      vim.cmd('AgentSend')
+      assert.truthy(focused_agent())
+      assert.eq(1, #vim.fn.win_findbuf(terminal.bufnr()), 'one window')
+      assert.same({}, notes)
+    end)
+
+    it('from Visual mode through a <cmd> mapping sends the selected lines and ends Visual mode', function()
+      setup({ providers = { claude = { enabled = false } } })
+      vim.keymap.set('x', '<F9>', '<cmd>AgentSend<cr>')
+      agent.open('claude', { focus = false })
+      wait_ready('claude')
+      local a = edit_in_main(ws .. '/a.txt')
+      vim.api.nvim_win_set_cursor(0, { 2, 0 })
+      vim.api.nvim_feedkeys(vim.keycode('Vj'), 'x!', false)
+      assert.eq('V', vim.api.nvim_get_mode().mode)
+      vim.api.nvim_feedkeys(vim.keycode('<F9>'), 'x', false)
+      wait_stdin('claude', pasted('@a.txt#L2-3 '))
+      assert.eq('nt', vim.api.nvim_get_mode().mode, 'Visual mode ended (Normal mode in the agent terminal)')
+      assert.truthy(focused_agent())
+      -- The '< and '> marks are the selection's, for gv.
+      assert.same({ 2, 3 }, { vim.api.nvim_buf_get_mark(a, '<')[1], vim.api.nvim_buf_get_mark(a, '>')[1] })
+      -- Charwise, upwards: the lines it spans.
+      edit_in_main(ws .. '/a.txt')
+      vim.api.nvim_win_set_cursor(0, { 4, 1 })
+      vim.api.nvim_feedkeys(vim.keycode('vkk'), 'x!', false)
+      vim.api.nvim_feedkeys(vim.keycode('<F9>'), 'x', false)
+      wait_stdin('claude', pasted('@a.txt#L2-4 '))
+      -- :'<,'>AgentSend (typed from Visual mode) sends the range.
+      edit_in_main(ws .. '/a.txt')
+      vim.api.nvim_win_set_cursor(0, { 1, 0 })
+      vim.api.nvim_feedkeys(vim.keycode('Vj<Esc>'), 'x', false)
+      vim.cmd("'<,'>AgentSend")
+      wait_stdin('claude', pasted('@a.txt#L1-2 '))
+      -- Without a selection or a range: the whole file.
+      edit_in_main(ws .. '/a.txt')
+      vim.cmd('AgentSend')
+      wait_stdin('claude', pasted('@a.txt '))
+      assert.same({}, notes)
+    end)
+
+    it('a buffer that is not a file is typed as its nvim://buffer/ id, also for Claude and Copilot', function()
+      for _, name in ipairs({ 'claude', 'copilot' }) do
+        local calls = 0
+        stub(name, {
+          client_state = function()
+            return 'ready'
+          end,
+          at_mention = function()
+            calls = calls + 1
+            return true
+          end,
+        })
+        agent.open(name, { focus = false, confirm = false })
+        wait_ready(name)
+        edit_in_main(ws .. '/a.txt')
+        vim.cmd('enew')
+        local job = vim.fn.jobstart({ 'sh', '-c', 'echo one; echo two; exec sleep 30' }, { term = true })
+        local shell = vim.api.nvim_get_current_buf()
+        local shell_win = vim.api.nvim_get_current_win()
+        local id = ('nvim://buffer/%d/sh'):format(shell)
+        vim.cmd('1,2AgentSend')
+        wait_stdin(name, pasted(id .. ' lines 1-2 '))
+        assert.truthy(focused_agent())
+        vim.api.nvim_set_current_win(shell_win)
+        vim.cmd('AgentSend')
+        wait_stdin(name, pasted(id .. ' '))
+        -- A scratch buffer.
+        vim.api.nvim_set_current_win(shell_win)
+        vim.cmd('enew')
+        local scratch = vim.api.nvim_get_current_buf()
+        vim.api.nvim_buf_set_lines(scratch, 0, -1, false, { 'a', 'b', 'c' })
+        vim.cmd('3AgentSend')
+        wait_stdin(name, pasted(('nvim://buffer/%d/scratch line 3 '):format(scratch)))
+        assert.eq(0, calls, 'never through the provider')
+        vim.fn.jobstop(job)
+        vim.api.nvim_set_current_win(shell_win)
+        vim.cmd('silent! bwipeout! ' .. shell .. ' ' .. scratch)
+        local pid = terminal.info().pid
+        agent.stop()
+        wait_exited(pid)
+      end
+    end)
+
+    it('refuses the agent terminal, a diff buffer, a floating window and an ignored buffer', function()
+      local function refused(text)
+        local n = noted(text)
+        local win = vim.api.nvim_get_current_win()
+        local running = terminal.is_running() and terminal.info().pid
+        vim.cmd('AgentSend')
+        vim.cmd('1AgentSend')
+        assert.eq(n + 2, noted(text), text)
+        assert.eq(vim.log.levels.WARN, notes[#notes].level)
+        assert.eq(win, vim.api.nvim_get_current_win(), 'the focus stays')
+        assert.eq(running, terminal.is_running() and terminal.info().pid, 'no agent started or stopped')
+      end
+      -- No agent yet: nothing is started.
+      edit_in_main(ws .. '/a.txt')
+      local diff = require('agent.editor.diff')
+      assert.truthy(diff.open({ id = 'd1', path = ws .. '/a.txt', new_contents = 'new\n', on_resolve = function() end }))
+      assert.truthy(vim.startswith(vim.api.nvim_buf_get_name(0), 'agent-diff://'))
+      refused('nothing to send from a diff buffer')
+      diff.reject_current()
+      edit_in_main(ws .. '/a.txt')
+      local float = vim.api.nvim_open_win(vim.api.nvim_get_current_buf(), true,
+        { relative = 'editor', row = 1, col = 1, width = 30, height = 3 })
+      refused('nothing to send from a floating window')
+      vim.api.nvim_win_close(float, true)
+      vim.cmd('enew')
+      vim.b.agent_ignore = true
+      refused('nothing to send: agent.nvim ignores this buffer')
+      assert.falsy(terminal.is_running())
+      -- From the agent's own terminal.
+      agent.open('claude')
+      wait_ready('claude')
+      assert.truthy(focused_agent())
+      refused('nothing to send from the agent terminal')
+      vim.wait(100)
+      assert.eq('', stdin_of('claude'))
+      -- The Lua API returns the reason.
+      assert.same({ false, 'nothing to send from the agent terminal: run :AgentSend in a file or another buffer' },
+        { agent.send() })
+    end)
+
+    it('another agent than the running one goes through the replace question', function()
+      setup({ providers = { claude = { enabled = false }, copilot = { enabled = false } } })
+      agent.open('claude', { focus = false })
+      wait_ready('claude')
+      local pid = terminal.info().pid
+      local asked = 0
+      vim.fn.confirm = function()
+        asked = asked + 1
+        return 2
+      end
+      edit_in_main(ws .. '/a.txt')
+      vim.cmd('AgentSend copilot')
+      assert.eq(1, asked)
+      assert.eq(pid, terminal.info().pid, 'declined: claude runs on')
+      assert.same({}, notes, 'no message for a declined replace')
+      vim.wait(100)
+      assert.eq('', stdin_of('claude'), 'nothing sent')
+      vim.fn.confirm = function()
+        asked = asked + 1
+        return 1
+      end
+      vim.cmd('2AgentSend copilot')
+      assert.eq(2, asked)
+      assert.eq('copilot', terminal.name())
+      assert.truthy(focused_agent())
+      wait_stdin('copilot', pasted('@a.txt:2 '))
+      -- Without a name: the running agent, never asked.
+      edit_in_main(ws .. '/a.txt')
+      vim.cmd('3AgentSend')
+      assert.eq(2, asked)
+      wait_stdin('copilot', pasted('@a.txt:3 '))
+      wait_exited(pid)
+    end)
+
+    it('right after a start it waits for the IDE connection, then goes through the provider', function()
+      agent.MENTION_WAIT_MS = 5000
+      local connected, calls = false, {}
+      stub('claude', {
+        client_state = function()
+          return connected and 'ready' or nil
+        end,
+        at_mention = function(path, l1, l2, o)
+          if not connected then
+            return false
+          end
+          calls[#calls + 1] = { path = path, l1 = l1, l2 = l2, o = o }
+          return true
+        end,
+      })
+      edit_in_main(ws .. '/a.txt')
+      local ok, how = agent.send({ line1 = 2, line2 = 3 })
+      assert.truthy(ok, how)
+      assert.eq('pending', how)
+      assert.eq('claude', terminal.name())
+      assert.truthy(focused_agent())
+      wait_ready('claude')
+      vim.wait(300)
+      assert.eq(0, #calls)
+      connected = true
+      wait_for(function()
+        return #calls == 1
+      end, 2000, 'the mention once connected')
+      assert.same({ ws .. '/a.txt', 2, 3, terminal.info().pid }, { calls[1].path, calls[1].l1, calls[1].l2, calls[1].o.pid })
+      vim.wait(200)
+      assert.eq('', stdin_of('claude'), 'nothing typed')
+    end)
+
+    it('Claude, OpenCode, Copilot: nothing is typed until they connect, however long it takes', function()
+      -- (A dialog, such as Claude's folder trust question, holds the screen until it is answered.)
+      agent.MENTION_WAIT_MS = 300
+      local waiting = ' has not connected to Neovim yet: the mention will be inserted when it connects'
+      for _, name in ipairs({ 'claude', 'opencode', 'copilot' }) do
+        local provider = name == 'copilot' and 'copilot' or 'claude'
+        local connected, calls = false, {}
+        stub(provider, {
+          client_state = function()
+            return connected and 'ready' or nil
+          end,
+          at_mention = function(path, l1, l2)
+            if not connected then
+              return false
+            end
+            calls[#calls + 1] = { path, l1, l2 }
+            return true
+          end,
+        })
+        notes = {}
+        edit_in_main(ws .. '/a.txt')
+        assert.same({ true, 'pending' }, { agent.send({ name = name, line1 = 1, line2 = 2, confirm = false }) })
+        assert.eq(0, noted(waiting), 'no notice before the wait is over')
+        wait_ready(name)
+        edit_in_main(ws .. '/a.txt')
+        assert.same({ true, 'pending' }, { agent.send({ line1 = 3 }) })
+        -- A buffer that is not a file (always typed) waits for the connection too.
+        vim.cmd('enew')
+        local scratch = vim.api.nvim_get_current_buf()
+        vim.api.nvim_buf_set_lines(scratch, 0, -1, false, { 'x' })
+        assert.same({ true, 'pending' }, { agent.send() })
+        vim.wait(900)
+        assert.eq('', stdin_of(name), name .. ': nothing typed while it is not connected')
+        assert.eq(0, #calls)
+        assert.eq(1, noted(name .. waiting), name .. ': one notice, once the wait is over')
+        assert.eq(1, #notes)
+        connected = true
+        wait_for(function()
+          return #calls == 2
+        end, 2000, name .. ': both mentions once connected')
+        assert.same({ { ws .. '/a.txt', 1, 2 }, { ws .. '/a.txt', 3, 3 } }, calls)
+        wait_stdin(name, pasted(('nvim://buffer/%d/scratch '):format(scratch)))
+        vim.wait(100)
+        assert.eq(pasted(('nvim://buffer/%d/scratch '):format(scratch)), stdin_of(name), name .. ': only the id typed')
+        assert.eq(1, #notes)
+        vim.cmd('silent! bwipeout! ' .. scratch)
+        local pid = terminal.info().pid
+        agent.stop()
+        wait_exited(pid)
+      end
+    end)
+
+    it('two OpenCodes that cannot be told apart: typed once the wait is over, with no notice', function()
+      agent.MENTION_WAIT_MS = 400
+      stub('claude', {
+        client_state = function()
+          return 'ambiguous'
+        end,
+        at_mention = function()
+          return false
+        end,
+      })
+      edit_in_main(ws .. '/a.txt')
+      local t0 = uv.now()
+      assert.same({ true, 'pending' }, { agent.send({ line1 = 1, line2 = 2, name = 'opencode', confirm = false }) })
+      wait_stdin('opencode', pasted('@a.txt#1-2 '))
+      assert.truthy(uv.now() - t0 >= 300, 'typed once the wait was over')
+      assert.same({}, notes)
+    end)
+
+    it('Claude, OpenCode, Copilot with their IDE server disabled: typed after the startup grace', function()
+      setup({ providers = { claude = { enabled = false } } })
+      agent.STARTUP_GRACE_MS = 600
+      edit_in_main(ws .. '/a.txt')
+      local t0 = uv.now()
+      local ok, how = agent.send({ line1 = 1, line2 = 2, name = 'opencode' })
+      assert.truthy(ok, how)
+      assert.eq('pending', how)
+      wait_stdin('opencode', pasted('@a.txt#1-2 '))
+      assert.truthy(uv.now() - t0 >= 500, 'typed once the grace was over')
+      assert.same({}, notes)
+    end)
+
+    it('a mention pending for an agent that is replaced is dropped', function()
+      agent.MENTION_WAIT_MS = 1000
+      stub('claude', {
+        client_state = function()
+          return nil
+        end,
+      })
+      local calls = 0
+      stub('copilot', {
+        client_state = function()
+          return 'ready'
+        end,
+        at_mention = function()
+          calls = calls + 1
+          return true
+        end,
+      })
+      edit_in_main(ws .. '/a.txt')
+      assert.same({ true, 'pending' }, { agent.send() })
+      wait_ready('claude')
+      local pid = terminal.info().pid
+      assert.truthy(agent.open('copilot', { confirm = false, focus = false }))
+      wait_exited(pid)
+      wait_ready('copilot')
+      vim.wait(1200) -- past the wait: no notice either
+      assert.eq(0, calls, 'not delivered to the new agent')
+      assert.eq('', stdin_of('copilot'))
+      assert.eq('', stdin_of('claude'))
+      assert.same({}, notes, 'and no notice for it')
+    end)
+
+    it('gemini: typed once its IDE client is connected, with the startup grace', function()
+      agent.MENTION_WAIT_MS, agent.STARTUP_GRACE_MS = 5000, 400
+      local connected = false
+      stub('gemini', {
+        client_state = function()
+          return connected and 'ready' or 'connecting'
+        end,
+      })
+      edit_in_main(ws .. '/my file.txt')
+      assert.same({ true, 'pending' }, { agent.send({ name = 'gemini' }) })
+      wait_ready('gemini')
+      vim.wait(700)
+      assert.eq('', stdin_of('gemini'), 'not before the connection')
+      connected = true
+      wait_stdin('gemini', pasted('@my\\ file.txt '))
+      -- Connected and past the grace: typed at once.
+      edit_in_main(ws .. '/a.txt')
+      assert.same({ true, 'typed' }, { agent.send({ line1 = 2, line2 = 4 }) })
+      wait_stdin('gemini', pasted('@a.txt (lines 2-4) '))
+    end)
+
+    it('a mention pending for an agent that stops meanwhile is dropped', function()
+      agent.MENTION_WAIT_MS = 5000
+      edit_in_main(ws .. '/a.txt')
+      stub('claude', {
+        client_state = function()
+          return 'connecting'
+        end,
+      })
+      assert.same({ true, 'pending' }, { agent.send() })
+      wait_ready('claude')
+      local pid = terminal.info().pid
+      agent.stop()
+      wait_exited(pid)
+      vim.wait(300)
+      assert.eq('', stdin_of('claude'))
+      assert.same({}, notes)
+    end)
+
+    it('terminal.layout = none: goes to a connected agent started by hand, else a clear error', function()
+      setup({ terminal = { layout = 'none' }, auto_start = true })
+      local calls, clients = {}, 0
+      stub('claude', {
+        at_mention = function(path, l1, l2, o)
+          if clients == 0 then
+            return false
+          end
+          calls[#calls + 1] = { path = path, l1 = l1, l2 = l2, o = o }
+          return true
+        end,
+      })
+      edit_in_main(ws .. '/a.txt')
+      local ok, err = agent.send({ line1 = 1 })
+      assert.falsy(ok)
+      assert.eq('no claude is connected to Neovim to take the mention (terminal.layout is "none")', err)
+      clients = 1
+      assert.same({ true, 'sent' }, { agent.send({ line1 = 1 }) })
+      assert.same({ ws .. '/a.txt', 1, 1, nil, 'claude' },
+        { calls[1].path, calls[1].l1, calls[1].l2, calls[1].o.pid, calls[1].o.kind })
+      -- Typed references need a terminal agent.nvim opened, connected or not.
+      assert.same({ false, 'gemini takes mentions only in a terminal agent.nvim opened, '
+        .. 'and terminal.layout is "none"' }, { agent.send({ name = 'gemini' }) })
+      vim.cmd('enew')
+      vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'x' })
+      assert.same({ false, 'a buffer that is not a file is mentioned only in a terminal agent.nvim opened, '
+        .. 'and terminal.layout is "none"' }, { agent.send() })
+      assert.eq(1, #calls)
+      assert.falsy(terminal.is_running(), 'nothing was started')
+    end)
   end)
 
   describe('commands and API', function()
@@ -1029,7 +1619,7 @@ describe('agent', function()
       assert.eq(tostring(port), read_env(out_of('claude')).CLAUDE_CODE_SSE_PORT)
     end)
 
-    it('selection events reach every running provider (auto_start: agents started outside)', function()
+    it('with selection.track = true selection events reach every running provider (auto_start)', function()
       local got, originals = { claude = 0, copilot = 0, gemini = 0 }, {}
       for name in pairs(got) do
         local P = require('agent.providers.' .. name)
@@ -1039,7 +1629,7 @@ describe('agent', function()
         end
       end
       local ok, err = pcall(function()
-        setup({ auto_start = true })
+        setup({ auto_start = true, selection = { track = true } })
         agent.open('claude', { focus = false })
         wait_ready('claude')
         for name in pairs(got) do
@@ -1103,6 +1693,46 @@ describe('agent', function()
       local agent_pids, socket, sessions = launch()
       vim.api.nvim_exec_autocmds('VimLeavePre', {})
       assert_clean(agent_pids, socket, sessions)
+    end)
+
+    it(':qa! ends the agent and every process it started, also ones that ignore the hangup', function()
+      if util.is_windows then
+        return
+      end
+      -- A nested Neovim quits right after starting the agent. Stopping the job only hangs up its
+      -- terminal (SIGHUP), which hup_agent.sh and its child ignore; Neovim's own SIGTERM would
+      -- come 2 s later, and never does once Neovim has exited.
+      local out = tmp .. '/nested'
+      local script = tmp .. '/quit.lua'
+      write(script, ([[
+        vim.opt.rtp:prepend(%q)
+        require('agent').setup({
+          providers = { claude = { enabled = false } },
+          nvim_mcp = { enabled = false },
+          agents = { claude = { cmd = { %q }, env = { FAKE_AGENT_OUT = %q } } },
+        })
+        require('agent').open('claude')
+        assert(vim.wait(5000, function() return vim.fn.filereadable(%q) == 1 end), 'the fake agent runs')
+        vim.cmd('qa!')
+      ]]):format(TEST_ROOT, TEST_ROOT .. '/tests/fixtures/hup_agent.sh', out, out .. '.pids'))
+      local t0 = uv.now()
+      local r = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-i', 'NONE', '-n', '-l', script },
+        { env = { NVIM = '' }, text = true }):wait(15000)
+      local quit_ms = uv.now() - t0
+      assert.eq(0, r.code, r.stderr)
+      local agent_pid, child = (read(out .. '.pids') or ''):match('^(%d+) (%d+)')
+      agent_pid, child = tonumber(agent_pid), tonumber(child)
+      assert.truthy(agent_pid and child, 'pids recorded')
+      local gone = vim.wait(1500, function()
+        return not pid_alive(agent_pid) and not pid_alive(child)
+      end, 20)
+      for _, p in ipairs({ child, agent_pid }) do
+        if pid_alive(p) then
+          uv.kill(p, 'sigkill')
+        end
+      end
+      assert.truthy(gone, 'the agent and its child ended with Neovim')
+      assert.truthy(quit_ms < 5000, 'quitting took ' .. quit_ms .. ' ms')
     end)
   end)
 end)

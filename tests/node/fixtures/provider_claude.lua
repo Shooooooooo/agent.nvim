@@ -19,6 +19,7 @@ end
 vim.cmd.cd(vim.fn.fnameescape(workspace))
 require('agent.config').setup({
   providers = { claude = { lock_dir = lock_dir, notify_delay_ms = 600 } },
+  selection = { track = true },
 })
 local P = require('agent.providers.claude')
 local diff = require('agent.editor.diff')

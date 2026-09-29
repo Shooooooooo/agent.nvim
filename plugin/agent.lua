@@ -24,6 +24,8 @@ local commands = {
   { 'AgentToggle', { nargs = '?', complete = complete_agents,
     desc = 'Toggle the agent terminal (starting another agent replaces the running one)' } },
   { 'AgentOpen', { nargs = '?', complete = complete_agents, desc = 'Open (start or show) the agent terminal' } },
+  { 'AgentSend', { nargs = '?', range = true, complete = complete_agents,
+    desc = 'Mention the selection (or the whole buffer) in the agent prompt and focus the agent' } },
   { 'AgentClose', { nargs = 0, desc = 'Hide the agent terminal (the agent keeps running)' } },
   { 'AgentStop', { nargs = 0, desc = 'Stop the agent (and its IDE server, unless auto_start is on)' } },
   { 'AgentDiffAccept', { nargs = 0, desc = 'Accept the proposed change in the current diff' } },

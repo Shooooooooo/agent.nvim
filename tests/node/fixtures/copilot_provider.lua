@@ -6,7 +6,7 @@
 --   stats | select {path,start:[l,c],end:[l,c]} | cursor {path,line,col} | float
 --   terminal {text,col} (a shell terminal that printed text; Visual selection from byte col to the
 --   end of the line, forwarded as agent.nvim does) | escape
---   accept <tab> | reject <tab> | closeui <tab>
+--   mention {path,start?,end?,pid?} | accept <tab> | reject <tab> | closeui <tab>
 --   diffinfo <tab> | diag {path,items} | write {path,text} | buflines <path> | launch {cwd}
 --   stop | quit (or EOF)
 local root, tmp = arg[1], arg[2]
@@ -29,7 +29,8 @@ local ws = tmp .. '/ws'
 vim.fn.mkdir(ws, 'p')
 vim.cmd.cd(vim.fn.fnameescape(ws))
 local ide_dir = tmp .. '/ide'
-require('agent.config').setup({ log_level = 'error', providers = { copilot = { lock_dir = ide_dir } } })
+require('agent.config').setup({ log_level = 'error', providers = { copilot = { lock_dir = ide_dir } },
+  selection = { track = true } })
 
 local P = require('agent.providers.copilot')
 local diff = require('agent.editor.diff')
@@ -115,6 +116,10 @@ end
 function handlers.escape()
   vim.cmd('normal! \27')
   return { ok = true }
+end
+
+function handlers.mention(a)
+  return { sent = P.at_mention(a.path, a.start, a['end'], { pid = a.pid }), state = P.client_state({ pid = a.pid }) or vim.NIL }
 end
 
 function handlers.accept(tab)

@@ -23,6 +23,8 @@
 local config = require('agent.config')
 local util = require('agent.util')
 
+local uv = vim.uv or vim.loop
+
 local M = {}
 
 local PASTE_START, PASTE_END = '\27[200~', '\27[201~'
@@ -854,9 +856,27 @@ end
 ---@field launch? fun(name: string, opts: table): agent.LaunchSpec|nil, string|nil  Override the launcher
 ---@field silent? boolean     Do not notify errors (they are still returned)
 
+---Send SIGTERM to the job's process and to every process under it (POSIX; on Windows jobstop()
+---ends the whole tree). jobstop() only hangs up the terminal (SIGHUP); Neovim's own SIGTERM, to
+---the job's process group, follows 2 s later, and never comes when Neovim exits first (:qa, see
+---agent.teardown()). An agent that ignores the hangup (Gemini CLI, at times), or a child of it in
+---another process group, would outlive Neovim. Only a job that is still Neovim's child is
+---signalled (util.process_tree(): its pid cannot have been reused), with its descendants.
+---@param t agent.Term
+local function terminate(t)
+  if util.is_windows or type(t.pid) ~= 'number' then
+    return
+  end
+  local pids = util.process_tree(t.pid, { parent = uv.os_getpid() })
+  for i = #pids, 1, -1 do
+    pcall(uv.kill, pids[i], 'sigterm')
+  end
+end
+
 ---Stop the agent's job and forget its terminal: its windows close now (a window the 'current'
----layout took over gets its previous buffer back instead), its temp files are removed, and its
----buffer is wiped once the job has exited. A finished terminal left open is wiped.
+---layout took over gets its previous buffer back instead), its temp files are removed, the job's
+---process and every process under it get SIGTERM (see terminate()), and its buffer is wiped once
+---the job has exited. A finished terminal left open is wiped.
 ---@return boolean stopped  false when there was no terminal
 function M.stop()
   local t = current
@@ -868,6 +888,7 @@ function M.stop()
     current = nil
     cleanup_term(t)
     hide_all(t)
+    terminate(t)
     pcall(vim.fn.jobstop, t.job)
   else
     discard(t)
@@ -1026,7 +1047,8 @@ function M.bufnr()
 end
 
 ---Details about the agent terminal, or nil when there is none.
----@return { name: string, bufnr: integer, job: integer, pid: integer|nil, session_id: string|nil, argv: string[], cwd: string, running: boolean, exit_code: integer|nil, layout: string }|nil
+---@return { name: string, bufnr: integer, job: integer, pid: integer|nil, session_id: string|nil, argv: string[], cwd: string, running: boolean, exit_code: integer|nil, layout: string, started: number }|nil
+---  started: util.now_ms() when the agent was started
 function M.info()
   return current and info_of(current)
 end
@@ -1045,6 +1067,7 @@ info_of = function(t)
     running = alive(t),
     exit_code = t.exit_code,
     layout = t.layout,
+    started = t.started,
   }
 end
 

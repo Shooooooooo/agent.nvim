@@ -363,6 +363,94 @@ describe('terminal', function()
     assert.falsy(terminal.stop())
   end)
 
+  it('stop sends SIGTERM to the agent and every process it started, which a hangup does not end', function()
+    if util.is_windows then
+      return
+    end
+    -- hup_agent.sh and its child ignore SIGHUP (jobstop() hangs up the terminal), and the child
+    -- runs in a process group of its own: Neovim's own SIGTERM, to the job's process group 2 s
+    -- later, would miss it.
+    local launch, out = fake({ argv = { TEST_ROOT .. '/tests/fixtures/hup_agent.sh' } })
+    terminal.open('fake', { launch = launch })
+    wait_for(function()
+      return vim.fn.filereadable(out .. '.pids') == 1
+    end, 5000, 'the fake agent and its child run')
+    local agent_pid, child = (read(out .. '.pids') or ''):match('^(%d+) (%d+)')
+    agent_pid, child = tonumber(agent_pid), tonumber(child)
+    assert.eq(terminal.info().pid, agent_pid)
+    assert.truthy(pid_alive(child))
+    local ok = pcall(function()
+      assert.truthy(terminal.stop())
+      wait_for(function()
+        return not pid_alive(agent_pid) and not pid_alive(child)
+      end, 1500, 'the agent and its child ended')
+    end)
+    -- Never leave them behind, even when the test fails.
+    for _, p in ipairs({ child, agent_pid }) do
+      if pid_alive(p) then
+        vim.uv.kill(p, 'sigkill')
+      end
+    end
+    assert.truthy(ok, 'the agent and its child ended within 1.5 s of stop()')
+  end)
+
+  it('stop signals nothing when the job has already ended', function()
+    -- A finished terminal left open: its pid may belong to another process by now.
+    local launch = fake({ env = { FAKE_AGENT_EXIT = '3' } })
+    terminal.open('fake', { launch = launch })
+    wait_for(function()
+      return terminal.info() and not terminal.info().running
+    end, 5000, 'the job exited')
+    local killed = {}
+    local orig_kill = vim.uv.kill
+    vim.uv.kill = function(pid, sig)
+      killed[#killed + 1] = pid
+      return orig_kill(pid, sig)
+    end
+    local ok, err = pcall(terminal.stop)
+    vim.uv.kill = orig_kill
+    assert.truthy(ok, err)
+    assert.same({}, killed)
+  end)
+
+  it('process_tree lists a process and its descendants, only under the given parent', function()
+    if util.is_windows then
+      return
+    end
+    local launch, out = fake({ argv = { TEST_ROOT .. '/tests/fixtures/hup_agent.sh' } })
+    terminal.open('fake', { launch = launch })
+    wait_for(function()
+      return vim.fn.filereadable(out .. '.pids') == 1
+    end, 5000, 'the fake agent and its child run')
+    local agent_pid, child = (read(out .. '.pids') or ''):match('^(%d+) (%d+)')
+    agent_pid, child = tonumber(agent_pid), tonumber(child)
+    local ok, err = pcall(function()
+      assert.same({ agent_pid, child }, util.process_tree(agent_pid, { parent = vim.fn.getpid() }))
+      assert.same({ child }, util.process_tree(child))
+      -- Not a child of that parent (a pid reused since, say): nothing.
+      assert.same({}, util.process_tree(child, { parent = vim.fn.getpid() }))
+      -- Never this Neovim, nor pid 1.
+      assert.same({}, util.process_tree(vim.fn.getpid()))
+      assert.same({}, util.process_tree(1))
+      -- Without ps: the same, through nvim_get_proc_children().
+      local orig_system = vim.system
+      vim.system = function()
+        error('no ps')
+      end
+      local tok, tree = pcall(util.process_tree, agent_pid, { parent = vim.fn.getpid() })
+      vim.system = orig_system
+      assert.truthy(tok, tree)
+      assert.same({ agent_pid, child }, tree)
+    end)
+    terminal.stop()
+    for _, p in ipairs({ child, agent_pid }) do
+      if pid_alive(p) then
+        vim.uv.kill(p, 'sigkill')
+      end
+    end
+    assert.truthy(ok, err)
+  end)
+
   it('send types a bracketed paste, optionally followed by Enter', function()
     local launch, out = fake()
     terminal.open('fake', { launch = launch })

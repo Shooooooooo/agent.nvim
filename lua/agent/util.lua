@@ -162,6 +162,99 @@ function M.abspath(path)
   return abs
 end
 
+---True when `child` equals `parent` or is inside it (plain string prefix on normalized paths).
+---@param parent string
+---@param child string
+---@return boolean
+function M.path_contains(parent, child)
+  if parent == child then
+    return true
+  end
+  local p = parent:sub(-1) == '/' and parent or (parent .. '/')
+  return child:sub(1, #p) == p
+end
+
+---How long process_tree() waits for `ps`.
+M.PS_TIMEOUT_MS = 1000
+
+---The parent of every process, from one `ps -A -o pid=,ppid=` snapshot (it lists every child,
+---whichever thread started it). nil when ps fails.
+---@return table<integer, integer>|nil ppid_of
+local function ps_parents()
+  local ok, res = pcall(function()
+    return vim.system({ 'ps', '-A', '-o', 'pid=,ppid=' }, { text = true }):wait(M.PS_TIMEOUT_MS)
+  end)
+  if not ok or type(res) ~= 'table' or res.code ~= 0 or type(res.stdout) ~= 'string' then
+    return nil
+  end
+  local ppid_of = {}
+  for line in res.stdout:gmatch('[^\n]+') do
+    local pid, ppid = line:match('^%s*(%d+)%s+(%d+)%s*$')
+    if pid then
+      ppid_of[tonumber(pid)] = tonumber(ppid)
+    end
+  end
+  return next(ppid_of) ~= nil and ppid_of or nil
+end
+
+---Process `pid` and all its descendants, parents before their children (POSIX only): from one
+---`ps` snapshot, else with nvim_get_proc_children() (Neovim's own sysctl, /proc or pgrep -P).
+---Never this Neovim, pid 1 or below, nor a process that is not `pid` or one of its descendants.
+---@param pid integer
+---@param opts { parent?: integer }|nil  parent: list nothing unless `pid` is a child of this
+---  process (a job's pid is Neovim's child until it is reaped, so this rules out a reused pid)
+---@return integer[] pids  empty when `pid` does not qualify, and on Windows
+function M.process_tree(pid, opts)
+  opts = opts or {}
+  local self = uv.os_getpid()
+  if M.is_windows or type(pid) ~= 'number' or pid <= 1 or pid == self then
+    return {}
+  end
+  local ppid_of = ps_parents()
+  local children_of
+  if ppid_of then
+    local children = {}
+    for p, pp in pairs(ppid_of) do
+      children[pp] = children[pp] or {}
+      table.insert(children[pp], p)
+    end
+    for _, list in pairs(children) do
+      table.sort(list)
+    end
+    children_of = function(p)
+      return children[p] or {}
+    end
+  else
+    children_of = function(p)
+      local ok, list = pcall(vim.api.nvim_get_proc_children, p)
+      return ok and type(list) == 'table' and list or {}
+    end
+  end
+  if opts.parent then
+    local ok
+    if ppid_of then
+      ok = ppid_of[pid] == opts.parent
+    else
+      ok = vim.tbl_contains(children_of(opts.parent), pid)
+    end
+    if not ok then
+      return {}
+    end
+  end
+  local out, seen, i = { pid }, { [pid] = true, [self] = true }, 1
+  -- (Bounded: a process table changing under nvim_get_proc_children() must not loop.)
+  while i <= #out and #out < 4096 do
+    for _, c in ipairs(children_of(out[i])) do
+      if type(c) == 'number' and c > 1 and not seen[c] then
+        seen[c] = true
+        out[#out + 1] = c
+      end
+    end
+    i = i + 1
+  end
+  return out
+end
+
 ---Percent-encoded file URL (RFC 8089), e.g. for Copilot fileUrl values.
 ---@param path string absolute path
 ---@return string

@@ -1093,6 +1093,24 @@ function M.status()
   }
 end
 
+---The state of Gemini's IDE client: 'ready' (its event stream is open), 'connecting' (a session
+---without a stream yet), or nil. Gemini has no mention notification: :AgentSend types the reference
+---into its prompt, once it is connected (its TUI is up by then).
+---@return 'ready'|'connecting'|nil
+function M.client_state()
+  if not state then
+    return nil
+  end
+  local any = false
+  for _, s in ipairs(state.binding:sessions()) do
+    if state.binding:has_stream(s) then
+      return 'ready'
+    end
+    any = true
+  end
+  return any and 'connecting' or nil
+end
+
 ---Selection events from init (coalesced with the provider's own subscription and debounced).
 ---@param _ agent.Selection|nil
 function M.on_selection(_)
