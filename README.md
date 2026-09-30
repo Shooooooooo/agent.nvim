@@ -57,7 +57,8 @@ vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Tog
 vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send to agent' })
 ```
 
-`<leader>as` sends the selection in Visual mode, the whole file in Normal mode.
+The keys are only suggestions: map the commands to whatever you like. `:AgentSend` sends the
+selection in Visual mode, the whole file in Normal mode.
 
 ## Quick start
 
@@ -66,7 +67,7 @@ vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send 
 2. Run `:AgentToggle` to open Claude in a split below your file (or `:AgentToggle opencode`,
    `:AgentToggle copilot`, `:AgentToggle gemini`). The agent connects to Neovim by itself; Gemini
    needs a [one-time setup](#gemini-cli) first.
-3. Select lines and press `<leader>as` (`:AgentSend`). The agent gets them (Claude shows
+3. Select lines and run `:AgentSend` (or your mapping for it). The agent gets them (Claude shows
    `⧉ 3 lines selected`) and the cursor moves to the agent's prompt: type your request, and the
    lines go with it.
 4. Ask for a change. When the agent asks for permission, a diff tab opens: accept with `:w` or
@@ -135,6 +136,19 @@ require('agent').setup({
 
 Full reference: `:help agent-config`.
 
+## The $NVIM controller
+
+agent.nvim registers an MCP server with each agent it launches, through which the agent drives
+the Neovim it runs in: `read_buffer`, `open_file`, `execute_command`, `eval`, `exec_lua`,
+`notify`. `read_buffer` also reads the terminals and other buffers sent as
+`nvim://buffer/<n>/<label>`. For an agent you start yourself, `:AgentMcpConfig` prints the
+config to add (`:help agent-nvim-mcp-manual`).
+
+**Security:** `exec_lua`, `execute_command` and `eval` run arbitrary code as you. Claude, Copilot
+and Gemini ask before each call unless `agents.<name>.auto_approve = true`; OpenCode follows its
+own `permission` config. Disable it with `nvim_mcp.enabled = false`, or per agent with
+`agents.<name>.mcp = false`.
+
 ## Agent notes
 
 ### Claude Code
@@ -169,22 +183,3 @@ Full reference: `:help agent-config`.
   `@a.txt (lines 3-5)` into Gemini's prompt instead.
 - Gemini refuses the controller in untrusted folders: trust the folder in Gemini, or set
   `agents.gemini.skip_trust = true`, which makes Gemini trust any folder it is launched in.
-
-## The $NVIM controller
-
-When it launches an agent, agent.nvim registers a stdio MCP server through which the agent can
-drive the Neovim it runs in, without editing your agent config files. Its tools: `read_buffer`,
-`open_file`, `execute_command`, `eval`, `exec_lua`, `notify`. It leaves the current file,
-selection and diagnostics to the IDE connection, edits to the agent's own tools, and anything else
-to `exec_lua`. `read_buffer` also reads the terminals and other buffers that the IDE connection
-(`:AgentSend`, `selection.track`) names `nvim://buffer/<n>/<label>`. For an agent you start
-yourself in a Neovim terminal, `:AgentMcpConfig` prints the config to add, and
-`auto_start = true` keeps the IDE servers running so that it can use the IDE connection too
-(`:help agent-nvim-mcp-manual`).
-
-**Security:** the controller can do anything your Neovim can. `exec_lua`, `execute_command` and
-`eval` run arbitrary Lua, Ex commands and Vimscript as you, shell commands included. Claude,
-Copilot and Gemini ask before each call (following their own permission settings) unless you opt
-in with `agents.<name>.auto_approve = true`; OpenCode allows all tools unless its own
-`permission` config says otherwise. Turn the controller off with `nvim_mcp.enabled = false`, or
-per agent with `agents.<name>.mcp = false`.
