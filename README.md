@@ -28,20 +28,9 @@ Lua, and send you notifications.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
   a token.
 
-| Agent | `:AgentSend` of lines 1-2 | Diffs in Neovim | Diagnostics |
-|---|---|---|---|
-| Claude Code (`claude`) | `@a.txt#L1-2` | yes, editable | yes |
-| OpenCode (`opencode`) | `a.txt#1-2` | no | through `exec_lua` |
-| GitHub Copilot CLI (`copilot`) | `@a.txt:1-2` | yes, read-only | yes |
-| Gemini CLI (`gemini`) | `@a.txt (lines 1-2)`, typed | yes, editable | through `exec_lua` |
-
 ## Requirements
 
 - Neovim 0.11 or newer (`vim.pack` needs 0.12).
-- At least one agent CLI on `$PATH`. The IDE protocols are undocumented and change between
-  releases; they were verified against Claude Code 2.1.283, OpenCode 1.18.32, Copilot CLI 1.0.88
-  and Gemini CLI 0.61.0.
-- Tested on macOS. Linux support exists but has not been tested live; Windows is untested.
 
 ## Installation
 
