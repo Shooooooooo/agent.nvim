@@ -25,6 +25,9 @@
 # checkout of that commit to skip the fetch. Only the demo's Neovim loads it (demo/init.lua adds
 # it to 'runtimepath'): nothing is installed anywhere else, and agent.nvim itself does not use
 # it. Its pdb backend needs no Python package: it runs pdb behind a small Lua proxy (nvim -l).
+# animate.nvim (https://github.com/Shooooooooo/animate.nvim), which flies Claude's split and pdb's
+# in as they open, is fetched the same way at ANIMATE_SHA (DEMO_ANIMATE names an existing
+# checkout of that commit instead), and only the demo's Neovim loads it too.
 #
 # The real Claude Code TUI runs inside agent.nvim, against a local scripted model: nothing uses
 # your Claude account, your ~/.claude or any real model API.
@@ -47,7 +50,8 @@
 # Variables: DEMO_OUT (directory for the GIF, default demo/; use a scratch directory for
 # trial runs, since every run differs slightly: clock, spinner words, session hash),
 # DEMO_KEEP=1 keeps the temp dir (frames, model log), DEMO_TIMEOUT (seconds for vhs, default 300),
-# DEMO_NVIMGDB (an nvim-gdb checkout at NVIMGDB_SHA to use instead of fetching one).
+# DEMO_NVIMGDB (an nvim-gdb checkout at NVIMGDB_SHA to use instead of fetching one),
+# DEMO_ANIMATE (an animate.nvim checkout at ANIMATE_SHA to use instead of fetching one).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 REPO=$(pwd -P)
@@ -146,6 +150,24 @@ fi
   { echo "record.sh: $NVIMGDB is not nvim-gdb $NVIMGDB_SHA" >&2; exit 2; }
 echo "nvim-gdb: $NVIMGDB ($NVIMGDB_SHA)"
 
+# animate.nvim at the pinned commit (main, 2026-09-30: "Merge pull request #7 from
+# Shooooooooo/claude/window-terminal-pty-pin"), in the temp dir unless DEMO_ANIMATE names a
+# checkout.
+ANIMATE_SHA=debdb4b5d23a367c3c26e0e30e528cab8f11e8e3
+if [ -n "${DEMO_ANIMATE:-}" ]; then
+  ANIMATE=$(cd "$DEMO_ANIMATE" && pwd -P) || exit 2
+else
+  ANIMATE="$ROOT/animate.nvim"
+  git init -q "$ANIMATE" &&
+    perl -e 'alarm shift; exec @ARGV' 120 git -C "$ANIMATE" fetch -q --depth 1 \
+      https://github.com/Shooooooooo/animate.nvim.git "$ANIMATE_SHA" &&
+    git -C "$ANIMATE" -c advice.detachedHead=false checkout -q FETCH_HEAD ||
+    { echo "record.sh: cannot fetch animate.nvim $ANIMATE_SHA (needs network access)" >&2; exit 1; }
+fi
+[ "$(git -C "$ANIMATE" rev-parse HEAD 2>/dev/null)" = "$ANIMATE_SHA" ] ||
+  { echo "record.sh: $ANIMATE is not animate.nvim $ANIMATE_SHA" >&2; exit 2; }
+echo "animate.nvim: $ANIMATE ($ANIMATE_SHA)"
+
 # 1. Claude config and the scripted model.
 KEY=$(nvim --headless -u NONE -i NONE -n -l "$REPO/tests/e2e/claude_seed.lua" "$ROOT/claude-config" "$WS") || exit 1
 echo '{ "spinnerTipsEnabled": false }' > "$ROOT/claude-config/settings.json"
@@ -172,8 +194,8 @@ nvim() {
     XDG_CONFIG_HOME=$(q "$ROOT/xdg/config") XDG_DATA_HOME=$(q "$ROOT/xdg/data") \\
     XDG_STATE_HOME=$(q "$ROOT/xdg/state") XDG_CACHE_HOME=$(q "$ROOT/xdg/cache") \\
     DEMO_MODEL_URL=$(q "http://127.0.0.1:$PORT") DEMO_CLAUDE_CONFIG_DIR=$(q "$ROOT/claude-config") \\
-    DEMO_API_KEY=$(q "$KEY") DEMO_NVIMGDB=$(q "$NVIMGDB") \\
-    command nvim -u $(q "$REPO/demo/init.lua") -i NONE -n "\$@"
+    DEMO_API_KEY=$(q "$KEY") DEMO_NVIMGDB=$(q "$NVIMGDB") DEMO_ANIMATE=$(q "$ANIMATE") \\
+    nvim -u $(q "$REPO/demo/init.lua") -i NONE -n "\$@"
 }
 EOF
 

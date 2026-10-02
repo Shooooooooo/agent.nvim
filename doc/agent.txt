@@ -1471,15 +1471,18 @@ Claude account and config are never used.
 The demo config, demo/init.lua, keeps the default layout (the agent in a
 split below the file), starts Claude with `--permission-mode manual` so that
 it asks before editing, sets `auto_approve = true` for the $NVIM controller,
-loads nvim-gdb, and adds the colours, the statusline, the debugger's signs
-and the notification popup. Only the demo uses nvim-gdb: agent.nvim does not
-need it.
+loads nvim-gdb and animate.nvim (https://github.com/Shooooooooo/animate.nvim,
+with its "full" preset: Claude's split and pdb's fly in as they open), and
+adds the colours, the statusline, the debugger's signs and the notification
+popup. Only the demo uses nvim-gdb and animate.nvim: agent.nvim needs
+neither.
 
 It needs vhs, ttyd, ffmpeg, nvim, node, claude, git, python3 on $PATH (Python
 3.9, as /usr/bin/python3 on macOS: the tape expects its pdb output) and the
-JetBrainsMono Nerd Font. record.sh fetches nvim-gdb at a pinned commit into
-its temp directory, which needs network access to github.com;
-`DEMO_NVIMGDB=<checkout>` uses an existing checkout of that commit instead.
+JetBrainsMono Nerd Font. record.sh fetches nvim-gdb and animate.nvim at
+pinned commits into its temp directory, which needs network access to
+github.com; `DEMO_NVIMGDB=<checkout>` and `DEMO_ANIMATE=<checkout>` use
+existing checkouts of those commits instead.
 `DEMO_OUT=<dir>` writes the GIF elsewhere. Every run differs slightly (the
 clock, the spinner words), so commit a new GIF only when the demo itself
 changed. The header of demo/record.sh has the details.

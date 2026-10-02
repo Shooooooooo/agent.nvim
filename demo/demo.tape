@@ -1,6 +1,6 @@
 # agent.nvim README demo. Do not run this tape directly: run demo/record.sh (or `make demo`),
-# which builds the isolated environment (nvim-gdb included), exports DEMO_RC and encodes the
-# frames written here.
+# which builds the isolated environment (nvim-gdb and animate.nvim included), exports DEMO_RC and
+# encodes the frames written here.
 #
 # Story: Neovim on a small Python script whose mean() is wrong; the user opens Claude Code below
 # (:AgentToggle claude) and asks it to debug the script in a pdb session with nvim-gdb. Everything
@@ -9,8 +9,9 @@
 # sends pdb commands with nvim-gdb's :Gdb and reads pdb's answers (exec_lua), while nvim-gdb marks
 # the line pdb stopped on in the script (▶, next to the breakpoint's ●). Claude proposes the fix
 # in a Neovim diff (accepted with :w), re-runs the script in the same pdb session to the same
-# breakpoint, runs it to the end and notifies the result. The model turn is scripted in
-# demo/plan.json; Neovim, nvim-gdb, Claude Code and pdb really run.
+# breakpoint, runs it to the end and notifies the result. animate.nvim flies Claude's split and
+# pdb's in as they open. The model turn is scripted in demo/plan.json; Neovim, nvim-gdb,
+# animate.nvim, Claude Code and pdb really run.
 
 # VHS 0.12.0 cannot encode videos (see record.sh), so it only writes the frames.
 Output frames/
@@ -46,24 +47,22 @@ Wait+Screen@20s /def mean/
 Sleep 500ms
 Show
 
-# 1. The script, then Claude Code in a split below, and the question. The split and the terminal
-# open under Hide: VHS would otherwise catch Neovim's screen clear half way (one blank frame).
+# 1. The script, then Claude Code in a split below, which flies in from the bottom edge
+# (animate.nvim), and the question.
 Sleep 3s
 Type ":AgentToggle claude"
 Sleep 700ms
-Hide
 Enter
 Wait+Screen@60s /Claude Code/
-Show
 Sleep 3s
 Type "mean([4, 8, 6]) prints 4.67 instead of 6.0. Debug it in a pdb session with nvim-gdb"
 Sleep 1s
 Enter
 
-# 2. Claude starts the session (execute_command :GdbStartPDB): pdb's terminal on the right of the
-# script, whose first line nvim-gdb marks. Then it breaks in the loop and prints the variables
-# (exec_lua, nvim-gdb's :Gdb): the mark follows pdb to line 4. The user's cursor stays in
-# Claude's pane throughout.
+# 2. Claude starts the session (execute_command :GdbStartPDB): pdb's terminal flies in on the right
+# of the script (animate.nvim), whose first line nvim-gdb marks. Then it breaks in the loop and
+# prints the variables (exec_lua, nvim-gdb's :Gdb): the mark follows pdb to line 4. The user's
+# cursor stays in Claude's pane throughout.
 Wait+Screen@60s /\(Pdb\)/
 Wait+Screen@60s /\(1, 8, 0\)/
 # 3. The analysis, then the fix as a diff in a tab of its own: original | proposed on top, Claude

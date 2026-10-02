@@ -1,16 +1,18 @@
--- Neovim config for the README demo (demo/record.sh). It loads agent.nvim from this repository
--- and nvim-gdb (https://github.com/sakhnik/nvim-gdb) from the checkout that record.sh fetches at
--- a pinned commit, and points Claude Code at the local scripted model that record.sh starts.
+-- Neovim config for the README demo (demo/record.sh). It loads agent.nvim from this repository,
+-- and nvim-gdb (https://github.com/sakhnik/nvim-gdb) and animate.nvim
+-- (https://github.com/Shooooooooo/animate.nvim) from the checkouts that record.sh fetches at
+-- pinned commits, and points Claude Code at the local scripted model that record.sh starts.
 -- Every DEMO_* variable comes from record.sh, which also isolates HOME, TMPDIR, XDG_* and
 -- CLAUDE_CONFIG_DIR.
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 for _, var in ipairs({
-  'DEMO_MODEL_URL', 'DEMO_CLAUDE_CONFIG_DIR', 'DEMO_API_KEY', 'DEMO_NVIMGDB',
+  'DEMO_MODEL_URL', 'DEMO_CLAUDE_CONFIG_DIR', 'DEMO_API_KEY', 'DEMO_NVIMGDB', 'DEMO_ANIMATE',
 }) do
   -- Never start Claude against a real account or config: run this only through demo/record.sh.
   assert(vim.env[var], var .. ' is not set: run demo/record.sh')
 end
 vim.opt.rtp:prepend(vim.env.DEMO_NVIMGDB) -- plugin/nvimgdb.vim defines :GdbStartPDB and :Gdb
+vim.opt.rtp:prepend(vim.env.DEMO_ANIMATE) -- set up at the end of this file
 vim.opt.rtp:prepend(repo)
 
 -- Looks
@@ -229,3 +231,9 @@ require('agent').setup({
 vim.g.mapleader = ' '
 vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>', { desc = 'Toggle agent' })
 vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send to agent' })
+
+-- animate.nvim, with every module on (preset 'full'). What the demo shows most: Claude's split
+-- flies in from below when :AgentToggle opens it, and pdb's from the right when Claude starts the
+-- session through the $NVIM controller. (The diff opens in a tab page of its own, which no
+-- module animates.) Set up last, after the colours above.
+require('animate').setup({ preset = 'full' })
