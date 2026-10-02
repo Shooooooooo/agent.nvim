@@ -234,6 +234,7 @@ vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>', { desc = 'Send 
 
 -- animate.nvim, with every module on (preset 'full'). What the demo shows most: Claude's split
 -- flies in from below when :AgentToggle opens it, and pdb's from the right when Claude starts the
--- session through the $NVIM controller. (The diff opens in a tab page of its own, which no
--- module animates.) Set up last, after the colours above.
+-- session through the $NVIM controller (cut short when nvim-gdb, at pdb's first stop, enters the
+-- script's window: animate.nvim lands an animation of a window that a buffer leaves). The diff
+-- opens in a tab page of its own, which no module animates. Set up last, after the colours above.
 require('animate').setup({ preset = 'full' })
