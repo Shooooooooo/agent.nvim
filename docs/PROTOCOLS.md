@@ -895,6 +895,32 @@ user's config for the session.
 - OpenCode's built-in agents allow `*`, so MCP tools run without asking unless the user's
   `permission` config says otherwise.
 
+### Progress reports (OSC 9;4)
+
+Claude Code and Copilot CLI write ConEmu's progress sequence `ESC ] 9 ; 4 ; <state> [; <percent>]`
+to their terminal: state 3 (indeterminate) while a turn runs, 0 when it ends. `progress.lua` reads
+it from the agent's terminal buffer (`TermRequest`, whose `ev.data.sequence` is the sequence
+without its terminator, on 0.11 and 0.12) for `agent.statusline`. Both CLIs send it only to
+terminals they recognize, so for them the launcher sets `ConEmuANSI=ON` (`agents.<name>.progress`,
+unless the agent's own `env` sets `ConEmuANSI`). Verified live in a Neovim terminal, without and
+with `ConEmuANSI=ON` (Claude Code 2.1.292, Copilot CLI 1.0.93); the conditions were read in their
+code.
+
+| | Claude Code 2.1.292 | Copilot CLI 1.0.93 |
+|---|---|---|
+| Sends | `9;4;0;` once at start, `9;4;3;` when a turn starts, `9;4;0;` when it ends (BEL) | `9;4;3;0` when a turn starts, again every 5 s, `9;4;0;0` when it ends (BEL) |
+| Busy covers | the model, running tools, pending background agents, and a permission prompt it waits on | the turn |
+| Gate | stdout a TTY; not with `WT_SESSION` set; then `ConEmuANSI`, `ConEmuPID` or `ConEmuTask` set, or `TERM_PROGRAM=ghostty` with `TERM_PROGRAM_VERSION` 1.2.0+, or `iTerm.app` 3.6.6+ | stdout a TTY, `TERM` not `dumb`; its terminal type is one of ghostty, kitty, rio, foot, alacritty, iterm2, wezterm, windows-terminal, conemu, vscode(-insiders), cursor, windsurf, detected from `TERM_PROGRAM`, `TERM`, `WT_SESSION`, ... and lastly `ConEmuANSI=ON`; none inside tmux or Zellij (in tmux it asks tmux for the client's terminal) |
+| Setting | `terminalProgressBarEnabled` (default true; `/config`: Terminal progress bar) | none |
+| Side effects of `ConEmuANSI=ON` | its terminal name (telemetry) becomes `conemu` when no earlier variable names one | none besides the progress gate |
+
+The commands the agents run inherit `ConEmuANSI=ON` (Claude Code removes it only from the background
+sessions it relaunches).
+
+Neovim passes `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` through to terminal jobs, so inside a
+Neovim that runs in Ghostty 1.2+ or iTerm2 3.6.6+ Claude sends it anyway. OpenCode 1.18.35 only
+clears the progress (`9;4;0`) when it resets the terminal, and Gemini CLI 0.63.0 has no OSC 9;4.
+
 ---
 
 ## 5. The $NVIM controller (stdio MCP server)

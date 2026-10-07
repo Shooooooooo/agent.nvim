@@ -847,6 +847,8 @@ end
 ---@field session_id string|nil
 ---@field cwd string|nil
 ---@field exit_code integer|nil
+---@field progress { state: agent.ProgressState, percent: integer|nil, working: boolean, since: number }|nil
+---  what it reports about its work (agent.progress); nil once it exited
 
 ---@class agent.Status
 ---@field setup boolean
@@ -877,6 +879,10 @@ function M.status()
       cwd = info.cwd,
       exit_code = info.exit_code,
     }
+    local p = require('agent.progress').get()
+    if p and p.bufnr == info.bufnr then
+      out.agent.progress = { state = p.state, percent = p.percent, working = p.working, since = p.since }
+    end
   end
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
@@ -980,6 +986,9 @@ local function status_lines()
       or ('exited' .. (a.exit_code and (' with code ' .. a.exit_code) or '')))
     if a.visible then
       line = line .. ', visible'
+    end
+    if a.progress and a.progress.state ~= 'idle' then
+      line = line .. ', ' .. (a.progress.working and 'working' or a.progress.state)
     end
     lines[#lines + 1] = line .. (a.provider and ('  [provider ' .. a.provider .. ']') or '')
   else

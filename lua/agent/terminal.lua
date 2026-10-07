@@ -19,8 +19,10 @@
 --- terminal never changes a window's alternate buffer or jumplist (see switch_buf()). Neovim sizes
 --- a terminal to its largest window, so an extra split is made as large as the terminal's own split
 --- (see split_config), and the agent's TUI does not reflow. Every window opened here starts on the
---- last line, so that it follows the output (see follow()).
+--- last line, so that it follows the output (see follow()). agent.progress follows what the agent
+--- reports about its work (OSC 9;4) from its start to its exit or stop.
 local config = require('agent.config')
+local progress = require('agent.progress')
 local util = require('agent.util')
 
 local uv = vim.uv or vim.loop
@@ -641,6 +643,7 @@ local function on_exit(t, code)
   t.exited, t.exit_code, t.job_ended = true, code, util.now_ms()
   local elapsed = t.job_ended - t.started
   cleanup_term(t)
+  progress.detach(t.bufnr)
 
   if not t.stopping and buf_valid(t) and t.spec.exit_hints then
     local text
@@ -795,6 +798,7 @@ local function start(name, opts)
   local pok, pid = pcall(vim.fn.jobpid, job)
   t.pid = pok and pid or nil
   current = t
+  progress.attach(buf, name)
   vim.b[buf].agent_nvim_session = spec.session_id
   vim.api.nvim_create_autocmd('TermEnter', {
     group = state.augroup,
@@ -884,6 +888,7 @@ function M.stop()
     return false
   end
   t.stopping = true
+  progress.detach(t.bufnr)
   if alive(t) then
     current = nil
     cleanup_term(t)

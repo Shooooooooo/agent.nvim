@@ -56,6 +56,7 @@ local RESERVED_SERVER_NAMES = {
 ---@field auto_approve? boolean     Default: agents.<name>.auto_approve
 ---@field skip_trust? boolean       Gemini only. Default: agents.gemini.skip_trust
 ---@field scrub_vscode_env? boolean OpenCode only. Default: agents.opencode.scrub_vscode_env
+---@field progress? boolean         Claude and Copilot only. Default: agents.<name>.progress (true unless false)
 ---@field env? table<string,string|false>  Extra env (false = unset); config env is applied too
 ---@field before_spawn? fun(spec: agent.LaunchSpec)  Called right before jobstart (e.g. touch the Claude lock for OpenCode)
 ---@field on_exit? fun(code: integer, info: table)    Called when the job exits
@@ -510,6 +511,18 @@ end
 
 local recipes = {}
 
+---Make Claude Code or Copilot CLI report their progress (OSC 9;4, see agent.progress) to Neovim's
+---terminal. Both send it only to terminals they know, ConEmu among them: ConEmuANSI=ON stands for
+---it, unless the agent's env sets ConEmuANSI itself. Claude Code 2.1 also reports "conemu" as its
+---terminal when no other variable names one; the commands the agent runs inherit it, and hardly
+---any program outside Windows reads it.
+---@param ctx table
+local function report_progress(ctx)
+  if ctx.progress and ctx.user_env.ConEmuANSI == nil then
+    ctx.env.ConEmuANSI = 'ON'
+  end
+end
+
 ---@param ctx table
 function recipes.claude(ctx)
   local env, argv = ctx.env, ctx.argv
@@ -528,6 +541,7 @@ function recipes.claude(ctx)
   env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL = 'true'
   local np = no_proxy_with_loopback(ctx.getenv('no_proxy'), ctx.getenv('NO_PROXY'))
   env.no_proxy, env.NO_PROXY = np, np
+  report_progress(ctx)
 
   local mcp = ctx.mcp
   if not mcp then
@@ -562,6 +576,7 @@ end
 function recipes.copilot(ctx)
   local ide = ctx.ide or {}
   ctx.spec.cwd = ide.lock_folder or ide.workspace_folder or util.realpath(ctx.spec.cwd)
+  report_progress(ctx)
   local mcp = ctx.mcp
   if not mcp then
     return
@@ -902,6 +917,10 @@ function M.build_launch(name, opts)
   if scrub == nil then
     scrub = def.scrub_vscode_env ~= false
   end
+  local report = opts.progress
+  if report == nil then
+    report = def.progress ~= false
+  end
 
   local plugin_env = { AGENT_NVIM_SESSION = opts.session_id }
   local ctx = {
@@ -915,6 +934,7 @@ function M.build_launch(name, opts)
     auto_approve = auto_approve,
     skip_trust = skip_trust,
     scrub_vscode_env = scrub,
+    progress = report,
     environ = environ,
     user_env = user_env,
     lookup_env = lookup_env,

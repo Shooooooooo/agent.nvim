@@ -20,10 +20,11 @@ CONTENTS                                                      *agent-contents*
   8. Agents ................................................... |agent-agents|
   9. The $NVIM controller ................................... |agent-nvim-mcp|
  10. Reviewing diffs ............................................ |agent-diff|
- 11. Events and variables ..................................... |agent-events|
- 12. Troubleshooting ................................. |agent-troubleshooting|
- 13. Protocol notes and credits ............................ |agent-protocols|
- 14. Running the tests ......................................... |agent-tests|
+ 11. Statusline ........................................... |agent-statusline|
+ 12. Events and variables ..................................... |agent-events|
+ 13. Troubleshooting ................................. |agent-troubleshooting|
+ 14. Protocol notes and credits ............................ |agent-protocols|
+ 15. Running the tests ......................................... |agent-tests|
 
 ==============================================================================
 1. Introduction                                                  *agent-intro*
@@ -295,8 +296,11 @@ require('agent').status()
     Table with `setup`, `servername`, `agent` and `providers`. `agent` is
     nil when there is no agent, else a table with `name`, `kind`,
     `provider`, `running` (false when it exited and its terminal was left
-    open), `visible` (in this tab page), `pid`, `session_id`, `cwd` and
-    `exit_code`.
+    open), `visible` (in this tab page), `pid`, `session_id`, `cwd`,
+    `exit_code` and `progress`: what it reports about its work
+    (|agent-statusline|), nil once it exited, else a table with `state`,
+    `percent` and `working` as in |AgentProgress|, and `since`, when that
+    state began (milliseconds of |vim.uv.hrtime()|).
     `providers` maps each IDE server to its status.
 
                                                           *agent.mcp_config()*
@@ -363,12 +367,14 @@ The defaults, from lua/agent/config.lua: >lua
       },
       agents = {
         claude = { cmd = { 'claude' }, args = {}, env = {},
-          provider = 'claude', mcp = true, auto_approve = false },
+          provider = 'claude', mcp = true, auto_approve = false,
+          progress = true },
         opencode = { cmd = { 'opencode' }, args = {}, env = {},
           provider = 'claude', mcp = true, auto_approve = false,
           line_offset = 1, scrub_vscode_env = true },
         copilot = { cmd = { 'copilot' }, args = {}, env = {},
-          provider = 'copilot', mcp = true, auto_approve = false },
+          provider = 'copilot', mcp = true, auto_approve = false,
+          progress = true },
         gemini = { cmd = { 'gemini' }, args = {}, env = {},
           provider = 'gemini', mcp = true, auto_approve = false,
           skip_trust = false },
@@ -525,6 +531,12 @@ agents.<name>.mcp (true)
     Register the $NVIM controller for this agent.
 agents.<name>.auto_approve (false)
     Pre-approve the controller's tools for this agent. See |agent-security|.
+agents.claude.progress (true)
+agents.copilot.progress (true)
+    Set ConEmuANSI=ON in the agent's environment, so that it tells
+    Neovim's terminal when it is working (|agent-statusline|). Also for a
+    custom agent of the "claude" or "copilot" kind. A ConEmuANSI in
+    `agents.<name>.env` wins.
 agents.opencode.line_offset (1)
     Added to line (and column) numbers sent to OpenCode, which reads them as
     1-based. Set 0 if a future OpenCode reads the Claude protocol's 0-based
@@ -1235,8 +1247,68 @@ its own split. It is one more window on the same terminal, for the "split",
 - `diff.open_in = 'current'` adds no window: the terminal is already in that
   tab page. `diff.show_terminal = false` gives the diff the whole tab page.
 
+11. Statusline                                              *agent-statusline*
+
+Claude Code and Copilot CLI tell their terminal when they are working, with
+ConEmu's progress sequence OSC 9;4 (ESC ] 9 ; 4 ; 3 when a turn starts,
+ESC ] 9 ; 4 ; 0 when it ends), which terminals show as a progress bar or a
+tab indicator. agent.nvim reads it from the agent's terminal (|TermRequest|),
+also while the terminal is hidden, so that your statusline can show that the
+agent is working:
+- |agent.statusline|: a spinner and the agent's name, for heirline.nvim or
+  any other statusline.
+- `agent.progress` in |agent.status()|, and the |AgentProgress| event.
+- 'busy' in the agent's terminal buffer (Neovim 0.12+), which the default
+  statusline shows as ◐ in the agent's window.
+
+The agents send it only to terminals they know: Claude Code 2.1 to ConEmu,
+Ghostty 1.2+ and iTerm2 3.6.6+ (by $ConEmuANSI, $TERM_PROGRAM and
+$TERM_PROGRAM_VERSION, which Neovim's terminal inherits), never with
+$WT_SESSION set (Neovim in Windows Terminal); Copilot CLI 1.0 to the
+terminals it recognizes from $TERM_PROGRAM, $TERM, $WT_SESSION and
+$ConEmuANSI, not inside tmux or Zellij unless tmux's own terminal is one of
+them. So agent.nvim sets ConEmuANSI=ON for them (|agent-config-options|:
+`agents.<name>.progress`). The commands the agent runs inherit it, but hardly
+any program outside Windows reads it. Claude only sends the sequence while
+its "Terminal progress bar" setting (/config) is on, the default.
+
+Notes:
+- OpenCode and Gemini CLI send no progress: the spinner never turns for them.
+- A turn includes a permission prompt the agent waits on: the spinner keeps
+  turning until you answer it.
+
+                                                            *agent.statusline*
+require('agent.statusline')
+    Loading this module (from your statusline config) starts redrawing the
+    statuslines and window bars (|:redrawstatus|!), and the tabline when
+    'tabline' is set, every `INTERVAL_MS` (100) while the agent works, so
+    that the spinner turns, and once more when it stops. Nothing is redrawn
+    while the agent does not work, nor when the module is never loaded.
+
+    get()           "⠹ claude" (the spinner and the agent's name) while the
+                    agent works, else "". It is not escaped for 'statusline'
+                    (a % in the agent's name): use it in %{}: >vim
+        set statusline+=%{v:lua.require'agent.statusline'.get()}
+<
+    heirline({opts})
+                    A heirline.nvim component that shows get() while the
+                    agent works, and nothing otherwise. {opts}.hl: its
+                    highlight, as heirline takes it (a group name, a table
+                    or a function). It is a plain table: change or add
+                    fields as you like. >lua
+        require('heirline').setup({
+          statusline = {
+            -- ... your components
+            require('agent.statusline').heirline({ hl = 'DiagnosticInfo' }),
+          },
+        })
+<
+    frame()         The spinner frame for now, for a component of your own
+                    (with `agent.progress.working` of |agent.status()|).
+    FRAMES          The frames, one per `INTERVAL_MS`.
+
 ==============================================================================
-11. Events and variables                                        *agent-events*
+12. Events and variables                                        *agent-events*
 
 User autocommands (|User|), with data in `ev.data`:
 
@@ -1253,6 +1325,13 @@ AgentTerminalExit
 AgentSessionName
     Copilot reported a session name. Data: provider ("copilot"), name,
     session, pid, terminal.
+                                                               *AgentProgress*
+AgentProgress
+    What the agent reports about its work changed (|agent-statusline|).
+    Data: name, bufnr, state ("busy", "progress", "error", "paused" or
+    "idle"), percent (0 to 100, with "progress", and with "error" and
+    "paused" when the agent gives one), working (state is "busy" or
+    "progress"). A working agent that stops or exits becomes "idle".
 >lua
     vim.api.nvim_create_autocmd('User', {
       pattern = 'AgentTerminalExit',
@@ -1301,7 +1380,7 @@ kind), AGENT_NVIM_SESSION, AGENT_NVIM_TIMEOUT_MS. Set AGENT_NVIM_MCP_DEBUG=1
 to make it log the methods it receives to stderr.
 
 ==============================================================================
-12. Troubleshooting                                    *agent-troubleshooting*
+13. Troubleshooting                                    *agent-troubleshooting*
 
 Start with `:checkhealth agent` (|agent-health|). Then |:AgentStatus| shows
 whether the agent's IDE server has a client.
@@ -1384,7 +1463,7 @@ The agent does not see the selection ~
     integration until the directory can be created.
 
 ==============================================================================
-13. Protocol notes and credits                               *agent-protocols*
+14. Protocol notes and credits                               *agent-protocols*
 
 The Claude IDE protocol implementation follows coder/claudecode.nvim
 (https://github.com/coder/claudecode.nvim), whose Lua server and PROTOCOL.md
@@ -1401,7 +1480,7 @@ discovery, transport, auth, tools, notifications and verified quirks of each
 protocol, with the CLI versions they were verified against.
 
 ==============================================================================
-14. Running the tests                                            *agent-tests*
+15. Running the tests                                            *agent-tests*
 
 From the repository root: >sh
     make test            # both suites below

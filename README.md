@@ -26,6 +26,8 @@ Lua, and send you notifications.
   accept with `:w`, reject by closing it.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
   Neovim it runs in.
+- A [statusline spinner](#statusline-spinner) while Claude Code or Copilot CLI is working, even
+  with its terminal hidden.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
   a token.
 
@@ -148,6 +150,31 @@ config to add (`:help agent-nvim-mcp-manual`).
 and Gemini ask before each call unless `agents.<name>.auto_approve = true`; OpenCode follows its
 own `permission` config. Disable it with `nvim_mcp.enabled = false`, or per agent with
 `agents.<name>.mcp = false`.
+
+## Statusline spinner
+
+Claude Code and Copilot CLI tell their terminal when they are working, with the OSC 9;4 progress
+sequence that some terminals show as a progress bar. agent.nvim reads it from the agent's terminal,
+so your statusline can show a spinner while the agent works. With
+[heirline.nvim](https://github.com/rebelot/heirline.nvim), add the component to your statusline:
+
+```lua
+require('heirline').setup({
+  statusline = {
+    -- ... your components
+    require('agent.statusline').heirline({ hl = 'DiagnosticInfo' }), -- "⠹ claude" while it works
+  },
+})
+```
+
+Any other statusline can use `require('agent.statusline').get()`, e.g.
+`set statusline+=%{v:lua.require'agent.statusline'.get()}`. On Neovim 0.12 the default statusline
+also shows `◐` in the agent's window while it works (`'busy'`).
+
+- The agents send the sequence only to terminals they know, so agent.nvim sets `ConEmuANSI=ON`
+  (ConEmu's variable) for them; `agents.<name>.progress = false` turns that off.
+- The spinner keeps turning while the agent waits on a permission prompt: that is still its turn.
+- OpenCode and Gemini CLI do not send it. See `:help agent-statusline`.
 
 ## Agent notes
 

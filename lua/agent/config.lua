@@ -67,7 +67,12 @@ M.defaults = {
 
   ---@type table<string, agent.AgentConfig>
   agents = {
-    claude = { cmd = { 'claude' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false },
+    claude = {
+      cmd = { 'claude' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false,
+      ---@type boolean  Make it report when it is working (OSC 9;4, for statuslines: agent.statusline), which
+      --- it does only in terminals it knows: sets ConEmuANSI=ON for it
+      progress = true,
+    },
     opencode = {
       cmd = { 'opencode' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false,
       ---@type integer  OpenCode reads selection lines as 1-based; this offset is added to the 0-based wire values
@@ -75,7 +80,11 @@ M.defaults = {
       ---@type boolean  Unset TERM_PROGRAM/TERM_PROGRAM_VERSION/GIT_ASKPASS inherited from a VS Code terminal
       scrub_vscode_env = true,
     },
-    copilot = { cmd = { 'copilot' }, args = {}, env = {}, provider = 'copilot', mcp = true, auto_approve = false },
+    copilot = {
+      cmd = { 'copilot' }, args = {}, env = {}, provider = 'copilot', mcp = true, auto_approve = false,
+      ---@type boolean  As for claude
+      progress = true,
+    },
     gemini = {
       cmd = { 'gemini' }, args = {}, env = {}, provider = 'gemini', mcp = true, auto_approve = false,
       ---@type boolean  Pass --skip-trust (trusts the folder for this run; needed for stdio MCP servers in untrusted folders)

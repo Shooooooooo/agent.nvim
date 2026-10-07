@@ -131,6 +131,7 @@ describe('agents', function()
         CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL = 'true',
         no_proxy = LOOPBACK,
         NO_PROXY = LOOPBACK,
+        ConEmuANSI = 'ON',
       }, spec.env)
       assert.eq(false, spec.clear_env)
       assert.eq(proj, spec.cwd)
@@ -188,7 +189,7 @@ describe('agents', function()
     it('omits IDE env without provider info and warns about CLAUDE_CODE_AUTO_CONNECT_IDE=false', function()
       local spec = agents.build_launch('claude', o())
       assert.same({ AGENT_NVIM_SESSION = 'sid-1', CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL = 'true', no_proxy = LOOPBACK,
-        NO_PROXY = LOOPBACK }, spec.env)
+        NO_PROXY = LOOPBACK, ConEmuANSI = 'ON' }, spec.env)
       spec = agents.build_launch('claude', o({
         ide = { port = 1 },
         environ = { CLAUDE_CODE_AUTO_CONNECT_IDE = 'false' },
@@ -280,7 +281,7 @@ describe('agents', function()
       })))
       local file = tmp .. '/sessions/sid-1/copilot-mcp.json'
       assert.same({ 'copilot', '--model', 'gpt-5', '--additional-mcp-config', '@' .. file, '--allow-tool=nvim' }, spec.argv)
-      assert.same({ AGENT_NVIM_SESSION = 'sid-1' }, spec.env)
+      assert.same({ AGENT_NVIM_SESSION = 'sid-1', ConEmuANSI = 'ON' }, spec.env)
       assert.eq(false, spec.clear_env)
       assert.eq('/work/repo', spec.cwd)
       assert.same({
@@ -688,7 +689,24 @@ describe('agents', function()
         environ = { NVIM = '/fake/outer.sock', PATH = '/bin', COPILOT_THING = 'x', HOME = '/h' },
       }))
       assert.eq(true, spec.clear_env)
-      assert.same({ PATH = '/bin', HOME = '/h', EXTRA = '1', AGENT_NVIM_SESSION = 'sid-1' }, spec.env)
+      assert.same({ PATH = '/bin', HOME = '/h', EXTRA = '1', AGENT_NVIM_SESSION = 'sid-1', ConEmuANSI = 'ON' }, spec.env)
+    end)
+
+    it('sets ConEmuANSI=ON for Claude and Copilot (progress reports), unless off or set by the user', function()
+      for _, name in ipairs({ 'claude', 'copilot' }) do
+        assert.eq('ON', agents.build_launch(name, o()).env.ConEmuANSI, name)
+        assert.eq(nil, agents.build_launch(name, o({ progress = false })).env.ConEmuANSI, name)
+        assert.eq('1', agents.build_launch(name, o({ env = { ConEmuANSI = '1' } })).env.ConEmuANSI, name)
+        local spec = agents.build_launch(name, o({ env = { ConEmuANSI = false }, environ = { ConEmuANSI = 'ON' } }))
+        assert.eq(true, spec.clear_env, name)
+        assert.eq(nil, spec.env.ConEmuANSI, name)
+      end
+      for _, name in ipairs({ 'opencode', 'gemini' }) do
+        assert.eq(nil, agents.build_launch(name, o()).env.ConEmuANSI, name)
+      end
+      config.setup({ agents = { claude = { progress = false }, work = { cmd = { 'copilot' }, provider = 'copilot' } } })
+      assert.eq(nil, agents.build_launch('claude', o()).env.ConEmuANSI)
+      assert.eq('ON', agents.build_launch('work', o()).env.ConEmuANSI)
     end)
 
     it('plugin values win over user env', function()
