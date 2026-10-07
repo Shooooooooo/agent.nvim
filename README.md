@@ -24,6 +24,9 @@ Lua, and send you notifications.
   agent follows your current file and selection by itself, the same way.
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
+- While Claude Code or Copilot CLI works, the terminal Neovim runs in shows the agent's progress
+  bar (OSC 9;4), as it would outside Neovim: in Ghostty, iTerm2 and the other terminals the agent
+  sends it to.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
   Neovim it runs in.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require

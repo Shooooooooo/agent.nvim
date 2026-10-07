@@ -43,6 +43,7 @@ M.FAIL_FAST_MS = 5000
 ---@field exit_code integer|nil
 ---@field stopping boolean|nil
 ---@field cleaned boolean|nil
+---@field progress boolean|nil  the host terminal shows the agent's progress bar (forward_progress())
 
 ---The agent terminal: running, or finished with its terminal left open. A stopped terminal is
 ---forgotten at once (its job may still be exiting).
@@ -347,11 +348,54 @@ local function cleanup_spec(spec)
   end
 end
 
+---Write `data` to the terminal Neovim runs in, when a TUI shows it.
+---@param data string
+local function send_to_host(data)
+  if vim.api.nvim_ui_send then -- Neovim 0.12+
+    pcall(vim.api.nvim_ui_send, data)
+    return
+  end
+  -- The TUI that started this Neovim: its terminal is Neovim's stderr (vim.ui.clipboard.osc52 in
+  -- Neovim 0.11 writes there too).
+  for _, ui in ipairs(vim.api.nvim_list_uis()) do
+    if ui.chan == 1 and ui.stdout_tty then
+      pcall(vim.api.nvim_chan_send, 2, data)
+      return
+    end
+  end
+end
+
+---OSC 9;4 state 0: the host terminal removes the progress bar (the form Neovim 0.12 sends).
+local PROGRESS_CLEAR = '\27]9;4;0;0\27\\'
+
+---Pass the agent's progress bar on to the terminal Neovim runs in: Neovim's terminal swallows it.
+---Claude Code and Copilot CLI report their progress with OSC 9;4 (ConEmu's ESC ] 9 ; 4 ; <state> ;
+---<percent>, where state 0 removes the bar and 3 is indeterminate) only when $TERM_PROGRAM,
+---inherited from that terminal, names one that shows it (Ghostty, iTerm2): the sequence goes on
+---as the agent sent it.
+---@param t agent.Term
+---@param data { sequence: string, terminator?: string }  TermRequest's event data (the terminator
+---  is new in Neovim 0.12)
+local function forward_progress(t, data)
+  local seq = data.sequence
+  local st = type(seq) == 'string' and seq:match('^\27%]9;4;(%d*);?%d*$')
+  if not st or t.cleaned then
+    return
+  end
+  t.progress = (tonumber(st) or 0) ~= 0
+  send_to_host(seq .. (data.terminator or '\27\\'))
+end
+
 ---@param t agent.Term
 local function cleanup_term(t)
   if not t.cleaned then
     t.cleaned = true
     cleanup_spec(t.spec)
+    -- An agent stopped, or gone, in the middle of a task leaves no progress bar behind.
+    if t.progress then
+      t.progress = nil
+      send_to_host(PROGRESS_CLEAR)
+    end
   end
 end
 
@@ -801,6 +845,13 @@ local function start(name, opts)
     buffer = buf,
     callback = function()
       leave_finished(t)
+    end,
+  })
+  vim.api.nvim_create_autocmd('TermRequest', {
+    group = state.augroup,
+    buffer = buf,
+    callback = function(ev)
+      forward_progress(t, ev.data)
     end,
   })
 

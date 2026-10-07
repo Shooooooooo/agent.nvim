@@ -1454,4 +1454,90 @@ describe('terminal', function()
     vim.api.nvim_exec_autocmds('VimLeavePre', {})
     assert.eq(0, vim.fn.isdirectory(dir))
   end)
+
+  describe('the progress bar (OSC 9;4)', function()
+    local api = vim.api
+    local CLEAR = '\27]9;4;0;0\27\\'
+    local sent, saved
+
+    ---The sequence the host terminal gets for `body` sent with `terminator`: Neovim 0.11 does not
+    ---report the terminator, so ST ends it.
+    local function osc(body, terminator)
+      return '\27]' .. body .. (vim.fn.has('nvim-0.12') == 1 and terminator or '\27\\')
+    end
+
+    before_each(function()
+      -- What reaches the terminal Neovim runs in: nvim_ui_send() (0.12), else stderr when the TUI
+      -- that started Neovim is attached (0.11). Headless Neovim has no TUI to send to.
+      sent = {}
+      saved = { ui_send = api.nvim_ui_send, list_uis = api.nvim_list_uis, chan_send = api.nvim_chan_send }
+      if api.nvim_ui_send then
+        api.nvim_ui_send = function(data)
+          sent[#sent + 1] = data
+        end
+      else
+        api.nvim_list_uis = function()
+          return { { chan = 1, stdout_tty = true } }
+        end
+        api.nvim_chan_send = function(chan, data)
+          if chan ~= 2 then
+            return saved.chan_send(chan, data)
+          end
+          sent[#sent + 1] = data
+        end
+      end
+    end)
+
+    after_each(function()
+      api.nvim_ui_send, api.nvim_list_uis, api.nvim_chan_send = saved.ui_send, saved.list_uis, saved.chan_send
+    end)
+
+    it('goes on to the host terminal as the agent sent it, and is removed when the agent stops', function()
+      -- A title, a notification and a notification that starts with "4": not progress reports.
+      local launch, out = fake({ env = { FAKE_AGENT_PRINT = '\27]0;title\7\27]9;Done\7\27]9;4 files\7\27]9;4;3;\7' } })
+      terminal.open('fake', { launch = launch })
+      wait_ready(out)
+      wait_for(function()
+        return #sent > 0
+      end, 5000, 'progress forwarded')
+      vim.wait(50)
+      assert.same({ osc('9;4;3;', '\7') }, sent)
+      terminal.stop()
+      assert.same({ osc('9;4;3;', '\7'), CLEAR }, sent)
+    end)
+
+    it('is not removed again when the agent removed it', function()
+      local launch, out = fake({ env = { FAKE_AGENT_PRINT = '\27]9;4;1;50\27\\\27]9;4;0;0\27\\' } })
+      terminal.open('fake', { launch = launch })
+      wait_ready(out)
+      wait_for(function()
+        return #sent == 2
+      end, 5000, 'progress forwarded')
+      terminal.stop()
+      vim.wait(50)
+      assert.same({ osc('9;4;1;50', '\27\\'), osc('9;4;0;0', '\27\\') }, sent)
+    end)
+
+    it('is removed when the agent exits in the middle of a task, and on VimLeavePre', function()
+      local launch = fake({ env = { FAKE_AGENT_PRINT = '\27]9;4;3;\7', FAKE_AGENT_EXIT = '0', FAKE_AGENT_SLEEP = '0.3' } })
+      local buf = terminal.open('fake', { launch = launch })
+      wait_for(function()
+        return not api.nvim_buf_is_valid(buf)
+      end, 5000, 'exited')
+      assert.same({ osc('9;4;3;', '\7'), CLEAR }, sent)
+
+      sent = {}
+      local out
+      launch, out = fake({ env = { FAKE_AGENT_PRINT = '\27]9;4;2;80\7' } })
+      terminal.open('fake', { launch = launch })
+      wait_ready(out)
+      wait_for(function()
+        return #sent > 0
+      end, 5000, 'progress forwarded')
+      api.nvim_exec_autocmds('VimLeavePre', {})
+      assert.same({ osc('9;4;2;80', '\7'), CLEAR }, sent)
+      terminal.stop()
+      assert.eq(2, #sent, 'removed once')
+    end)
+  end)
 end)

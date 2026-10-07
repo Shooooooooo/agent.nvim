@@ -769,6 +769,18 @@ model can call, still reads the current file and selection, and so do the
 Claude server's compatibility tools getCurrentSelection and
 getLatestSelection.
 
+                                                              *agent-progress*
+Progress bar ~
+Claude Code and Copilot CLI report their progress while they work with OSC
+9;4, the progress sequence of ConEmu, also shown by Ghostty and iTerm2. They
+send it only when $TERM_PROGRAM, which they inherit from the terminal Neovim
+runs in, names a terminal that shows it: Ghostty 1.2 or newer, iTerm2 3.6.6
+or newer and ConEmu for Claude Code. Neovim's terminal ignores it, so
+agent.nvim passes it on, as the agent sent it, to the terminal Neovim runs
+in, and removes the bar when the agent stops or exits in the middle of a
+task. To turn the bar off, turn it off in the agent ("Terminal progress bar"
+in Claude's /config).
+
 ------------------------------------------------------------------------------
 Claude Code                                                     *agent-claude*
 

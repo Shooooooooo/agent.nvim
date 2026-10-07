@@ -895,6 +895,26 @@ user's config for the session.
 - OpenCode's built-in agents allow `*`, so MCP tools run without asking unless the user's
   `permission` config says otherwise.
 
+**Progress bar (OSC 9;4).** `ESC ] 9 ; 4 ; <state> ; <percent>` (BEL or ST), state 0 removes the
+bar, 1 sets a percentage, 2 is an error, 3 indeterminate. Neovim's terminal reports it as a
+`TermRequest` and shows nothing, so `terminal.lua` passes it on to the host terminal: with
+`nvim_ui_send()` on Neovim 0.12+, ended with the terminator the agent used (`data.terminator`);
+on 0.11, which reports no terminator, to stderr (the TUI's terminal, as 0.11's OSC 52 clipboard
+writes it) when the TUI that started Neovim is attached (`chan == 1`, `stdout_tty`), ended with
+ST. Only the agent's terminal buffer is watched. When the agent stops (`:AgentStop`, a replace,
+`VimLeavePre`) or exits while its last state was not 0, `ESC ] 9 ; 4 ; 0 ; 0 ST` removes the bar.
+- Claude Code 2.1.293 (`terminalProgressBarEnabled`, on by default) sends `9;4;3;` while a turn
+  runs and `9;4;0;` when it ends (and once at startup), with BEL, but only when stdout is a TTY,
+  `WT_SESSION` is unset, and `ConEmuANSI`/`ConEmuPID`/`ConEmuTask` is set, or `TERM_PROGRAM` is
+  `ghostty` with `TERM_PROGRAM_VERSION` >= 1.2.0, or `iTerm.app` >= 3.6.6. Both variables reach
+  the agent from Neovim's environment.
+- Copilot CLI 1.0.93 sends `9;4;3;0` and `9;4;0;0` with BEL, with `TERM_PROGRAM=ghostty`
+  (1.2.3) and nothing without it.
+- Gemini CLI 0.63.0 has no OSC 9;4 in its bundle. OpenCode 1.18.35's binary contains only
+  `9;4;0` (removal).
+- Verified through Neovim's real TUI in a pty (0.11.7 and 0.12.5) with `TERM_PROGRAM=ghostty`:
+  the host got Claude's and Copilot's sequences, and the removal after `:AgentStop` mid-turn.
+
 ---
 
 ## 5. The $NVIM controller (stdio MCP server)
