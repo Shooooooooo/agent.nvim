@@ -13,6 +13,7 @@ the code, and never observed live, is marked **unverified**.
 | Gemini IDE companion (Streamable HTTP over TCP) | Gemini CLI | Gemini CLI 0.61.0 (also 0.59.0, 0.50.0; source read at 0.63.0-nightly) |
 | $NVIM controller (stdio MCP) | all four | the versions above |
 | Agent progress (terminal output, §6) | all four | Claude Code 2.1.295, Gemini CLI 0.63.0; Copilot CLI 1.0.94 and OpenCode 1.18.35 from their code only (**unverified**) |
+| Agent notifications (terminal output, §6) | Claude Code | Claude Code 2.1.295 |
 
 Neovim 0.12.5 was used throughout. Re-verify after upgrading a CLI: all four have changed these
 protocols between releases.
@@ -21,7 +22,8 @@ Code map: `lua/agent/providers/claude.lua`, `copilot.lua` and `gemini.lua` imple
 IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable HTTP binding
 `mcp/streamable_http.lua`, and the `net/http.lua` and `net/websocket.lua` servers.
 `lua/agent/agents.lua` builds launch specs, and `lua/agent/nvim_mcp/` is the controller.
-`lua/agent/progress.lua` reads from the agent's terminal whether it is working (§6).
+`lua/agent/progress.lua` reads from the agent's terminal whether it is working, and
+`lua/agent/notifications.lua` passes its desktop notifications on to the host terminal (§6).
 
 ## Conventions and pitfalls common to all protocols
 
@@ -949,7 +951,7 @@ user's config for the session.
 
 ---
 
-## 6. Agent progress (terminal output)
+## 6. Agent progress and notifications (terminal output)
 
 `lua/agent/progress.lua` shows whether the agent is working as a Neovim progress message
 (`nvim_echo` with `kind = 'progress'`, source `agent.nvim`, the agent's name as title) and as
@@ -995,11 +997,43 @@ is read from the agent's terminal output.
   ConEmu variables; never with `WT_SESSION`). Observed live: it stays at `3` during a permission
   prompt while its title shows `✳`. So agent.nvim reads only the title of Claude Code (and of
   Gemini CLI), and only OSC 9;4 for every other kind.
-- With the ghostty notification channel (inherited `TERM_PROGRAM`), Claude Code also sends OSC 777
-  `notify;Claude Code;Claude needs your permission` about 6 s into a permission prompt.
 - An idle signal ends the message only when no busy signal follows within 300 ms
   (`progress.IDLE_MS`), and a message is sent only when the state or the percentage changes:
   Claude's alternating glyph and Copilot's repeated state are no news.
+
+### Notifications
+
+An agent's desktop notification only fires `TermRequest` in Neovim's terminal: Neovim 0.12.5 sends
+nothing on (its own `TermRequest` handlers answer the OSC 10/11 color queries and mark OSC 133
+prompts). `lua/agent/notifications.lua` passes the agent's notifications on to the host terminal.
+
+- Claude Code 2.1.295 sends them by its `/config` setting "Notifications" (`preferredNotifChannel`,
+  default `auto`): `iterm2` (OSC 9), `kitty` (OSC 99), `ghostty` (OSC 777), `terminal_bell`,
+  `iterm2_with_bell` or `notifications_disabled`. `auto` picks by its terminal: `iTerm.app` → OSC
+  9, `kitty` → OSC 99, `ghostty` → OSC 777, Apple Terminal → the bell in some cases, anything else
+  → none. Its terminal is `ghostty` for `TERM=xterm-ghostty`, `kitty` for a `TERM` that contains
+  kitty, else `TERM_PROGRAM`. Inside Neovim (`TERM=xterm-256color`) the `TERM_PROGRAM` inherited
+  from the host terminal decides.
+- The `ghostty` channel writes `ESC]777;notify;<title>;<message> BEL` (title `Claude Code`),
+  wrapped in DCS passthrough under tmux or screen. Claude turns C0, DEL and C1 characters in the
+  title and message into spaces. Observed live: `notify;Claude Code;Claude needs your permission`
+  6 s into a permission prompt. From the code: `Claude is waiting for your input` once it has been
+  idle for `messageIdleNotifThresholdMs`.
+- agent.nvim passes on `777;notify;` from the agent's terminal only (`agent.terminal.bufnr()`), as
+  `ESC]777;notify;<title>;<body> ESC\`, with `nvim_ui_send()`: only UIs with `stdout_tty` (the
+  TUI) get it. It turns C0, DEL and C1 characters into spaces too, so nothing in the text can end
+  the sequence early or start another one. The other OSC 777 commands (VTE's `precmd`, `preexec`)
+  are about the agent's own terminal and stay there. OSC 9 and OSC 99 notifications are not passed
+  on.
+- `nvim_ui_send()` output goes out with the next UI flush. The main loop flushes after every event
+  it handles (`state_enter()`), so the notification goes out at once, but not while Lua blocks in
+  `vim.wait()` or a hit-enter prompt waits: then it goes with the next redraw (or when Neovim
+  exits). agent.nvim does not force a flush: `:redraw` and `nvim__redraw({ flush = true })` call
+  `update_screen()`, which drops a pending hit-enter prompt (`need_wait_return = false`).
+- Verified with Neovim 0.12.5's TUI nested in a terminal (`tests/spec/notifications_spec.lua`), and
+  live with Claude Code 2.1.295 (`TERM_PROGRAM=ghostty`, the e2e fake model, a Bash permission
+  prompt): the host terminal got the notification 0.2 s after Claude sent it, and the progress bar
+  ended when the prompt showed, while Claude's own OSC 9;4 stayed at `3`.
 
 ---
 

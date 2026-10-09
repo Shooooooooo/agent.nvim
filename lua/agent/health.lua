@@ -129,6 +129,38 @@ local function check_progress(h)
   end
 end
 
+local function check_notifications(h)
+  h.start('agent.nvim: notifications')
+  local agents = require('agent.agents')
+  if require('agent.config').get().notifications.enabled == false then
+    h.info('off (notifications.enabled = false)')
+    return
+  end
+  if require('agent.notifications').host_terminal() then
+    h.ok("the agent's desktop notifications (OSC 777) go on to the terminal Neovim runs in")
+  else
+    h.info('no terminal to pass the notifications on to: Neovim did not start in one')
+  end
+  -- Claude Code picks its notification channel by TERM_PROGRAM, inherited from Neovim's terminal.
+  for _, name in ipairs(agents.list()) do
+    local def = agents.get(name)
+    if def.kind == 'claude' then
+      local tp = (def.env or {}).TERM_PROGRAM
+      if tp == nil then
+        tp = vim.env.TERM_PROGRAM
+      end
+      if tp == 'ghostty' then
+        h.ok(name .. ': Claude Code sends its notifications as OSC 777 (TERM_PROGRAM=ghostty), with its '
+          .. 'Notifications setting (/config) at Auto, the default')
+      else
+        h.info(('%s: Claude Code sends its notifications as OSC 777 only in Ghostty (TERM_PROGRAM is %s), or '
+          .. 'with its Notifications setting (/config) at "Ghostty (OSC 777)"')
+          :format(name, (tp == nil or tp == false or tp == '') and 'unset' or tostring(tp)))
+      end
+    end
+  end
+end
+
 local function check_providers(h)
   h.start('agent.nvim: IDE providers')
   local cfg = require('agent.config').get()
@@ -265,6 +297,7 @@ function M.check()
   check_neovim(h)
   check_agents(h)
   check_progress(h)
+  check_notifications(h)
   check_providers(h)
   check_claude(h)
   check_gemini(h)

@@ -15,6 +15,8 @@
 ---  * agent.progress reads from the agent's terminal whether the agent is working, and shows it as a
 ---    Neovim progress message (the statusline, the terminal's progress bar) and 'busy' in its
 ---    terminal (config.progress).
+---  * agent.notifications passes the agent's desktop notifications (OSC 777) from its terminal on
+---    to the terminal Neovim runs in (config.notifications).
 ---  * VimLeavePre stops the agent (SIGTERM to its whole process tree, see agent.terminal.stop()) and
 ---    every provider, and removes temp files.
 ---
@@ -354,6 +356,7 @@ function M.setup(opts)
   require('agent.editor.cmdline').start()
   -- After terminal.setup(): a second setup() reads on the agent that runs.
   require('agent.progress').setup()
+  require('agent.notifications').setup()
 
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)

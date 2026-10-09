@@ -27,6 +27,8 @@ Lua, and send you notifications.
 - While the agent works, Neovim shows it: a progress message for the default statusline and
   your terminal's progress bar, and `◐` on the agent's window (`:help agent-progress`). Claude
   Code and Gemini CLI tell it in their title, Copilot CLI only in some terminals, OpenCode not.
+- The agent's desktop notifications reach your terminal, such as Claude Code's "Claude needs your
+  permission" in Ghostty (`:help agent-notifications`).
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
   Neovim it runs in.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
@@ -126,6 +128,9 @@ require('agent').setup({
   progress = {
     enabled = true,         -- show when the agent works (statusline, terminal progress bar)
   },
+  notifications = {
+    enabled = true,         -- pass the agent's desktop notifications (OSC 777) on to your terminal
+  },
   agents = {
     -- the same keys exist for opencode, copilot and gemini
     claude = {
@@ -167,6 +172,9 @@ own `permission` config. Disable it with `nvim_mcp.enabled = false`, or per agen
 - Under tmux (or screen, zellij) Claude's title does not show when it works, so neither can
   agent.nvim. `agents = { claude = { env = { TMUX = false } } }` unsets TMUX for Claude, which
   then does not use tmux itself either (e.g. for teammates in tmux panes).
+- Claude sends its desktop notifications as OSC 777, which agent.nvim passes on, only in Ghostty
+  by default. In another terminal that shows OSC 777 notifications, set Claude's Notifications
+  setting (`/config`) to "Ghostty (OSC 777)".
 
 ### OpenCode
 

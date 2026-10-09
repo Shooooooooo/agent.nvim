@@ -20,7 +20,7 @@ CONTENTS                                                      *agent-contents*
   8. Agents ................................................... |agent-agents|
   9. The $NVIM controller ................................... |agent-nvim-mcp|
  10. Reviewing diffs ............................................ |agent-diff|
- 11. Progress ............................................... |agent-progress|
+ 11. Progress and notifications ............................. |agent-progress|
  12. Events and variables ..................................... |agent-events|
  13. Troubleshooting ................................. |agent-troubleshooting|
  14. Protocol notes and credits ............................ |agent-protocols|
@@ -47,7 +47,8 @@ diff in Neovim for you to accept or reject, and the agent can read your
 diagnostics.
 
 While the agent works, Neovim's statusline and your terminal's progress bar
-show it (|agent-progress|).
+show it (|agent-progress|), and the agent's desktop notifications reach your
+terminal (|agent-notifications|).
 
 The $NVIM controller (|agent-nvim-mcp|) is a stdio MCP server that agent.nvim
 registers when it launches an agent, without editing your agent config files.
@@ -242,9 +243,10 @@ exited, with its terminal left open, is replaced without asking.
 :checkhealth agent
     Check the Neovim version and server address, the configuration, the agent
     CLIs, the progress messages (|agent-progress|: the terminal's progress
-    bar, what keeps Claude Code from showing its work), the IDE servers (and
-    the Copilot socket path length), Claude's managed policy, the Gemini
-    settings and extension, and the controller.
+    bar, what keeps Claude Code from showing its work), the notifications
+    (|agent-notifications|: whether Claude Code sends them as OSC 777), the
+    IDE servers (and the Copilot socket path length), Claude's managed policy,
+    the Gemini settings and extension, and the controller.
 
 ==============================================================================
 6. Lua API                                                         *agent-api*
@@ -367,6 +369,7 @@ The defaults, from lua/agent/config.lua: >lua
         keymaps = { accept = '<leader>aa', reject = '<leader>ad' },
       },
       progress = { enabled = true }, -- show when the agent works
+      notifications = { enabled = true }, -- pass on its notifications
       agents = {
         claude = { cmd = { 'claude' }, args = {}, env = {},
           provider = 'claude', mcp = true, auto_approve = false },
@@ -524,6 +527,9 @@ progress.enabled (true)
     default 'statusline' and the terminal's progress bar show, and 'busy'
     in the agent's terminal buffer. See |agent-progress|. Set by a later
     setup(), false ends a running message.
+notifications.enabled (true)
+    Pass the agent's desktop notifications (OSC 777) on to the terminal
+    Neovim runs in. See |agent-notifications|. Set by a later setup().
 agents.<name>.cmd
     Executable and fixed leading arguments, e.g. `{ 'claude' }`.
 agents.<name>.args ({})
@@ -1247,7 +1253,7 @@ its own split. It is one more window on the same terminal, for the "split",
   tab page. `diff.show_terminal = false` gives the diff the whole tab page.
 
 ==============================================================================
-11. Progress                                                  *agent-progress*
+11. Progress and notifications                                *agent-progress*
 
 While the agent works on a prompt, agent.nvim keeps a Neovim progress message
 running (|progress-message|), and 'busy' is 1 in the agent's terminal buffer.
@@ -1318,6 +1324,26 @@ The message ~
       end,
     })
 <
+                                                         *agent-notifications*
+Notifications ~
+An agent asks its terminal for a desktop notification with an escape
+sequence, which Neovim's terminal keeps to itself. agent.nvim passes the
+agent's notifications (OSC 777) on to the terminal Neovim runs in, and a
+terminal that shows them (Ghostty, WezTerm, foot, ...) shows them.
+
+Claude Code sends one when it has waited about 6 seconds for your permission
+("Claude needs your permission"), and when it has waited for your input for a
+while ("Claude is waiting for your input"). It sends them as OSC 777 when its
+Notifications setting (/config) is Auto, the default, and its terminal is
+Ghostty: TERM_PROGRAM=ghostty, which it inherits from the terminal Neovim
+runs in. In another terminal that shows OSC 777, set the setting to "Ghostty
+(OSC 777)". Its other channels (iTerm2's OSC 9, kitty's OSC 99) are not
+passed on.
+
+Only notifications from the agent's own terminal are passed on, with control
+characters in their text turned into spaces. Neovim must run in the terminal
+(not in a GUI), and not under tmux, which does not pass them on either.
+`notifications.enabled = false` turns this off.
 
 ==============================================================================
 12. Events and variables                                        *agent-events*
@@ -1467,6 +1493,13 @@ No progress shows while the agent works ~
     work. With your own 'statusline', add the items in |agent-progress|.
     The terminal's progress bar needs a terminal that draws OSC 9;4, with
     Neovim running in it (not in a GUI).
+No desktop notification from the agent ~
+    See when Claude Code sends one in |agent-notifications|, and run
+    `:checkhealth agent`. In a terminal other than Ghostty, set Claude's
+    Notifications setting (/config) to "Ghostty (OSC 777)". The terminal must
+    show OSC 777 notifications and allow them (in Ghostty,
+    desktop-notifications = true, the default), with Neovim running in it
+    (not in a GUI, not under tmux).
 "could not write the Claude lock file: E739: ..." ~
     Shown at setup() with `auto_start`, or when Claude or OpenCode starts.
     The lock directory (`providers.claude.lock_dir`, default ~/.claude/ide)
