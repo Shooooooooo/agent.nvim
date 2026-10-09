@@ -12,6 +12,9 @@
 ---    disabled), then focuses the agent's terminal, starting the agent if needed.
 ---  * agent.editor.selection runs while a provider runs (the providers' tools read it), and with
 ---    config.selection.track (off by default) its events are forwarded to every running provider.
+---  * agent.progress reads from the agent's terminal whether the agent is working, and shows it as a
+---    Neovim progress message (the statusline, the terminal's progress bar) and 'busy' in its
+---    terminal (config.progress).
 ---  * VimLeavePre stops the agent (SIGTERM to its whole process tree, see agent.terminal.stop()) and
 ---    every provider, and removes temp files.
 ---
@@ -349,6 +352,8 @@ function M.setup(opts)
   })
   -- (Also started by plugin/agent.lua; here for a setup() without it.)
   require('agent.editor.cmdline').start()
+  -- After terminal.setup(): a second setup() reads on the agent that runs.
+  require('agent.progress').setup()
 
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)

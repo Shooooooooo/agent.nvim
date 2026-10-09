@@ -74,6 +74,61 @@ local function check_agents(h)
   end
 end
 
+---Variables that keep Claude Code from showing its work in its title: a terminal multiplexer (its
+---title then always starts with ✳), or titles turned off.
+local CLAUDE_TITLE_VARS = { 'TMUX', 'STY', 'ZELLIJ', 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE' }
+
+local function check_progress(h)
+  h.start('agent.nvim: progress')
+  local progress = require('agent.progress')
+  local agents = require('agent.agents')
+  if require('agent.config').get().progress.enabled == false then
+    h.info('off (progress.enabled = false)')
+    return
+  end
+  h.ok(("the agent's work shows as a progress message (source '%s') and as 'busy' in its terminal")
+    :format(progress.SOURCE))
+  if progress.host_bar() then
+    h.ok("Neovim also shows it as the terminal's progress bar (OSC 9;4)")
+  else
+    h.info("no terminal progress bar: Neovim did not start in a terminal")
+  end
+  for _, name in ipairs(agents.list()) do
+    local def = agents.get(name)
+    if def.kind == 'claude' then
+      local set, mux = {}, false
+      for _, k in ipairs(CLAUDE_TITLE_VARS) do
+        local v = (def.env or {})[k]
+        if v == nil then
+          v = vim.env[k]
+        end
+        if v ~= nil and v ~= false and v ~= '' then
+          set[#set + 1] = k
+          mux = mux or k ~= 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE'
+        end
+      end
+      if #set > 0 then
+        h.warn(('%s: %s in its environment, so Claude Code shows no work in its title: no progress')
+          :format(name, table.concat(set, ', ')), {
+          ('Unset %s for the agent: agents = { %s = { env = { %s = false } } }.%s'):format(
+            #set > 1 and 'them' or 'it', name, table.concat(set, ' = false, '),
+            mux and ' Claude Code then does not use the multiplexer itself either (e.g. for teammates in '
+              .. 'tmux panes).' or ''),
+        })
+      end
+    end
+  end
+  h.info('OpenCode shows no progress, and Copilot CLI only in the terminals it recognizes (not under '
+    .. 'tmux or zellij)')
+  if vim.o.messagesopt:find('progress:c', 1, true) then
+    h.info('each message also shows in the command line; to hide it: set messagesopt-=progress:c')
+  end
+  if vim.api.nvim_get_option_info2('statusline', {}).was_set then
+    h.info("'statusline' is set: to show the progress there, add %{%v:lua.vim.ui.progress_status()%} "
+      .. "and %{&busy > 0 ? '◐ ' : ''}")
+  end
+end
+
 local function check_providers(h)
   h.start('agent.nvim: IDE providers')
   local cfg = require('agent.config').get()
@@ -209,6 +264,7 @@ function M.check()
   local h = vim.health
   check_neovim(h)
   check_agents(h)
+  check_progress(h)
   check_providers(h)
   check_claude(h)
   check_gemini(h)

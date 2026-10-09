@@ -20,10 +20,11 @@ CONTENTS                                                      *agent-contents*
   8. Agents ................................................... |agent-agents|
   9. The $NVIM controller ................................... |agent-nvim-mcp|
  10. Reviewing diffs ............................................ |agent-diff|
- 11. Events and variables ..................................... |agent-events|
- 12. Troubleshooting ................................. |agent-troubleshooting|
- 13. Protocol notes and credits ............................ |agent-protocols|
- 14. Running the tests ......................................... |agent-tests|
+ 11. Progress ............................................... |agent-progress|
+ 12. Events and variables ..................................... |agent-events|
+ 13. Troubleshooting ................................. |agent-troubleshooting|
+ 14. Protocol notes and credits ............................ |agent-protocols|
+ 15. Running the tests ......................................... |agent-tests|
 
 ==============================================================================
 1. Introduction                                                  *agent-intro*
@@ -44,6 +45,9 @@ With the IDE connection |:AgentSend| gives the agent your selection, or a
 whole file, for your next prompt (|agent-context|), proposed edits open as a
 diff in Neovim for you to accept or reject, and the agent can read your
 diagnostics.
+
+While the agent works, Neovim's statusline and your terminal's progress bar
+show it (|agent-progress|).
 
 The $NVIM controller (|agent-nvim-mcp|) is a stdio MCP server that agent.nvim
 registers when it launches an agent, without editing your agent config files.
@@ -237,8 +241,10 @@ exited, with its terminal left open, is replaced without asking.
                                                                 *agent-health*
 :checkhealth agent
     Check the Neovim version and server address, the configuration, the agent
-    CLIs, the IDE servers (and the Copilot socket path length), Claude's
-    managed policy, the Gemini settings and extension, and the controller.
+    CLIs, the progress messages (|agent-progress|: the terminal's progress
+    bar, what keeps Claude Code from showing its work), the IDE servers (and
+    the Copilot socket path length), Claude's managed policy, the Gemini
+    settings and extension, and the controller.
 
 ==============================================================================
 6. Lua API                                                         *agent-api*
@@ -360,6 +366,7 @@ The defaults, from lua/agent/config.lua: >lua
         show_terminal = true,    -- the agent terminal in diff tab pages
         keymaps = { accept = '<leader>aa', reject = '<leader>ad' },
       },
+      progress = { enabled = true }, -- show when the agent works
       agents = {
         claude = { cmd = { 'claude' }, args = {}, env = {},
           provider = 'claude', mcp = true, auto_approve = false },
@@ -512,6 +519,11 @@ diff.keymaps.accept ("<leader>aa")
 diff.keymaps.reject ("<leader>ad")
     Normal-mode keys, buffer-local in diff buffers. "" or false disables a
     key.
+progress.enabled (true)
+    Show when the agent is working: a Neovim progress message that the
+    default 'statusline' and the terminal's progress bar show, and 'busy'
+    in the agent's terminal buffer. See |agent-progress|. Set by a later
+    setup(), false ends a running message.
 agents.<name>.cmd
     Executable and fixed leading arguments, e.g. `{ 'claude' }`.
 agents.<name>.args ({})
@@ -1235,7 +1247,80 @@ its own split. It is one more window on the same terminal, for the "split",
   tab page. `diff.show_terminal = false` gives the diff the whole tab page.
 
 ==============================================================================
-11. Events and variables                                        *agent-events*
+11. Progress                                                  *agent-progress*
+
+While the agent works on a prompt, agent.nvim keeps a Neovim progress message
+running (|progress-message|), and 'busy' is 1 in the agent's terminal buffer.
+Neovim shows them by itself:
+- The default 'statusline' shows |vim.ui.progress_status()| ("0%(1)") in the
+  current window, and ◐ in the windows that show the agent ('busy').
+- A terminal that has a progress bar (OSC 9;4: Ghostty, Windows Terminal,
+  iTerm2, WezTerm, Konsole, ...) runs it while the agent works. Neovim 0.12
+  draws a message without a percentage as an empty bar; agent.nvim makes it
+  a bar that only says busy. The bar is Neovim's, shared by every progress
+  message: another one that ends (|vim.pack|, a plugin's) clears it while
+  the agent works on.
+- The command line shows "claude: working", then "claude: waiting for
+  input". To keep progress messages out of it: >vim
+      set messagesopt-=progress:c
+<
+The message ends when the agent stops working: when it is done, and while it
+waits for you (a permission prompt, a diff to accept); when it exits, when it
+is stopped (|:AgentStop|, a replace), and when Neovim quits.
+`progress.enabled = false` turns all of this off.
+
+How agent.nvim knows ~
+It reads the agent's terminal (|TermRequest|), as the agent tells it:
+- Claude Code: its title starts with ◐ or ◑ while it works, with ✳ when it
+  is idle or waits for you. Not under tmux, screen or zellij (TMUX, STY or
+  ZELLIJ set): its title then always starts with ✳. Nor with
+  CLAUDE_CODE_DISABLE_TERMINAL_TITLE set.
+- Gemini CLI: its title starts with ✦ or ⏲ while it works, with ◇ (ready) or
+  ✋ (action required) otherwise. Not with `ui.dynamicWindowTitle = false` or
+  `ui.hideWindowTitle = true` in its settings.
+- GitHub Copilot CLI: the progress it sends itself (OSC 9;4). It does that
+  only in the terminals it recognizes (iTerm2, WezTerm, Ghostty, Windows
+  Terminal, VS Code), and not under tmux or zellij.
+- OpenCode tells nothing.
+An agent you define is read as its `kind` is; an agent of any other kind,
+from the OSC 9;4 it sends. `:checkhealth agent` warns about the variables
+that keep Claude Code from showing its work. Under tmux, you can unset TMUX
+for Claude: >lua
+    require('agent').setup({
+      agents = { claude = { env = { TMUX = false } } },
+    })
+<
+Claude Code then does not use tmux itself either (for example for teammates
+in tmux panes).
+
+Your own statusline ~
+To show the progress in your own 'statusline', add
+`%{%v:lua.vim.ui.progress_status()%}`, and `%{&busy > 0 ? '◐ ' : ''}` for the
+agent's windows.
+
+The message ~
+  source    "agent.nvim": the pattern of a |Progress| autocommand
+  title     the agent's name, such as "claude"
+  id        "agent.nvim.<n>", <n> the agent's terminal buffer
+  status    "running" while it works; "success" when it is done, waits,
+            exits or is stopped; "failed" when it exits with an error
+  text      "working", "waiting for input", "stopped", "exited", "exited
+            with code <n>"
+  percent   only from an agent's own OSC 9;4 that has one
+  data      agent, kind, bufnr, pid, session_id
+>lua
+    vim.api.nvim_create_autocmd('Progress', {
+      pattern = 'agent.nvim',
+      callback = function(ev)
+        if ev.data.status ~= 'running' then
+          vim.notify(ev.data.title .. ': ' .. table.concat(ev.data.text))
+        end
+      end,
+    })
+<
+
+==============================================================================
+12. Events and variables                                        *agent-events*
 
 User autocommands (|User|), with data in `ev.data`:
 
@@ -1245,9 +1330,10 @@ AgentTerminalOpen
     session_id.
                                                            *AgentTerminalExit*
 AgentTerminalExit
-    The agent's job exited. Data: name, code, bufnr, session_id. After a
-    replace (|agent-replace|), the old agent's AgentTerminalExit can come
-    after the new agent's AgentTerminalOpen.
+    The agent's job exited. Data: name, code, bufnr, session_id, stopped
+    (true when agent.nvim stopped it: |:AgentStop|, a replace, quitting
+    Neovim). After a replace (|agent-replace|), the old agent's
+    AgentTerminalExit can come after the new agent's AgentTerminalOpen.
                                                             *AgentSessionName*
 AgentSessionName
     Copilot reported a session name. Data: provider ("copilot"), name,
@@ -1300,7 +1386,7 @@ kind), AGENT_NVIM_SESSION, AGENT_NVIM_TIMEOUT_MS. Set AGENT_NVIM_MCP_DEBUG=1
 to make it log the methods it receives to stderr.
 
 ==============================================================================
-12. Troubleshooting                                    *agent-troubleshooting*
+13. Troubleshooting                                    *agent-troubleshooting*
 
 Start with `:checkhealth agent` (|agent-health|). Then |:AgentStatus| shows
 whether the agent's IDE server has a client.
@@ -1375,6 +1461,12 @@ The agent does not see the selection ~
 "agent.nvim: nothing to send ..." ~
     It does not send the agent's own terminal, a diff buffer, a floating
     window or a buffer with |b:agent_ignore|: run it in the file.
+No progress shows while the agent works ~
+    See which agents tell it, and when, in |agent-progress|, and run
+    `:checkhealth agent`: under tmux, for one, Claude Code does not show its
+    work. With your own 'statusline', add the items in |agent-progress|.
+    The terminal's progress bar needs a terminal that draws OSC 9;4, with
+    Neovim running in it (not in a GUI).
 "could not write the Claude lock file: E739: ..." ~
     Shown at setup() with `auto_start`, or when Claude or OpenCode starts.
     The lock directory (`providers.claude.lock_dir`, default ~/.claude/ide)
@@ -1383,7 +1475,7 @@ The agent does not see the selection ~
     integration until the directory can be created.
 
 ==============================================================================
-13. Protocol notes and credits                               *agent-protocols*
+14. Protocol notes and credits                               *agent-protocols*
 
 The Claude IDE protocol implementation follows coder/claudecode.nvim
 (https://github.com/coder/claudecode.nvim), whose Lua server and PROTOCOL.md
@@ -1400,7 +1492,7 @@ discovery, transport, auth, tools, notifications and verified quirks of each
 protocol, with the CLI versions they were verified against.
 
 ==============================================================================
-14. Running the tests                                            *agent-tests*
+15. Running the tests                                            *agent-tests*
 
 From the repository root: >sh
     make test            # both suites below
@@ -1421,16 +1513,18 @@ The live end-to-end test runs the real agent CLIs and is not part of
 For each agent a headless Neovim opens the agent, waits for the IDE
 connection, selects two lines and sends them with a Visual-mode
 `<cmd>AgentSend<cr>` mapping. It checks that the focus moved to the agent,
-that the lines went through the IDE connection (and show in the agent's
-TUI, where it shows them) and that nothing was typed into the prompt, then
-submits a prompt, whose request to the model must carry the lines. A
-scripted model turn then calls the $NVIM controller and proposes an edit,
-which the driver accepts in the Neovim diff (after checking that the diff
-tab page shows the agent terminal too). |:AgentSend| from a scratch buffer
-must then reach the model by its `nvim://buffer/` id. Then the driver stops
-the agent with |agent.stop()| and checks that its IDE server stopped and
-removed its lock or discovery file, tears down, and checks that no process,
-lock or temp directory is left. Everything is isolated:
+that the lines went through the IDE connection (and show in the agent's TUI,
+where it shows them) and that nothing was typed into the prompt, then submits
+a prompt, whose request to the model must carry the lines. A scripted model
+turn then calls the $NVIM controller and proposes an edit, which the driver
+accepts in the Neovim diff (after checking that the diff tab page shows the
+agent terminal too). For Claude and Gemini, the turn must also show as a
+progress message (|agent-progress|) that ends while the diff waits for the
+answer and when the turn is done. |:AgentSend| from a scratch buffer must then
+reach the model by its `nvim://buffer/` id. Then the driver stops the agent
+with |agent.stop()| and checks that its IDE server stopped and removed its
+lock or discovery file, tears down, and checks that no process, lock or temp
+directory is left. Everything is isolated:
 - HOME, the XDG directories, CLAUDE_CONFIG_DIR, COPILOT_HOME and
   GEMINI_CLI_HOME point to a temp directory, and the environment is rebuilt
   with env -i.
