@@ -71,6 +71,12 @@ M.defaults = {
     enabled = true,
   },
 
+  notifications = {
+    ---@type boolean  Pass the agent's desktop notifications (OSC 777, such as Claude Code's in
+    --- Ghostty) on to the terminal Neovim runs in
+    enabled = true,
+  },
+
   ---@type table<string, agent.AgentConfig>
   agents = {
     claude = { cmd = { 'claude' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false },
@@ -144,6 +150,8 @@ function M.validate(opts)
     vim.validate('diff.show_terminal', opts.diff.show_terminal, 'boolean')
     vim.validate('progress', opts.progress, 'table')
     vim.validate('progress.enabled', opts.progress.enabled, 'boolean')
+    vim.validate('notifications', opts.notifications, 'table')
+    vim.validate('notifications.enabled', opts.notifications.enabled, 'boolean')
     vim.validate('agents', opts.agents, 'table')
     for name, a in pairs(opts.agents) do
       vim.validate('agents.' .. name .. '.cmd', a.cmd, 'table')
