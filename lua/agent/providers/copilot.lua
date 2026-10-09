@@ -13,7 +13,7 @@
 ---   selection changes (config.selection.track), and for :AgentSend to the CLI in the agent terminal
 ---   only; both are replayed when a stream opens. add_file_reference is not sent.
 --- * The proposed side of a diff is read-only: after SAVED the CLI writes its own content.
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local util = require('agent.util')
 local log = require('agent.log').scope('copilot')
 local McpServer = require('agent.mcp.server')

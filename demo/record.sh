@@ -12,13 +12,12 @@
 # text and tool choices are scripted (demo/plan.json); pdb, nvim-gdb, Neovim, agent.nvim and
 # Claude Code really run.
 #
-# Needs vhs, ttyd, ffmpeg, nvim (0.12+ for the bundled catppuccin colorscheme; older versions
-# fall back to habamax), node, claude, git and python3 on PATH, and the "JetBrainsMono Nerd Font"
-# (without it VHS silently uses another font; the script warns). python3 must be Python 3.9 (on
-# macOS, /usr/bin/python3 from the Command Line Tools): the tape waits for pdb's output as 3.9
-# prints it (the `restart` of Python 3.14, for one, also prints "The program finished"). The
-# recording was made with vhs 0.12.0, nvim 0.12.5, Claude Code 2.1.284 and Python 3.9.6, on
-# macOS; the Linux branch of the cleanup is untested.
+# Needs vhs, ttyd, ffmpeg, nvim (0.12+), node, claude, git and python3 on PATH, and the
+# "JetBrainsMono Nerd Font" (without it VHS silently uses another font; the script warns).
+# python3 must be Python 3.9 (on macOS, /usr/bin/python3 from the Command Line Tools): the tape
+# waits for pdb's output as 3.9 prints it (the `restart` of Python 3.14, for one, also prints
+# "The program finished"). The recording was made with vhs 0.12.0, nvim 0.12.5, Claude Code
+# 2.1.284 and Python 3.9.6, on macOS; the Linux branch of the cleanup is untested.
 #
 # nvim-gdb (https://github.com/sakhnik/nvim-gdb) is fetched at the pinned commit NVIMGDB_SHA into
 # the temp dir, which needs network access to github.com; set DEMO_NVIMGDB to an existing
@@ -64,7 +63,8 @@ pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 }
 set -- $(nvim --version | sed -n '1s/^NVIM v\([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
 if [ "${1:-0}" -eq 0 ] && [ "${2:-0}" -lt 12 ]; then
-  echo "record.sh: warning: Neovim 0.12+ recommended (catppuccin colorscheme); using habamax" >&2
+  echo "record.sh: Neovim 0.12 or newer required" >&2
+  exit 2
 fi
 if command -v fc-list >/dev/null 2>&1; then
   fc-list 2>/dev/null | grep -qi 'JetBrainsMono Nerd Font'

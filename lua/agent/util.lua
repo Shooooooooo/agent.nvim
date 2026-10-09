@@ -1,5 +1,5 @@
 ---@mod agent.util Shared helpers (files, tokens, JSON, paths)
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local M = {}
 

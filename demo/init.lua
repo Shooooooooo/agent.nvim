@@ -16,10 +16,7 @@ vim.opt.rtp:prepend(repo)
 -- Looks
 vim.o.termguicolors = true
 vim.o.background = 'dark'
--- catppuccin ships with Neovim 0.12; fall back to a built-in scheme on older versions.
-if not pcall(vim.cmd.colorscheme, 'catppuccin') then
-  vim.cmd.colorscheme('habamax')
-end
+vim.cmd.colorscheme('catppuccin') -- ships with Neovim 0.12
 vim.o.number = true
 -- A narrow gutter (3 columns for the line numbers, no fold column in the diff windows).
 vim.o.numberwidth = 3

@@ -12,6 +12,9 @@
 ---    disabled), then focuses the agent's terminal, starting the agent if needed.
 ---  * agent.editor.selection runs while a provider runs (the providers' tools read it), and with
 ---    config.selection.track (off by default) its events are forwarded to every running provider.
+---  * agent.progress reads from the agent's terminal whether the agent is working, and shows it as a
+---    Neovim progress message (the statusline, the terminal's progress bar) and 'busy' in its
+---    terminal (config.progress).
 ---  * VimLeavePre stops the agent (SIGTERM to its whole process tree, see agent.terminal.stop()) and
 ---    every provider, and removes temp files.
 ---
@@ -22,7 +25,7 @@ local log = require('agent.log')
 local terminal = require('agent.terminal')
 local util = require('agent.util')
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local M = {}
 
@@ -349,6 +352,8 @@ function M.setup(opts)
   })
   -- (Also started by plugin/agent.lua; here for a setup() without it.)
   require('agent.editor.cmdline').start()
+  -- After terminal.setup(): a second setup() reads on the agent that runs.
+  require('agent.progress').setup()
 
   for _, name in ipairs(M.PROVIDERS) do
     local P = loaded_provider(name)
@@ -918,38 +923,11 @@ end
 -- Commands (declared in plugin/agent.lua)
 -- ---------------------------------------------------------------------------
 
----Pretty JSON with sorted keys (vim.json.encode has no indent option on 0.11).
+---Pretty JSON with sorted keys, two spaces per level.
 ---@param v any
----@param indent string|nil
 ---@return string
-local function pretty_json(v, indent)
-  indent = indent or ''
-  if type(v) ~= 'table' then
-    return vim.json.encode(v)
-  end
-  local inner = indent .. '  '
-  local parts = {}
-  local is_obj = getmetatable(v) == getmetatable(vim.empty_dict()) or (next(v) ~= nil and not vim.islist(v))
-  if is_obj then
-    local keys = vim.tbl_keys(v)
-    table.sort(keys, function(a, b)
-      return tostring(a) < tostring(b)
-    end)
-    for _, k in ipairs(keys) do
-      parts[#parts + 1] = inner .. vim.json.encode(tostring(k)) .. ': ' .. pretty_json(v[k], inner)
-    end
-    if #parts == 0 then
-      return '{}'
-    end
-    return '{\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. '}'
-  end
-  for _, x in ipairs(v) do
-    parts[#parts + 1] = inner .. pretty_json(x, inner)
-  end
-  if #parts == 0 then
-    return '[]'
-  end
-  return '[\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. ']'
+local function pretty_json(v)
+  return vim.json.encode(v, { indent = '  ', sort_keys = true })
 end
 M._pretty_json = pretty_json
 

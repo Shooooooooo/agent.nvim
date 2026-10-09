@@ -31,7 +31,7 @@ local context = require('agent.editor.context')
 local M = {}
 
 local api = vim.api
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 --- How long to watch the target for the agent's write (after an accept, close(id, { watch = true })
 --- or watch(path)), and how often to look.

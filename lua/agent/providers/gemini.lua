@@ -23,7 +23,7 @@ local context = require('agent.editor.context')
 local util = require('agent.util')
 local log = require('agent.log').scope('gemini')
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local api = vim.api
 
 local M = {}

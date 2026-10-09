@@ -15,7 +15,7 @@
 --- `protocol_versions`, the session status codes, `allow_delete` and the stream hooks.
 ---
 --- All request handling runs on the main loop (agent.net.http schedules its callbacks).
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local http = require('agent.net.http')
 local common = require('agent.net.common')
 local McpServer = require('agent.mcp.server')
