@@ -43,11 +43,6 @@ api.nvim_create_autocmd('User', {
   end,
 })
 
-local function pid_alive(pid)
-  local ok, ret = pcall(vim.uv.kill, pid, 0)
-  return ok and ret == 0
-end
-
 local function write(path, data)
   local f = assert(io.open(path, 'wb'))
   f:write(data)
