@@ -12,6 +12,7 @@ the code, and never observed live, is marked **unverified**.
 | Copilot `/ide` (Streamable HTTP over a Unix socket) | GitHub Copilot CLI | Copilot CLI 1.0.88 |
 | Gemini IDE companion (Streamable HTTP over TCP) | Gemini CLI | Gemini CLI 0.61.0 (also 0.59.0, 0.50.0; source read at 0.63.0-nightly) |
 | $NVIM controller (stdio MCP) | all four | the versions above |
+| Agent progress (terminal output, §6) | all four | Claude Code 2.1.295, Gemini CLI 0.63.0; Copilot CLI 1.0.94 and OpenCode 1.18.35 from their code only (**unverified**) |
 
 Neovim 0.12.5 was used throughout. Re-verify after upgrading a CLI: all four have changed these
 protocols between releases.
@@ -20,6 +21,7 @@ Code map: `lua/agent/providers/claude.lua`, `copilot.lua` and `gemini.lua` imple
 IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable HTTP binding
 `mcp/streamable_http.lua`, and the `net/http.lua` and `net/websocket.lua` servers.
 `lua/agent/agents.lua` builds launch specs, and `lua/agent/nvim_mcp/` is the controller.
+`lua/agent/progress.lua` reads from the agent's terminal whether it is working (§6).
 
 ## Conventions and pitfalls common to all protocols
 
@@ -944,6 +946,60 @@ user's config for the session.
   showed `nvim (from agent-nvim) ... Connected`. OpenCode 1.18.32 called `nvim_exec_lua` and
   `nvim_open_file`, and both results reached the model. With the six tools, Claude 2.1.283 and
   Copilot 1.0.88 still call `exec_lua` and `open_file` in the live e2e run (`tests/e2e/run.sh`).
+
+---
+
+## 6. Agent progress (terminal output)
+
+`lua/agent/progress.lua` shows whether the agent is working as a Neovim progress message
+(`nvim_echo` with `kind = 'progress'`, source `agent.nvim`, the agent's name as title) and as
+`'busy'` in its terminal buffer. No agent tells its IDE server when a turn starts or ends, so this
+is read from the agent's terminal output.
+
+### Neovim side (0.12.0 to 0.12.5)
+
+- With `kind = 'progress'`, `nvim_echo` requires `source` and `status`
+  (`running|success|failed|cancel`). `cancel` asks the message's owner to cancel; agent.nvim never
+  sends it.
+- A message without `percent` has `percent = 0` in its `Progress` event, and the TUI's handler
+  (augroup `nvim.progress`, which `vim/_core/defaults.lua` creates at startup, only when Neovim
+  runs in a terminal) sends `OSC 9;4;1;0` for it: an empty bar. agent.nvim's `Progress` autocmd,
+  defined later, runs after that handler (autocmds run in the order they were defined) and sends
+  `OSC 9;4;3` (busy, no percentage). Neovim 0.13-dev leaves `percent` out and sends `9;4;3` itself;
+  then agent.nvim sends nothing. Any other status sends `OSC 9;4;0;0`, whichever message it ends:
+  the bar is shared by every progress message.
+- Neovim does not clear the bar when it exits, so a running message must end on `VimLeavePre`.
+  A message sent there still reaches the terminal (verified with the TUI in a pty).
+- `vim.ui.progress_status()` starts tracking messages at its first call, and the default
+  statusline calls it only once `vim.ui` is loaded: agent.nvim calls it before its first message.
+- `nvim_echo` redraws no statusline. Setting `'busy'` (redraw: statuslines) does; agent.nvim avoids
+  `:redrawstatus`, which can repaint over a hit-enter prompt.
+- `TermRequest` fires for every OSC the terminal's child sends, the titles (OSC 0, 1, 2) included
+  on 0.12. `ev.data.sequence` has no terminator. The event is scheduled, so the title is read from
+  the sequence: `b:term_title` may already hold a newer one.
+- A message sent from the main loop (job, autocommand or timer callbacks) replaces the previous one
+  in the command line. The final message is sent from `AgentTerminalExit`, which comes before
+  terminal.lua's own notice about the exit.
+
+### Agent side
+
+| Agent | Working | Idle, or waiting for the user | Shows nothing |
+|---|---|---|---|
+| Claude Code 2.1.295 | OSC 0 title `◐ <title>` / `◑ <title>`, alternating every 960 ms | `✳ <title>`, also during a permission prompt | `TMUX`, `STY` or `ZELLIJ` set (static `✳`; GrowthBook flag `tengu_static_title_under_mux`), `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` |
+| Gemini CLI 0.63.0 | OSC 0 `✦  <status or thought> (<dir>)`, `⏲  Working… (<dir>)` | `◇  Ready (<dir>)`, `✋  Action Required (<dir>)`; padded to 80 columns | `ui.dynamicWindowTitle = false` (static `Gemini CLI (<dir>)`), `ui.hideWindowTitle` |
+| Copilot CLI 1.0.94 (**unverified**) | `ESC]9;4;3;0 BEL`, sent again every 5 s | `ESC]9;4;0;0 BEL` | outer terminal not recognized (inherited `TERM_PROGRAM` iTerm.app, WezTerm or ghostty, `WT_SESSION`, VS Code; `TERM=xterm-256color` inside Neovim fails its `TERM` checks), tmux or zellij, `terminalProgress = false` |
+| OpenCode 1.18.35 (**unverified**) | none | none | always (its title is `OpenCode` or `OC \| <session title>`) |
+
+- Claude Code also sends `ESC]9;4;3;` and `ESC]9;4;0;` when it recognizes its outer terminal
+  (Ghostty ≥ 1.2 or iTerm2 ≥ 3.6.6 by the inherited `TERM_PROGRAM` and `TERM_PROGRAM_VERSION`, or
+  ConEmu variables; never with `WT_SESSION`). Observed live: it stays at `3` during a permission
+  prompt while its title shows `✳`. So agent.nvim reads only the title of Claude Code (and of
+  Gemini CLI), and only OSC 9;4 for every other kind.
+- With the ghostty notification channel (inherited `TERM_PROGRAM`), Claude Code also sends OSC 777
+  `notify;Claude Code;Claude needs your permission` about 6 s into a permission prompt.
+- An idle signal ends the message only when no busy signal follows within 300 ms
+  (`progress.IDLE_MS`), and a message is sent only when the state or the percentage changes:
+  Claude's alternating glyph and Copilot's repeated state are no news.
 
 ---
 

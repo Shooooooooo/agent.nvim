@@ -65,6 +65,12 @@ M.defaults = {
     },
   },
 
+  progress = {
+    ---@type boolean  Show when the agent is working: a Neovim progress message (the default
+    --- statusline, the terminal's progress bar, the command line) and 'busy' in its terminal buffer
+    enabled = true,
+  },
+
   ---@type table<string, agent.AgentConfig>
   agents = {
     claude = { cmd = { 'claude' }, args = {}, env = {}, provider = 'claude', mcp = true, auto_approve = false },
@@ -136,6 +142,8 @@ function M.validate(opts)
     vim.validate('selection.debounce_ms', opts.selection.debounce_ms, 'number')
     vim.validate('diff', opts.diff, 'table')
     vim.validate('diff.show_terminal', opts.diff.show_terminal, 'boolean')
+    vim.validate('progress', opts.progress, 'table')
+    vim.validate('progress.enabled', opts.progress.enabled, 'boolean')
     vim.validate('agents', opts.agents, 'table')
     for name, a in pairs(opts.agents) do
       vim.validate('agents.' .. name .. '.cmd', a.cmd, 'table')

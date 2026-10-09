@@ -3,7 +3,7 @@
 --- A small client on vim.uv + vim.mpack with per-request timeouts (vim.rpcrequest has none and
 --- blocks the caller's event processing). Works over a Unix socket / named pipe or TCP.
 --- All callbacks run in the main loop (vim.schedule), never in a fast context.
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local M = {}
 

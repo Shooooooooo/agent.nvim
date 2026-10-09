@@ -54,7 +54,7 @@ local context = require('agent.editor.context')
 local M = {}
 
 local api = vim.api
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local GROUP = 'AgentSelection'
 local MAX_TRACKED = 50

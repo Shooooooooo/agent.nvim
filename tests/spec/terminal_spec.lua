@@ -363,6 +363,36 @@ describe('terminal', function()
     assert.falsy(terminal.stop())
   end)
 
+  it('AgentTerminalExit says whether agent.nvim stopped the agent', function()
+    local exits = {}
+    local au = vim.api.nvim_create_autocmd('User', {
+      pattern = 'AgentTerminalExit',
+      callback = function(ev)
+        exits[ev.data.name] = { code = ev.data.code, stopped = ev.data.stopped }
+      end,
+    })
+    -- Exits by itself.
+    terminal.open('own', { launch = fake({ env = { FAKE_AGENT_EXIT = '0' } }) })
+    wait_for(function()
+      return exits.own ~= nil
+    end, 5000, 'own exited')
+    -- Replaced by another agent, then stopped.
+    local la, outa = fake()
+    terminal.open('replaced', { launch = la })
+    wait_ready(outa)
+    local lb, outb = fake()
+    terminal.open('stopped', { launch = lb })
+    wait_ready(outb)
+    assert.truthy(terminal.stop())
+    wait_for(function()
+      return exits.replaced ~= nil and exits.stopped ~= nil
+    end, 5000, 'replaced and stopped exited')
+    vim.api.nvim_del_autocmd(au)
+    assert.same({ code = 0, stopped = false }, exits.own)
+    assert.eq(true, exits.replaced.stopped)
+    assert.eq(true, exits.stopped.stopped)
+  end)
+
   it('stop sends SIGTERM to the agent and every process it started, which a hangup does not end', function()
     if util.is_windows then
       return

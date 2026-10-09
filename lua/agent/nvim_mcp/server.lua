@@ -6,7 +6,7 @@
 --- the code in remote.lua there.
 local rpc = require('agent.nvim_mcp.rpc')
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local M = {}
 

@@ -7,7 +7,7 @@ local util = require('agent.util')
 local M = {}
 
 local api = vim.api
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@param name string
 ---@return boolean

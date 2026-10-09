@@ -33,7 +33,7 @@
 #     telemetry outfile). Dummy API keys only.
 #   * The workspaces are temp dirs, never this repository.
 #
-# Requirements: nvim (0.11+), node, and the agent CLIs to test:
+# Requirements: nvim (0.12+), node, and the agent CLIs to test:
 #   claude    `claude` on PATH, or E2E_CLAUDE_BIN
 #   copilot   `copilot` on PATH, or E2E_COPILOT_BIN
 #   gemini    `gemini` on PATH, or E2E_GEMINI_JS=/path/to/gemini-cli/bundle/gemini.js (run with node)

@@ -23,7 +23,7 @@
 local config = require('agent.config')
 local util = require('agent.util')
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local M = {}
 
@@ -663,7 +663,10 @@ local function on_exit(t, code)
       notify(t.name .. ': on_exit hook failed: ' .. tostring(err), vim.log.levels.ERROR)
     end
   end
-  fire('AgentTerminalExit', { name = t.name, code = code, bufnr = t.bufnr, session_id = t.spec.session_id })
+  -- stopped: agent.nvim stopped it (stop(): :AgentStop, a replace, quitting Neovim).
+  fire('AgentTerminalExit', {
+    name = t.name, code = code, bufnr = t.bufnr, session_id = t.spec.session_id, stopped = t.stopping == true,
+  })
 
   -- A stopped terminal is already forgotten. A buffer wiped by hand (:bwipeout!) ends the job with
   -- SIGHUP: there is nothing left to keep open.

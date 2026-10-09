@@ -24,6 +24,9 @@ Lua, and send you notifications.
   agent follows your current file and selection by itself, the same way.
 - Proposed edits open as a side-by-side diff in Neovim, with the agent's terminal still in view:
   accept with `:w`, reject by closing it.
+- While the agent works, Neovim shows it: a progress message for the default statusline and
+  your terminal's progress bar, and `◐` on the agent's window (`:help agent-progress`). Claude
+  Code and Gemini CLI tell it in their title, Copilot CLI only in some terminals, OpenCode not.
 - The [$NVIM controller](#the-nvim-controller), registered automatically, lets the agent drive the
   Neovim it runs in.
 - Pure Lua, no dependencies. Servers listen only on loopback or a private Unix socket and require
@@ -31,7 +34,7 @@ Lua, and send you notifications.
 
 ## Requirements
 
-- Neovim 0.11 or newer (`vim.pack` needs 0.12).
+- Neovim 0.12 or newer.
 
 ## Installation
 
@@ -49,7 +52,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-With `vim.pack` (Neovim 0.12+):
+With `vim.pack`:
 
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
@@ -120,6 +123,9 @@ require('agent').setup({
     show_terminal = true,   -- show the agent terminal in diff tabs too; false: the diff only
     keymaps = { accept = '<leader>aa', reject = '<leader>ad' }, -- '' or false disables a key
   },
+  progress = {
+    enabled = true,         -- show when the agent works (statusline, terminal progress bar)
+  },
   agents = {
     -- the same keys exist for opencode, copilot and gemini
     claude = {
@@ -158,6 +164,9 @@ own `permission` config. Disable it with `nvim_mcp.enabled = false`, or per agen
   `agents = { claude = { args = { '--permission-mode', 'manual' } } }`, or switch modes with
   Shift+Tab or `/config` in Claude.
 - Claude does not open a diff for a file with unsaved changes in Neovim.
+- Under tmux (or screen, zellij) Claude's title does not show when it works, so neither can
+  agent.nvim. `agents = { claude = { env = { TMUX = false } } }` unsets TMUX for Claude, which
+  then does not use tmux itself either (e.g. for teammates in tmux panes).
 
 ### OpenCode
 

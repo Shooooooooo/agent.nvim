@@ -36,6 +36,9 @@
 --      (b) edits a.txt (world -> neovim) through the IDE diff; its tab page must show the agent
 --          terminal too (diff.show_terminal), on split_side (on the right, as wide as the agent's
 --          own split; below: at the bottom, full width and as tall), and this driver accepts it
+--      (c) the turn shows as a Neovim progress message (agent.progress; Claude and Gemini, read
+--          from their titles): running while the agent works, ended while the diff waits for an
+--          answer and when the turn is done, and 'busy' back to 0
 --   6. check the effects in Neovim and on disk
 --   7. :AgentSend from a buffer that is not a file (a scratch buffer, lines 1-2): it reaches the
 --      agent by its nvim://buffer/<n>/<label> id, and the next prompt's model request carries it
@@ -386,6 +389,7 @@ K.claude = {
   end,
   prompts = {},
   diff = true,
+  progress = true,
   lock_dir = function()
     return claude_provider().lock_dir()
   end,
@@ -543,6 +547,7 @@ K.gemini = {
   end,
   prompts = {},
   diff = true,
+  progress = true,
   lock_dir = function()
     return root .. '/gemini-tmp/gemini/ide'
   end,
@@ -646,6 +651,17 @@ check(('setup() with the %s terminal layout, split_side = %s, selection.track = 
 -- The commands (-u NONE loads no plugin/ file), and the mapping the README suggests.
 vim.cmd.runtime('plugin/agent.lua')
 vim.keymap.set({ 'n', 'x' }, '<leader>as', '<cmd>AgentSend<cr>')
+-- The agent's progress messages (agent.progress): their statuses, in order, logged here (their
+-- echo in the command line would cut into this log's lines).
+vim.o.messagesopt = 'hit-enter,history:500'
+local progress_log = {}
+vim.api.nvim_create_autocmd('Progress', {
+  pattern = 'agent.nvim',
+  callback = function(ev)
+    progress_log[#progress_log + 1] = ev.data.status
+    out(('progress: %s (%s)'):format(ev.data.status, table.concat(ev.data.text, '')))
+  end,
+})
 -- Record what :AgentSend returned (M.send()), what the provider's send_context delivered (Claude,
 -- OpenCode: and the text of each selection_changed it sent), and anything typed into the agent's
 -- terminal.
@@ -985,6 +1001,7 @@ local SEL = { path = A, l1 = 1, l2 = 2, text = SELECTED }
 send_selection(SEL, '', R.selection or R.context_shown)
 
 -- 5. Prompt: its model request carries the selection
+local progress_from = #progress_log + 1
 terminal.send(PROMPT, { submit = true, submit_delay_ms = 400 })
 local ok = wait_until(60000, function()
   return carried(PROMPT, SEL)
@@ -1019,6 +1036,12 @@ if R.diff then
     local d = diff.get(diff.list()[1])
     local proposal = table.concat(vim.api.nvim_buf_get_lines(d.bufnr, 0, -1, false), '\n')
     check('(b) the diff proposes the edit', proposal == 'hello\nneovim', proposal)
+    if R.progress then
+      check("(c) while the diff waits for an answer, the agent's progress message has ended",
+        wait_until(5000, function()
+          return vim.bo[buf].busy == 0 and progress_log[#progress_log] ~= 'running'
+        end, 'no progress while the diff waits'), vim.inspect(vim.list_slice(progress_log, progress_from)))
+    end
     -- The diff's tab page shows the agent too (diff.show_terminal), on split_side: original |
     -- proposed | agent, the agent as wide as its split in the main tab page; or, below, the agent
     -- under original | proposed, full width and as tall as its split. The proposal is focused.
@@ -1077,6 +1100,16 @@ end
 check('the agent finished its turn (Done. in the TUI)', wait_until(30000, function()
   return tty():find('Done.', 1, true) ~= nil
 end, 'Done.'))
+if R.progress then
+  local turn
+  check("(c) the turn showed as a progress message, which ended with it ('busy' 0)", wait_until(10000, function()
+    turn = vim.list_slice(progress_log, progress_from)
+    return vim.tbl_contains(turn, 'running') and turn[#turn] ~= 'running' and vim.bo[buf].busy == 0
+  end, 'the end of the progress message'), vim.inspect(turn))
+else
+  skip('(c) the turn as a progress message', kind == 'opencode' and 'OpenCode shows no progress'
+    or 'Copilot CLI sends its progress only in the terminals it recognizes, not here')
+end
 
 -- 7. :AgentSend from a buffer that is not a file (a scratch buffer): by its nvim://buffer/ id
 local scratch = vim.api.nvim_create_buf(true, true)

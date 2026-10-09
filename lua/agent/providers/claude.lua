@@ -16,7 +16,7 @@
 --- Notifications: selection_changed, as the selection changes (config.selection.track) and for
 --- :AgentSend (to the client of the agent terminal only, matched by its pid, and sent again even
 --- when unchanged; see M.send_context()). at_mentioned is not sent.
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require('agent.config')
 local util = require('agent.util')
 local log = require('agent.log').scope('claude')

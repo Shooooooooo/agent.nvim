@@ -9,7 +9,7 @@ local config = require('agent.config')
 local nvim_mcp = require('agent.nvim_mcp')
 local util = require('agent.util')
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local M = {}
 

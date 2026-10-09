@@ -7,7 +7,7 @@
 ---
 --- Every tool returns either a string (sent as-is) or a JSON-safe value (sent as JSON).
 --- All line numbers are 1-based and inclusive.
-local api, fn, uv = vim.api, vim.fn, vim.uv or vim.loop
+local api, fn, uv = vim.api, vim.fn, vim.uv
 
 local M = {}
 

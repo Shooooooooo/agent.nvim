@@ -13,7 +13,7 @@
 --- Threading: frames are parsed in libuv callbacks. `authenticate`, `on_open`, `on_message` and
 --- `on_close` are always called on the main loop (vim.schedule), in order, so they may use vim.api.
 --- `conn:send()` / `conn:close()` may be called from any context.
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local bit = require('bit')
 local common = require('agent.net.common')
 local sha1 = require('agent.crypto.sha1')
