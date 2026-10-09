@@ -8,7 +8,7 @@ local selection = require('agent.editor.selection')
 local config = require('agent.config')
 local util = require('agent.util')
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local api = vim.api
 
 local handles = {}

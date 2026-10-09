@@ -31,7 +31,7 @@ Lua, and send you notifications.
 
 ## Requirements
 
-- Neovim 0.11 or newer (`vim.pack` needs 0.12).
+- Neovim 0.12 or newer.
 
 ## Installation
 
@@ -49,7 +49,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-With `vim.pack` (Neovim 0.12+):
+With `vim.pack`:
 
 ```lua
 vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })

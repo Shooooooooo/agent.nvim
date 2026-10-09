@@ -7,7 +7,7 @@
 --- Threading: parsing runs in libuv callbacks (fast context). `on_request` and `res:on_close`
 --- callbacks are always invoked on the main loop through vim.schedule, so they may use vim.api.
 --- The `res` methods may be called from any context.
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local common = require('agent.net.common')
 local log = require('agent.log').scope('http')
 

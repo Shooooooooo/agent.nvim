@@ -1,7 +1,7 @@
 ---@mod agent.health :checkhealth agent
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@return integer
 local function max_socket_path()
@@ -19,10 +19,10 @@ local function check_neovim(h)
   h.start('agent.nvim: Neovim')
   local v = vim.version()
   local vs = ('%d.%d.%d'):format(v.major, v.minor, v.patch)
-  if vim.fn.has('nvim-0.11') == 1 then
+  if vim.fn.has('nvim-0.12') == 1 then
     h.ok('Neovim ' .. vs)
   else
-    h.error('Neovim ' .. vs .. ' is too old', { 'agent.nvim needs Neovim 0.11 or newer (jobstart(..., {term = true}))' })
+    h.error('Neovim ' .. vs .. ' is too old', { 'agent.nvim needs Neovim 0.12 or newer' })
   end
 
   local addr = vim.v.servername or ''

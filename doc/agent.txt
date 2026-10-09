@@ -57,8 +57,7 @@ requires its protocol's auth token.
 ==============================================================================
 2. Requirements                                           *agent-requirements*
 
-- Neovim 0.11 or newer. Development and testing used 0.12.5, and 0.11 itself
-  has not been tested. |vim.pack| needs 0.12.
+- Neovim 0.12 or newer. Development and testing used 0.12.5.
 - At least one agent CLI on $PATH. The protocols were verified against:
 
     Claude Code          2.1.283
@@ -98,7 +97,7 @@ lazy-load the plugin instead, list its commands in `cmd`, and do not combine
 it with `auto_start = true`: the IDE servers must already be running when you
 start an agent yourself.
 
-vim.pack (Neovim 0.12+): >lua
+vim.pack: >lua
     vim.pack.add({ 'https://github.com/Shooooooooo/agent.nvim' })
     require('agent').setup({})
     vim.keymap.set({ 'n', 'x' }, '<leader>ac', '<cmd>AgentToggle<cr>')

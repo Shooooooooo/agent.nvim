@@ -4,7 +4,7 @@
 --- agent CLI. These helpers build its command line and environment for the launcher.
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local FLAGS = { '--headless', '-u', 'NONE', '-i', 'NONE', '-n', '-l' }
 ---Flags that start the controller as a clean `nvim -l` script (a copy; callers may modify it).

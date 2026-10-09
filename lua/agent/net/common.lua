@@ -1,7 +1,7 @@
 ---@mod agent.net.common Shared helpers for the HTTP and WebSocket servers
 ---
 --- Everything here is safe to call from fast (libuv) contexts: no vim.api / vim.fn.
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local bit = require('bit')
 
 local M = {}
@@ -301,17 +301,7 @@ function M.listen_pipe(path, on_connection, opts)
   if not handle then
     return nil, 'uv.new_pipe failed', created
   end
-  local ok, err
-  if handle.bind2 then
-    ok, err = handle:bind2(path, { no_truncate = true })
-  else
-    -- luv < 1.46 (Neovim 0.9): no bind2. Guard the macOS/Linux sun_path limit ourselves.
-    if not windows and #path > 103 then
-      ok, err = nil, 'EINVAL: socket path too long'
-    else
-      ok, err = handle:bind(path)
-    end
-  end
+  local ok, err = handle:bind2(path, { no_truncate = true })
   if not ok then
     M.close_handle(handle)
     if tostring(err):find('EINVAL') and not windows then

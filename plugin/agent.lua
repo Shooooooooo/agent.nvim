@@ -5,8 +5,8 @@ if vim.g.loaded_agent_nvim == 1 then
 end
 vim.g.loaded_agent_nvim = 1
 
-if vim.fn.has('nvim-0.11') ~= 1 then
-  vim.api.nvim_echo({ { 'agent.nvim requires Neovim 0.11 or newer', 'ErrorMsg' } }, true, {})
+if vim.fn.has('nvim-0.12') ~= 1 then
+  vim.api.nvim_echo({ { 'agent.nvim requires Neovim 0.12 or newer', 'ErrorMsg' } }, true, {})
   return
 end
 
