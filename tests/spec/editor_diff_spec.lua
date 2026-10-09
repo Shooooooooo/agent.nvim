@@ -628,11 +628,6 @@ describe('editor.diff', function()
     local pids = {}
     local n = 0
 
-    local function pid_alive(pid)
-      local ok, ret = pcall(vim.uv.kill, pid, 0)
-      return ok and ret == 0
-    end
-
     ---Start the fake agent (never focused). `env` goes into its environment.
     ---@return integer bufnr, integer win  its terminal buffer and window
     local function start_agent(env, layout)

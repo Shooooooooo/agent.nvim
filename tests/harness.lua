@@ -1,5 +1,5 @@
 -- Minimal test harness for headless Neovim (no plenary/busted dependency).
--- Globals: describe, it, pending, before_each, after_each, assert (extended), wait_for.
+-- Globals: describe, it, pending, before_each, after_each, assert (extended), wait_for, pid_alive.
 local H = { suites = {}, current = nil, failures = 0, passes = 0, skipped = 0 }
 
 local function new_suite(name, parent)
@@ -65,6 +65,53 @@ function _G.wait_for(cond, timeout_ms, msg)
   if not ok then
     error('timeout waiting for ' .. (msg or 'condition'), 2)
   end
+end
+
+-- Bound now: specs replace vim.uv.kill and vim.system for a while (terminal_spec.lua).
+local kill, system, self_pid = vim.uv.kill, vim.system, vim.uv.os_getpid()
+local sysname = vim.uv.os_uname().sysname
+
+---The state (R, S, Z...) and the parent of process `pid`: from /proc on Linux, else from ps; nil
+---when they cannot be read.
+---@param pid integer
+---@return string|nil state, integer|nil ppid
+local function proc_stat(pid)
+  local state, ppid
+  if sysname == 'Linux' then
+    local f = io.open(('/proc/%d/stat'):format(pid), 'r')
+    if f then
+      -- "<pid> (<comm>) <state> <ppid> ...": the comm may hold spaces and parentheses, nothing
+      -- after it does.
+      state, ppid = f:read('*a'):match('^%d+ %(.*%) (%a) (%d+)')
+      f:close()
+    end
+  elseif not sysname:find('Windows') then
+    pcall(function()
+      -- One -o per field: BSD ps (macOS) takes everything after "=" as the header.
+      local cmd = { 'ps', '-o', 'stat=', '-o', 'ppid=', '-p', tostring(pid) }
+      local r = system(cmd, { text = true }):wait(1000)
+      if r.code == 0 then
+        state, ppid = r.stdout:match('^%s*(%a)%S*%s+(%d+)')
+      end
+    end)
+  end
+  return state, ppid and tonumber(ppid)
+end
+
+---Whether process `pid` runs: kill(pid, 0) succeeds, and it is not the zombie (exited, not reaped
+---yet) of another process. An orphan's zombie waits for init, which some containers reap seconds
+---later. A child of this Neovim counts until Neovim reaps it: its job's on_exit comes after that.
+---(Linux also shows Z for a process whose main thread has exited while other threads run; no
+---fixture does that.)
+---@param pid integer
+---@return boolean
+function _G.pid_alive(pid)
+  local ok, ret = pcall(kill, pid, 0)
+  if not (ok and ret == 0) then
+    return false
+  end
+  local state, ppid = proc_stat(pid)
+  return state ~= 'Z' or ppid == self_pid
 end
 
 local function full_name(suite, test)

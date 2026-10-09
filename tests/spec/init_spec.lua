@@ -123,11 +123,6 @@ local function term_win()
   end
 end
 
-local function pid_alive(pid)
-  local ok, ret = pcall(uv.kill, pid, 0)
-  return ok and ret == 0
-end
-
 -- Every agent job a test started (a stopped agent is forgotten before its job has exited).
 local pids = {}
 vim.api.nvim_create_autocmd('User', {
