@@ -777,6 +777,38 @@ describe('send_context (:AgentSend)', function()
     return c
   end
 
+  ---How Claude Code takes a selection_changed (read in the code, 2.1.284 to 2.1.312): the chip its
+  ---prompt shows ([⧉ 2 lines selected], [⧉ In a.txt]), and the key by which it ignores a selection
+  ---that matches the one the user dismissed (backspace on the chip), until another one comes. (It
+  ---counts the text in UTF-16 units, as #text counts this ASCII text.)
+  ---@return string chip, string key
+  local function claude_sees(p)
+    local r = p.selection
+    local lines = r['end'].line - r.start.line + 1 - (r['end'].character == 0 and 1 or 0)
+    local chip = 'In ' .. vim.fs.basename(p.filePath)
+    if p.text ~= '' and lines > 0 then
+      chip = ('%d line%s selected'):format(lines, lines == 1 and '' or 's')
+    end
+    local key = 'ide|' .. p.filePath
+    if p.text ~= '' then
+      key = ('%s|%d|%d|%d'):format(key, r.start.line + 1, lines, #p.text)
+    end
+    return chip, key
+  end
+
+  ---What send_context() sent a Claude: a copy, then the selection (returned). Claude shows the copy
+  ---as it shows the selection, under another key, so it takes the selection even when the user
+  ---dismissed the same one.
+  local function take_sent(c)
+    local copy = c.take('selection_changed').params
+    local params = c.take('selection_changed').params
+    local chip, key = claude_sees(params)
+    local copy_chip, copy_key = claude_sees(copy)
+    assert.eq(chip, copy_chip, 'the copy shows the same way')
+    assert.truthy(copy_key ~= key, 'the copy has another key: ' .. key)
+    return params
+  end
+
   it('sends selection_changed as Claude renders it, to the ready client of the agent terminal only (by pid)', function()
     local a = track(claude_client({ pid = 1111 }))
     local b = track(claude_client({ pid = 2222 }))
@@ -791,7 +823,7 @@ describe('send_context (:AgentSend)', function()
       filePath = file,
       fileUrl = 'file://' .. file,
       selection = { start = { line = 1, character = 0 }, ['end'] = { line = 3, character = 0 }, isEmpty = false },
-    }, b.take('selection_changed').params)
+    }, take_sent(b))
     -- The cursor only: the file as a whole ("In send.txt").
     assert.truthy(P.send_context(capture(nil, { 4, 2 }), { kind = 'claude', pid = 2222 }))
     assert.same({
@@ -799,13 +831,13 @@ describe('send_context (:AgentSend)', function()
       filePath = file,
       fileUrl = 'file://' .. file,
       selection = { start = { line = 3, character = 2 }, ['end'] = { line = 3, character = 2 }, isEmpty = true },
-    }, b.take('selection_changed').params)
+    }, take_sent(b))
     -- The terminal job may be an ancestor of Claude (a wrapper script, a shell).
     local c = track(claude_client({ pid = vim.fn.getpid() }))
     wait_ready(3)
     c.clear()
     assert.truthy(P.send_context(s, { kind = 'claude', pid = vim.api.nvim_get_proc(vim.fn.getpid()).ppid }))
-    assert.eq('two\n', c.take('selection_changed').params.text)
+    assert.eq('two\n', take_sent(c).text)
     -- Never to a Claude that reported another pid, nor to an OpenCode.
     local o = track(opencode_client())
     wait_ready(4)
@@ -818,31 +850,73 @@ describe('send_context (:AgentSend)', function()
     assert.eq(0, #b.notifications('at_mentioned'), 'at_mentioned is never sent')
   end)
 
-  it('sends Claude an unchanged selection again, as is (Claude drops it when a prompt is submitted)', function()
+  it('sends Claude an unchanged selection again, right after a copy that it shows the same way', function()
     local c = track(claude_client({ pid = 1111 }))
     wait_ready(1)
     c.clear()
     local s = capture({ line1 = 1, line2 = 2 })
     assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
-    local first = c.take('selection_changed').params
-    assert.eq('one\ntwo', first.text)
-    -- Claude attaches it to the next prompt only: the same :AgentSend after that prompt must reach
-    -- it again, so it is sent again.
+    local want = {
+      text = 'one\ntwo',
+      filePath = file,
+      fileUrl = 'file://' .. file,
+      selection = { start = { line = 0, character = 0 }, ['end'] = { line = 1, character = 3 }, isEmpty = false },
+    }
+    -- Claude ignores a selection that matches the one the user dismissed (backspace on its
+    -- [⧉ 2 lines selected] in the prompt), until another one comes: first a copy with a space more,
+    -- which it shows the same way under another key.
+    local copy = c.take('selection_changed').params
+    assert.same(vim.tbl_extend('force', want, { text = 'one\ntwo ' }), copy)
+    assert.same(want, c.take('selection_changed').params)
+    local chip, key = claude_sees(want)
+    local copy_chip, copy_key = claude_sees(copy)
+    assert.eq('2 lines selected', chip)
+    assert.eq(chip, copy_chip)
+    assert.truthy(copy_key ~= key)
+    -- Claude also drops it when a prompt is submitted: the same :AgentSend after that prompt must
+    -- reach it again, so it is sent again, with the copy.
     assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
-    assert.same(first, c.take('selection_changed').params)
+    assert.same(copy, c.take('selection_changed').params)
+    assert.same(want, c.take('selection_changed').params)
     vim.wait(100)
-    assert.eq(0, #c.notifications('selection_changed'), 'once: Claude gets no copy')
-    -- Tracking still sends a selection once.
-    P.on_selection(s)
+    assert.eq(0, #c.notifications('selection_changed'), 'two messages')
+    -- The cursor only, the file as a whole: Claude matches it by its file alone (wherever the cursor
+    -- is), so the copy has a space, at the start of the line: Claude counts it as no line and shows
+    -- the file, as for the selection itself.
+    local cur = capture(nil, { 4, 2 })
+    assert.truthy(P.send_context(cur, { kind = 'claude', pid = 1111 }))
+    copy = c.take('selection_changed').params
+    local empty = {
+      text = '',
+      filePath = file,
+      fileUrl = 'file://' .. file,
+      selection = { start = { line = 3, character = 2 }, ['end'] = { line = 3, character = 2 }, isEmpty = true },
+    }
+    assert.same(empty, c.take('selection_changed').params)
+    assert.same(vim.tbl_extend('force', empty, {
+      text = ' ',
+      selection = { start = { line = 3, character = 0 }, ['end'] = { line = 3, character = 0 }, isEmpty = true },
+    }), copy)
+    chip, key = claude_sees(empty)
+    copy_chip, copy_key = claude_sees(copy)
+    assert.eq('In send.txt', chip)
+    assert.eq(chip, copy_chip)
+    assert.truthy(copy_key ~= key)
+    vim.wait(100)
+    assert.eq(0, #c.notifications('selection_changed'))
+    -- Tracking sends a selection once, with no copy: one the user dismissed stays dismissed until it
+    -- changes.
+    P.on_selection(cur)
     vim.wait(100)
     assert.eq(0, #c.notifications('selection_changed'), 'the same selection event: not resent')
-    -- Tracked first, then sent by :AgentSend: both reach Claude.
-    local cur = capture(nil, { 4, 0 })
-    P.on_selection(cur)
-    local tracked = c.take('selection_changed').params
-    assert.eq('', tracked.text)
-    assert.truthy(P.send_context(cur, { kind = 'claude', pid = 1111 }))
-    assert.same(tracked, c.take('selection_changed').params)
+    P.on_selection(s)
+    assert.same(want, c.take('selection_changed').params)
+    vim.wait(100)
+    assert.eq(0, #c.notifications('selection_changed'), 'a selection event: no copy')
+    -- Tracked first, then sent by :AgentSend: both reach Claude, the sent one after its copy.
+    assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
+    assert.same(vim.tbl_extend('force', want, { text = 'one\ntwo ' }), c.take('selection_changed').params)
+    assert.same(want, c.take('selection_changed').params)
     vim.wait(100)
     assert.eq(0, #c.notifications('selection_changed'))
   end)
@@ -1000,7 +1074,7 @@ describe('send_context (:AgentSend)', function()
     local later = { kind = 'claude', pid = 1111, started = util.now_ms() }
     assert.eq('ready', P.client_state(later))
     assert.truthy(P.send_context(s, later))
-    assert.eq('one\ntwo', cl.take('selection_changed').params.text)
+    assert.eq('one\ntwo', take_sent(cl).text)
     vim.wait(100)
     assert.eq(0, #old.notifications('selection_changed'))
     assert.eq(0, #new.notifications('selection_changed'))
@@ -1040,7 +1114,7 @@ describe('send_context (:AgentSend)', function()
     assert.eq(0, #o.notifications('selection_changed'))
     -- (init.lua sends it again once the client is ready.)
     assert.truthy(P.send_context(s, { kind = 'claude', pid = 1111 }))
-    assert.eq('one\ntwo', c.take('selection_changed').params.text)
+    assert.eq('one\ntwo', take_sent(c).text)
     -- A new session of the same Claude (a reconnect): nothing either.
     c.close()
     local c2 = track(claude_client({ pid = 1111 }))
@@ -1055,13 +1129,13 @@ describe('send_context (:AgentSend)', function()
     local c = track(claude_client({ pid = 1111 }))
     assert.eq('/p/a.lua', c.take('selection_changed', 2000).params.filePath)
     assert.truthy(P.send_context(capture({ line1 = 1, line2 = 2 }), { kind = 'claude', pid = 1111 }))
-    assert.eq('one\ntwo', c.take('selection_changed').params.text)
+    assert.eq('one\ntwo', take_sent(c).text)
     -- Selection events go on.
     P.on_selection(sel({ path = '/p/b.lua', start = { line = 1, character = 0 } }))
     assert.eq('/p/b.lua', c.take('selection_changed').params.filePath)
     -- The agent's next client: the tracked selection only.
     assert.truthy(P.send_context(capture({ line1 = 4 }), { kind = 'claude', pid = 1111 }))
-    assert.eq('four', c.take('selection_changed').params.text)
+    assert.eq('four', take_sent(c).text)
     local c2 = track(claude_client({ pid = 1111 }))
     assert.eq('/p/b.lua', c2.take('selection_changed', 2000).params.filePath)
     vim.wait(150)

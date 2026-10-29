@@ -109,11 +109,14 @@ IDE servers. They share the MCP core `lua/agent/mcp/server.lua`, the Streamable 
   - What a client does with it differs (read in the CLIs' code). Claude 2.1.284 clears its IDE
     selection when a prompt is submitted (`consumeIdeSelection`), and OpenCode attaches a
     selection to one prompt (`selectionSent`): each uses it for the next prompt only, and
-    `:AgentSend` of the same selection after a prompt must reach it again. Copilot 1.0.88 never
-    consumes it: the latest non-empty selection goes with every prompt until another replaces it.
-    Gemini keeps the active file, cursor and selected text in its IDE context. So:
+    `:AgentSend` of the same selection after a prompt must reach it again. Claude also ignores a
+    selection that matches the one the user dismissed, until another one comes (see the Claude
+    protocol). Copilot 1.0.88 never consumes it: the latest non-empty selection goes with every
+    prompt until another replaces it. Gemini keeps the active file, cursor and selected text in
+    its IDE context. So:
     - The Claude provider (Claude, OpenCode) remembers nothing and replays nothing (init.lua waits
-      for the client instead), and sends even a selection the client has (per protocol below).
+      for the client instead), and sends even a selection the client has, right after a copy the
+      client takes as another selection (per protocol below).
     - The Copilot and Gemini providers remember the last one with its pid, and give it to a
       client that connects or reconnects (per protocol below; Copilot, when no pid was given,
       only to a session it was sent to), until the next `:AgentSend`, the next tracked selection
@@ -346,19 +349,42 @@ after `openDiff` and `close_tab`, right before the write.
   - Claude 2.1.284 stores `{lineStart: start.line + 1, lineCount, text, filePath}` and attaches it
     to the next prompt: "The user selected the lines <a> to <b> from <filePath>:\n<text>\n\nThis
     may or may not be related to the current task." (empty `text`: "The user opened the file
-    <filePath> in the IDE. This may or may not be related to the current task."). Its footer shows
-    `⧉ N lines selected` or `In <basename>`. When a prompt is submitted it clears the selection
+    <filePath> in the IDE. This may or may not be related to the current task."). It shows it at
+    the start of its prompt: `[⧉ N lines selected]` when `text` is not empty and `lineCount > 0`,
+    else `[⧉ In <basename>]`. When a prompt is submitted it clears the selection
     (`consumeIdeSelection`, read in the code): a selection goes with one prompt, tracked or sent.
+  - Backspace in the empty prompt deletes that `[⧉ ...]` and dismisses the selection
+    (`dismissIdeSelection`): Claude clears it and remembers its key, `ide|<filePath>` when `text`
+    is empty, else `ide|<filePath>|<lineStart>|<lineCount>|<text.length>` (UTF-16 units). Every
+    `selection_changed` with that key is then ignored (`offerIdeSelection`) until Claude takes one
+    with another key, or clears the selection itself (a prompt submitted). So the same selection
+    is ignored after a dismissal, and so is any empty one of the same file, wherever its cursor.
+    Read in the code of 2.1.284 and 2.1.312; verified live with 2.1.312 (`[⧉ In fish]` dismissed,
+    the same `selection_changed` again showed nothing). `offerIdeSelection` also never lets an
+    empty `text` replace a selection the user made in Claude's own diff view (`source: "diff"`).
   - OpenCode shows `<path>#<a>-<b>` (or the path) and attaches the selection, or a note that the
     file is open, to one prompt only (`selectionSent`). It ignores a `selection_changed` whose key
     (`filePath`, range, `text`) did not change (read in the code).
   - **`:AgentSend`.** `send_context(s, {kind, pid, started})` renders the captured selection per
     client kind exactly as tracking renders it, and sends it to the ready targets (after the
     600 ms delay for Claude), **also when it is the session's last one** (`sel_key`), since the
-    client may have used it up. An OpenCode always first gets a copy with `text` changed (`''` to
-    `' '`, else to `''`), then the real one, so that it takes it again: OpenCode keeps its last
-    selection across reconnects, while `sel_key` is per connection, so a match cannot be told
-    from it. A tracked selection gets no copy, and is not resent when unchanged.
+    client may have used it up, and always right after a copy the client takes as another
+    selection (`resend_copy`):
+    - A Claude first gets the selection with a space added to `text`, or, when `text` is empty,
+      `text` `' '` with the range at character 0 of its start line, which Claude counts as no line
+      (`lineCount` 0) and shows as `In <basename>`. Either way the copy shows as the selection
+      does, under another key: Claude takes it (it is not the dismissed one), which ends a
+      dismissal, then takes the selection. agent.nvim cannot know what the user dismissed, and
+      Claude matches an empty selection by its file alone, so the copy is always sent. Verified
+      live with 2.1.312: the selection shows again after a dismissal, the chip does not change
+      while the copy is current, and the next prompt carries the selection, not the copy. Since
+      the copy has text, an empty selection sent this way also replaces one from Claude's diff
+      view.
+    - An OpenCode first gets a copy with `text` changed (`''` to `' '`, else to `''`), so that it
+      takes the selection again: OpenCode keeps its last selection across reconnects, while
+      `sel_key` is per connection, so a match cannot be told from it.
+    - A tracked selection gets no copy, and is not resent when unchanged: one the user dismissed
+      in Claude stays dismissed until it changes.
   - Targets (`context_targets({kind, pid, started})`): the sessions of the agent's kind whose
     `ide_connected.pid` is the terminal job's pid or a close descendant of it (`pid_matches`),
     never a Claude that reported another pid; with none matched, the only initialized session of
@@ -392,7 +418,7 @@ after `openDiff` and `close_tab`, right before the write.
 | Lines and characters | 0-based | + `agents.opencode.line_offset` (default 1) |
 | `selection_changed` shown as | `⧉ 2 lines selected`, `In a.txt` | `a.txt#1-2`, `a.txt` |
 | A selection goes with | the next prompt (cleared on submit) | the next prompt (`selectionSent`) |
-| An unchanged `selection_changed` | taken again | ignored, also after a reconnect (`:AgentSend` always sends a copy with other `text` first) |
+| An unchanged `selection_changed` | taken again, unless it matches the one the user dismissed (`:AgentSend` always sends a copy that shows the same way first) | ignored, also after a reconnect (`:AgentSend` always sends a copy with other `text` first) |
 | Tools and diffs | yes | none; OpenCode's edit tool writes files directly |
 
 ### Launch environment

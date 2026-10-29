@@ -285,6 +285,32 @@ async function claudeSession(fx, pid = 5077) {
   return c;
 }
 
+/**
+ * How Claude Code takes a selection_changed (read in its code, 2.1.284 to 2.1.312): the chip its
+ * prompt shows ([⧉ 2 lines selected], [⧉ In b.txt]), and the key by which it ignores a selection
+ * that matches the one the user dismissed (backspace on the chip), until another one comes.
+ */
+function claudeSees({ text, filePath, selection: { start, end } }) {
+  const lines = end.line - start.line + 1 - (end.character === 0 ? 1 : 0);
+  return {
+    chip: text && lines > 0 ? `${lines} ${lines === 1 ? 'line' : 'lines'} selected` : `In ${path.basename(filePath)}`,
+    key: text ? `ide|${filePath}|${start.line + 1}|${lines}|${text.length}` : `ide|${filePath}`,
+  };
+}
+
+/**
+ * What sendContext() sent a Claude: a copy that Claude shows as it shows the selection, under
+ * another key (so it takes the selection even when the user dismissed the same one), then the
+ * selection, whose params are returned.
+ */
+async function sentTo(c) {
+  const copy = (await c.note('selection_changed')).params;
+  const params = (await c.note('selection_changed')).params;
+  assert.equal(claudeSees(copy).chip, claudeSees(params).chip, 'the copy shows the same way');
+  assert.notEqual(claudeSees(copy).key, claudeSees(params).key, 'the copy has another key');
+  return params;
+}
+
 // ---------------------------------------------------------------------------
 // OpenCode client (ported from opencode/packages/tui/src/{editor.ts,context/editor.ts})
 // ---------------------------------------------------------------------------
@@ -488,19 +514,20 @@ describe('Claude Code 2.1.283 replay', () => {
     assert.equal(clients[0].name, 'claude-code');
 
     // :AgentSend: selection_changed as tracking sends it (0-based: Claude attaches "lines 1 to 2"),
-    // for the terminal job whose pid is Claude's; the cursor only stands for the file ("In b.txt");
-    // never for another pid, and never at_mentioned.
+    // right after a copy that Claude shows the same way under another key, for the terminal job
+    // whose pid is Claude's; the cursor only stands for the file ("In b.txt"); never for another
+    // pid, and never at_mentioned.
     const b = fx.workspace + '/b.txt';
     assert.equal(await fx.lua('return P.client_state({ kind = "claude", pid = 4242 })'), 'ready');
     assert.equal(await sendContext(fx, b, { range: [1, 2], pid: 4242 }), true);
-    assert.deepEqual((await c.note('selection_changed')).params, {
+    assert.deepEqual(await sentTo(c), {
       text: 'one\ntwo',
       filePath: b,
       fileUrl: 'file://' + b,
       selection: { start: { line: 0, character: 0 }, end: { line: 1, character: 3 }, isEmpty: false },
     });
     assert.equal(await sendContext(fx, b, { cursor: [3, 2], pid: 4242 }), true);
-    assert.deepEqual((await c.note('selection_changed')).params, {
+    assert.deepEqual(await sentTo(c), {
       text: '',
       filePath: b,
       fileUrl: 'file://' + b,
@@ -581,8 +608,8 @@ describe('Claude Code 2.1.283 replay', () => {
       fileUrl: 'file://' + b,
       selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 }, isEmpty: false },
     };
-    const sent = (x) => x.pending('selection_changed').filter((m) => m.params.text === 'two');
-    const next = (x) => x.wait((m) => m.method === 'selection_changed' && m.params.text === 'two', 3000, 'the sent selection');
+    // What :AgentSend sent (the selection or its copy) and nobody took yet.
+    const sent = (x) => x.pending('selection_changed').filter((m) => m.params.filePath === b);
     // The tracked selection (selection.track = true in the fixture) marks a client ready.
     await fx.lua(`P.on_selection({ path = ${luaStr(a)}, bufnr = 1, text = 'hello',
       start = { line = 0, character = 0 }, finish = { line = 0, character = 5 }, is_empty = false, mode = 'v' })`);
@@ -595,13 +622,14 @@ describe('Claude Code 2.1.283 replay', () => {
     await sleep(300);
     assert.equal(sent(c).length, 0, 'not replayed once ready');
     // Sent now (init.lua sends it again once the client is ready). Claude clears its selection when
-    // a prompt is submitted, so the same :AgentSend after a prompt is sent again, as is.
+    // a prompt is submitted, and ignores one that matches the selection the user dismissed, so the
+    // same :AgentSend is sent again, after its copy.
     assert.equal(await sendContext(fx, b, { range: [2, 2], pid: 5151 }), true);
-    assert.deepEqual((await next(c)).params, want);
+    assert.deepEqual(await sentTo(c), want);
     assert.equal(await sendContext(fx, b, { range: [2, 2], pid: 5151 }), true);
-    assert.deepEqual((await next(c)).params, want);
+    assert.deepEqual(await sentTo(c), want);
     await sleep(150);
-    assert.equal(sent(c).length, 0, 'once each');
+    assert.equal(sent(c).length, 0, 'the copy and the selection, once each');
     assert.equal(sent(other).length, 0, 'not to another Claude');
     // A reconnect: the tracked selection only.
     await c.closeWith(1000);

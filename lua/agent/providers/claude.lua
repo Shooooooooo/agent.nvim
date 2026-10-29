@@ -15,7 +15,8 @@
 ---
 --- Notifications: selection_changed, as the selection changes (config.selection.track) and for
 --- :AgentSend (to the client of the agent terminal only, matched by its pid, and sent again even
---- when unchanged; see M.send_context()). at_mentioned is not sent.
+--- when unchanged, right after a copy the client takes as another selection; see
+--- M.send_context()). at_mentioned is not sent.
 local uv = vim.uv
 local config = require('agent.config')
 local util = require('agent.util')
@@ -338,10 +339,39 @@ local function render_selection(s, kind)
   }
 end
 
+---A copy of the selection_changed `params` that the client takes as another selection. Sent right
+---before the selection, it makes the client take the selection even when it would ignore it:
+---  * OpenCode ignores a selection whose file, range and text did not change: the copy has other
+---    text ('' to ' ', else to '').
+---  * Claude Code ignores one that matches the selection the user dismissed (backspace on its
+---    `[⧉ In fish]` in the prompt) until it takes another one. It matches an empty selection by its
+---    file, and one with text by file, first line, line count and text length. The copy shows the
+---    same way: the text with a space more or, for an empty selection, a space at the start of its
+---    line, which Claude counts as no line and shows as the file ("In fish").
+---@param params table  render_selection() for the client's kind
+---@param kind 'claude'|'opencode'
+---@return table
+local function resend_copy(params, kind)
+  if kind == 'opencode' then
+    return vim.tbl_extend('force', params, { text = params.text == '' and ' ' or '' })
+  end
+  if params.text ~= '' then
+    return vim.tbl_extend('force', params, { text = params.text .. ' ' })
+  end
+  local line = params.selection.start.line
+  local start, finish = { line = line, character = 0 }, { line = line, character = 0 }
+  return vim.tbl_extend('force', params, {
+    text = ' ',
+    selection = { start = start, ['end'] = finish, isEmpty = true },
+  })
+end
+
 ---Send a selection to a client, unless it was the last one sent to it (`force`: send it again).
----Claude clears the selection when a prompt is submitted, so :AgentSend sends it again; OpenCode
----keeps it but ignores one that does not change (file, range and text), and attaches it only once,
----so it first gets a copy with other text (always: it keeps its selection across reconnects).
+---Claude clears the selection when a prompt is submitted, and ignores one the user dismissed;
+---OpenCode keeps it but ignores one that does not change (file, range and text), and attaches it
+---only once. So :AgentSend sends it again, always right after a copy the client takes as another
+---selection (resend_copy(); OpenCode keeps its selection across reconnects, and what Claude's user
+---dismissed is not known here).
 ---@param session agent.mcp.Session
 ---@param s agent.Selection|nil
 ---@param force? boolean
@@ -355,8 +385,8 @@ local function notify_selection(session, s, force)
   if key == session.data.sel_key and not force then
     return true
   end
-  if force and session.data.kind == 'opencode' then
-    session:notify('selection_changed', vim.tbl_extend('force', params, { text = params.text == '' and ' ' or '' }))
+  if force then
+    session:notify('selection_changed', resend_copy(params, session.data.kind))
   end
   if session:notify('selection_changed', params) then
     session.data.sel_key = key
@@ -463,9 +493,11 @@ function M.client_state(o)
 end
 
 ---Send the selection :AgentSend captured to the agent `o` describes, as selection_changed
----(rendered for its kind, as selection.track sends it), also when it is the one sent last. Only to
----a ready client: Claude and OpenCode use it for the next prompt, so it is not replayed to a client
----that connects later (init.lua waits for the agent's client instead).
+---(rendered for its kind, as selection.track sends it), also when it is the one sent last, and
+---right after a copy the client takes as another selection (resend_copy(): Claude shows it even
+---when the user dismissed the same one). Only to a ready client: Claude and OpenCode use it for the
+---next prompt, so it is not replayed to a client that connects later (init.lua waits for the
+---agent's client instead).
 ---@param s agent.Selection
 ---@param o agent.claude.TargetOpts|nil
 ---@return boolean sent  a ready client of the agent has it now

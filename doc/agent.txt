@@ -681,7 +681,8 @@ What each agent gets:
   file, "In fish" for a terminal). Your next prompt carries the lines with
   their text ("The user selected the lines 3 to 5 from <path>: ..."), or
   for a whole file a note that you opened it (the model reads the file
-  when it needs to). Claude clears it when you submit that prompt.
+  when it needs to). Claude clears it when you submit that prompt, and
+  <BS> in the empty prompt removes it.
 - OpenCode shows a.txt#3-5 (a.txt for a whole file) and attaches the
   lines, or a note that you opened the file, to your next prompt only.
 - Copilot's footer shows @a.txt:3-5 (@a.txt for a whole file). It attaches
@@ -695,8 +696,9 @@ What each agent gets:
   until the next |:AgentSend| or, in the automatic mode, until your file
   or selection changes.
 - For Claude and OpenCode, run |:AgentSend| again to send the same
-  selection with a later prompt. Copilot and Gemini get it again when they
-  reconnect to Neovim; Claude and OpenCode do not.
+  selection with a later prompt, or after you removed it from Claude's
+  prompt. Copilot and Gemini get it again when they reconnect to Neovim;
+  Claude and OpenCode do not.
 - It goes only to the agent in agent.nvim's terminal: Claude and Copilot
   are matched by their process id. OpenCode reports none: it gets it when
   it is the only OpenCode that connected to this Neovim since the agent
@@ -805,9 +807,9 @@ What works ~
 - Selection (|:AgentSend|, |agent-context-auto|): Claude shows the
   selection ("2 lines selected") and attaches it to your next prompt. With
   nothing selected it shows and attaches the current file ("In a.txt").
-  Claude clears it when you submit that prompt: for a later prompt, send
-  it again with |:AgentSend| (also when it has not changed). It is not
-  sent again when Claude reconnects.
+  Claude clears it when you submit that prompt, and <BS> in the empty
+  prompt removes it: send it again with |:AgentSend| (also when it has not
+  changed). It is not sent again when Claude reconnects.
 - Diffs: when Claude's Edit or Write tool asks for permission, a diff opens
   in Neovim. You can edit the proposal before accepting; Claude writes
   exactly what you accept. The terminal prompt stays active too, and

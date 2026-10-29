@@ -18,7 +18,8 @@
 # driver accepts in Neovim. The driver checks the effects in Neovim and on disk, sends lines of a
 # scratch buffer (by its nvim://buffer/ id) the same way, with one more prompt, then the same lines
 # again once that prompt was answered, whose next prompt must carry them again (Claude and OpenCode
-# use a selection for one prompt only), then a charwise Visual selection with a typed :'<,'>AgentSend
+# use a selection for one prompt only; Claude's TUI must also show them again after the user
+# dismissed them with backspace), then a charwise Visual selection with a typed :'<,'>AgentSend
 # (the characters selected must reach the agent, not whole lines), stops the agent (its provider
 # stops with it and removes its lock/discovery file), tears down, and checks that no
 # lock/discovery files or temp dirs are left.

@@ -46,7 +46,10 @@
 --      request carries them again. Claude drops the selection when a prompt is submitted (its TUI
 --      stops showing it), and OpenCode attaches one to a single prompt and ignores one that did not
 --      change: agent.nvim sends it again anyway (checked on the wire for every :AgentSend: to
---      OpenCode always after a copy with other text). Copilot attaches it to every prompt; Gemini's
+--      Claude and OpenCode always after a copy they take as another selection). Claude only: the
+--      user then dismisses it (backspace on its [⧉ 2 lines selected] in the prompt) and sends the
+--      same lines once more, which its TUI must show again (Claude ignores a selection that matches
+--      the one dismissed; the copy is another one). Copilot attaches it to every prompt; Gemini's
 --      editor context is unchanged, so the model's (its full context and the changes Gemini added
 --      since) still has it
 --   9. :'<,'>AgentSend typed from a charwise Visual selection of a.txt (v): the provider sends the
@@ -375,6 +378,9 @@ K.claude = {
   no_selection = 'In a.txt',
   buffer_selection = '⧉ 2 lines selected',
   cleared_on_submit = true,
+  -- Backspace on the empty prompt removes the selection's [⧉ ...] (dismissed: Claude then ignores
+  -- the same selection until another one comes).
+  dismiss = '\127',
   wire = function(path)
     return claude_wire('claude', path)
   end,
@@ -929,13 +935,14 @@ local function send_selection(sel, pre, shows, how)
   local d = delivered[#delivered]
   check(pre .. 'the provider sent the selection (send_context)', #delivered > ndelivered and d.sent
     and d.path == sel.path and d.text == sel.text, inspect1(vim.list_slice(delivered, ndelivered + 1)))
-  -- Claude, OpenCode: selection_changed, also when it is the one sent last; to OpenCode always
-  -- after a copy with other text ('' <-> ' '), since it ignores one that did not change and keeps
-  -- its selection across reconnects.
+  -- Claude, OpenCode: selection_changed, also when it is the one sent last, always right after a
+  -- copy the agent takes as another selection. OpenCode's has other text ('' <-> ' '): it ignores
+  -- one that did not change and keeps its selection across reconnects. Claude's has a space more:
+  -- it ignores one that matches the selection the user dismissed.
   if d and d.notified then
-    local want = kind == 'opencode' and { sel.text == '' and ' ' or '', sel.text } or { sel.text }
-    check(pre .. 'the provider sent selection_changed' .. (kind == 'opencode' and ', after a copy with other text'
-      or ''), vim.deep_equal(d.notified, want), inspect1(d.notified))
+    local copy = kind == 'opencode' and (sel.text == '' and ' ' or '') or sel.text .. ' '
+    check(pre .. 'the provider sent selection_changed, after a copy the agent takes as another selection',
+      vim.deep_equal(d.notified, { copy, sel.text }), inspect1(d.notified))
   end
   check(('%sthe agent got %s lines %d-%d on the wire (%s)'):format(pre, sel.path, sel.l1, sel.l2, wire_name),
     wait_until(20000, function()
@@ -1136,7 +1143,7 @@ end, 'Done.'))
 -- 8. :AgentSend of the same lines again, now that the prompt was answered: the next prompt carries
 --    them too. Claude drops the selection when a prompt is submitted; OpenCode attaches one to a
 --    single prompt and ignores one that did not change (file, range, text): the provider sends it
---    again anyway (to OpenCode after a copy with other text). Copilot attaches the latest one to
+--    again anyway (after a copy they take as another selection). Copilot attaches the latest one to
 --    every prompt; Gemini adds only what changed to the editor context, so the model's still has it.
 if R.cleared_on_submit then
   check('(again) the agent dropped the selection when the prompt was submitted (TUI: no ' .. R.selection .. ')',
@@ -1149,6 +1156,21 @@ vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
 feed('Vj', 'nx!')
 vim.wait(500)
 send_selection(BSEL, '(again) ', R.buffer_selection)
+-- Claude: the user dismisses it (backspace on its [⧉ 2 lines selected] in the prompt), then sends
+-- the same lines once more. Claude ignores a selection that matches the one dismissed until another
+-- one comes: it shows them again because the provider sends a copy first.
+if R.dismiss then
+  terminal.send(R.dismiss, { bracketed = false })
+  check('(dismissed) backspace removed the selection from the prompt (TUI: no ' .. R.buffer_selection .. ')',
+    wait_until(5000, function()
+      return tty():find(R.buffer_selection, 1, true) == nil
+    end, 'the selection gone from the TUI'))
+  vim.api.nvim_set_current_win(main_win)
+  vim.api.nvim_win_set_cursor(main_win, { 1, 0 })
+  feed('Vj', 'nx!')
+  vim.wait(500)
+  send_selection(BSEL, '(dismissed, sent again) ', R.buffer_selection)
+end
 terminal.send(PROMPT_AGAIN, { submit = true, submit_delay_ms = 400 })
 ok = wait_until(60000, function()
   return carried(PROMPT_AGAIN, BSEL)
